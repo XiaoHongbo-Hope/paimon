@@ -375,14 +375,15 @@ public class CloneActionITCase extends ActionITCaseBase {
         tEnv.executeSql("USE CATALOG sourcecat");
 
         tEnv.executeSql(
-                "CREATE TABLE t (\n"
-                        + "  pt STRING,\n"
-                        + "  k INT,\n"
-                        + "  v INT,\n"
-                        + "  PRIMARY KEY (pt, k) NOT ENFORCED\n"
-                        + ") PARTITIONED BY (pt) WITH (\n"
-                        + "  'changelog-producer' = 'lookup'\n"
-                        + ")").await();
+                        "CREATE TABLE t (\n"
+                                + "  pt STRING,\n"
+                                + "  k INT,\n"
+                                + "  v INT,\n"
+                                + "  PRIMARY KEY (pt, k) NOT ENFORCED\n"
+                                + ") PARTITIONED BY (pt) WITH (\n"
+                                + "  'changelog-producer' = 'lookup'\n"
+                                + ")")
+                .await();
         tEnv.executeSql(
                         "INSERT INTO t VALUES "
                                 + "('one', 1, 10), "
