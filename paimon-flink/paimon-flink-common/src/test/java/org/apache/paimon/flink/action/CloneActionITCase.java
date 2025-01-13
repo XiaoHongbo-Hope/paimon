@@ -382,14 +382,14 @@ public class CloneActionITCase extends ActionITCaseBase {
                         + "  PRIMARY KEY (pt, k) NOT ENFORCED\n"
                         + ") PARTITIONED BY (pt) WITH (\n"
                         + "  'changelog-producer' = 'lookup'\n"
-                        + ")");
+                        + ")").await();
         tEnv.executeSql(
                         "INSERT INTO t VALUES "
                                 + "('one', 1, 10), "
                                 + "('one', 2, 20), "
                                 + "('two', 1, 100)")
                 .await();
-        tEnv.executeSql("ALTER TABLE t ADD v2 STRING AFTER v");
+        tEnv.executeSql("ALTER TABLE t ADD v2 STRING AFTER v").await();
         tEnv.executeSql(
                         "INSERT INTO t VALUES "
                                 + "('one', 2, 21, 'apple'), "
