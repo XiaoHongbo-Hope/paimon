@@ -61,7 +61,9 @@ import org.apache.paimon.rest.responses.GetViewResponse;
 import org.apache.paimon.rest.responses.ListBranchesResponse;
 import org.apache.paimon.rest.responses.ListDatabasesResponse;
 import org.apache.paimon.rest.responses.ListPartitionsResponse;
+import org.apache.paimon.rest.responses.ListTableDetailsResponse;
 import org.apache.paimon.rest.responses.ListTablesResponse;
+import org.apache.paimon.rest.responses.ListViewDetailsResponse;
 import org.apache.paimon.rest.responses.ListViewsResponse;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
@@ -79,15 +81,19 @@ import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.testcontainers.shaded.com.google.common.collect.ImmutableMap;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -101,8 +107,13 @@ import static org.apache.paimon.rest.RESTObjectMapper.OBJECT_MAPPER;
 /** Mock REST server for testing. */
 public class RESTCatalogServer {
 
+    private static final Logger LOG = LoggerFactory.getLogger(RESTCatalogServer.class);
+
     private static final String PREFIX = "paimon";
     private static final String DATABASE_URI = String.format("/v1/%s/databases", PREFIX);
+    public static final int DEFAULT_MAX_RESULTS = 100;
+    public static final String MAX_RESULTS = "maxResults";
+    public static final String PAGE_TOKEN = "pageToken";
 
     private final FileSystemCatalog catalog;
     private final Dispatcher dispatcher;
@@ -190,7 +201,15 @@ public class RESTCatalogServer {
                             throw new Catalog.DatabaseNotExistException(databaseName);
                         }
                         boolean isViews = resources.length == 2 && "views".equals(resources[1]);
+                        boolean isViewsPaged =
+                                resources.length == 2 && resources[1].startsWith("views?");
+                        boolean isViewsDetails =
+                                resources.length == 2 && resources[1].startsWith("view-details");
                         boolean isTables = resources.length == 2 && "tables".equals(resources[1]);
+                        boolean isTablesPaged =
+                                resources.length == 2 && resources[1].startsWith("tables?");
+                        boolean isTableDetails =
+                                resources.length == 2 && resources[1].startsWith("table-details");
                         boolean isTableRename =
                                 resources.length == 3
                                         && "tables".equals(resources[1])
@@ -224,6 +243,10 @@ public class RESTCatalogServer {
                                 resources.length == 4
                                         && "tables".equals(resources[1])
                                         && "partitions".equals(resources[3]);
+                        boolean isPartitionsPaged =
+                                resources.length == 4
+                                        && "tables".equals(resources[1])
+                                        && resources[3].startsWith("partitions?");
 
                         boolean isDropPartitions =
                                 resources.length == 5
@@ -253,7 +276,8 @@ public class RESTCatalogServer {
                         if (isPartitions
                                 || isDropPartitions
                                 || isAlterPartitions
-                                || isMarkDonePartitions) {
+                                || isMarkDonePartitions
+                                || isPartitionsPaged) {
                             String tableName = resources[2];
                             Optional<MockResponse> error =
                                     checkTablePartitioned(
@@ -276,6 +300,8 @@ public class RESTCatalogServer {
                             return new MockResponse().setResponseCode(200);
                         } else if (isPartitions) {
                             return partitionsApiHandler(request, identifier);
+                        } else if (isPartitionsPaged) {
+                            return partitionsPagedApiHandler(request, identifier);
                         } else if (isBranches) {
                             FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
                             BranchManager branchManager = table.branchManager();
@@ -323,8 +349,16 @@ public class RESTCatalogServer {
                             return tableApiHandler(request, identifier);
                         } else if (isTables) {
                             return tablesApiHandler(request, databaseName);
+                        } else if (isTablesPaged) {
+                            return tablesPagedApiHandler(request, databaseName);
+                        } else if (isTableDetails) {
+                            return tableDetailsApiHandler(request, databaseName);
                         } else if (isViews) {
                             return viewsApiHandler(request, databaseName);
+                        } else if (isViewsPaged) {
+                            return viewsPagedApiHandler(request, databaseName);
+                        } else if (isViewsDetails) {
+                            return viewDetailsApiHandler(request, databaseName);
                         } else if (isViewRename) {
                             return renameViewApiHandler(request);
                         } else if (isView) {
@@ -586,13 +620,7 @@ public class RESTCatalogServer {
         if (databaseStore.containsKey(databaseName)) {
             switch (request.getMethod()) {
                 case "GET":
-                    List<String> tables = new ArrayList<>();
-                    for (Map.Entry<String, TableMetadata> entry : tableMetadataStore.entrySet()) {
-                        Identifier identifier = Identifier.fromString(entry.getKey());
-                        if (databaseName.equals(identifier.getDatabaseName())) {
-                            tables.add(identifier.getTableName());
-                        }
-                    }
+                    List<String> tables = listTables(databaseName);
                     response = new ListTablesResponse(tables);
                     return mockResponse(response, 200);
                 case "POST":
@@ -623,6 +651,145 @@ public class RESTCatalogServer {
         }
         return mockResponse(
                 new ErrorResponse(ErrorResponseResourceType.DATABASE, null, "", 404), 404);
+    }
+
+    private List<String> listTables(String databaseName) {
+        List<String> tables = new ArrayList<>();
+        for (Map.Entry<String, TableMetadata> entry : tableMetadataStore.entrySet()) {
+            Identifier identifier = Identifier.fromString(entry.getKey());
+            if (databaseName.equals(identifier.getDatabaseName())) {
+                tables.add(identifier.getTableName());
+            }
+        }
+        return tables;
+    }
+
+    private List<GetTableResponse> listTableDetails(String databaseName) {
+        List<GetTableResponse> tableDetails = new ArrayList<>();
+        for (Map.Entry<String, TableMetadata> entry : tableMetadataStore.entrySet()) {
+            Identifier identifier = Identifier.fromString(entry.getKey());
+            if (databaseName.equals(identifier.getDatabaseName())) {
+                GetTableResponse getTableResponse =
+                        new GetTableResponse(
+                                entry.getValue().uuid(),
+                                identifier.getTableName(),
+                                entry.getValue().isExternal(),
+                                entry.getValue().schema().id(),
+                                entry.getValue().schema().toSchema());
+                tableDetails.add(getTableResponse);
+            }
+        }
+        return tableDetails;
+    }
+
+    private MockResponse tablesPagedApiHandler(RecordedRequest request, String databaseName) {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())) {
+
+            List<String> tables = listTables(databaseName);
+            if (!tables.isEmpty()) {
+                int maxResults;
+                try {
+                    maxResults = getMaxResults(request);
+                } catch (Exception e) {
+                    LOG.error(
+                            "parse maxResults {} to int failed",
+                            request.getRequestUrl().queryParameter(MAX_RESULTS));
+                    return new MockResponse().setResponseCode(400);
+                }
+                String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+
+                List<String> sortedTables =
+                        tables.stream().sorted(String::compareTo).collect(Collectors.toList());
+                if (maxResults > sortedTables.size() && pageToken == null) {
+                    response = new ListTablesResponse(sortedTables, null);
+                } else {
+                    response = generateListTablesResponse(sortedTables, maxResults, pageToken);
+                }
+            } else {
+                response = new ListTablesResponse(new ArrayList<>(), null);
+            }
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
+        }
+    }
+
+    private ListTablesResponse generateListTablesResponse(
+            List<String> sortedTables, int maxResults, String pageToken) {
+        List<String> pagedTables = new ArrayList<>();
+        for (String sortedTable : sortedTables) {
+            if (pagedTables.size() < maxResults) {
+                if (pageToken == null) {
+                    pagedTables.add(sortedTable);
+                } else if (sortedTable.compareTo(pageToken) > 0) {
+                    pagedTables.add(sortedTable);
+                }
+            } else {
+                break;
+            }
+        }
+        String nextPageToken = getNextPageTokenForNames(pagedTables, maxResults);
+        return new ListTablesResponse(pagedTables, nextPageToken);
+    }
+
+    private MockResponse tableDetailsApiHandler(RecordedRequest request, String databaseName) {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())) {
+
+            List<GetTableResponse> tableDetails = listTableDetails(databaseName);
+            if (!tableDetails.isEmpty()) {
+                int maxResults;
+                try {
+                    maxResults = getMaxResults(request);
+                } catch (Exception e) {
+                    LOG.error(
+                            "parse maxResults {} to int failed",
+                            request.getRequestUrl().queryParameter(MAX_RESULTS));
+                    return new MockResponse().setResponseCode(400);
+                }
+                String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+                List<GetTableResponse> sortedTableDetails =
+                        tableDetails.stream()
+                                .sorted(Comparator.comparing(GetTableResponse::getName))
+                                .collect(Collectors.toList());
+
+                if (maxResults > sortedTableDetails.size() && pageToken == null) {
+                    response = new ListTableDetailsResponse(sortedTableDetails, null);
+                } else {
+                    response =
+                            generateListTableDetailsResponse(
+                                    sortedTableDetails, maxResults, pageToken);
+                }
+            } else {
+                response = new ListTableDetailsResponse(Collections.emptyList(), null);
+            }
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
+        }
+    }
+
+    private ListTableDetailsResponse generateListTableDetailsResponse(
+            List<GetTableResponse> sortedTableDetails, int maxResults, String pageToken) {
+        List<GetTableResponse> pagedTableDetails = new ArrayList<>();
+        for (GetTableResponse getTableResponse : sortedTableDetails) {
+            if (pagedTableDetails.size() < maxResults) {
+                if (pageToken == null) {
+                    pagedTableDetails.add(getTableResponse);
+                } else if (getTableResponse.getName().compareTo(pageToken) > 0) {
+                    pagedTableDetails.add(getTableResponse);
+                }
+            } else {
+                break;
+            }
+        }
+        String nextPageToken = getNextPageTokenForTables(pagedTableDetails, maxResults);
+        return new ListTableDetailsResponse(pagedTableDetails, nextPageToken);
     }
 
     private boolean isFormatTable(Schema schema) {
@@ -708,19 +875,69 @@ public class RESTCatalogServer {
         }
     }
 
+    private MockResponse partitionsPagedApiHandler(
+            RecordedRequest request, Identifier tableIdentifier) {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())) {
+            List<Partition> partitions = tablePartitionsStore.get(tableIdentifier.getFullName());
+            if (Objects.nonNull(partitions) && !partitions.isEmpty()) {
+                int maxResults;
+                try {
+                    maxResults = getMaxResults(request);
+                } catch (Exception e) {
+                    LOG.error(
+                            "parse maxResults {} to int failed",
+                            request.getRequestUrl().queryParameter(MAX_RESULTS));
+                    return new MockResponse().setResponseCode(400);
+                }
+                String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+
+                List<Partition> sortedPartitions =
+                        partitions.stream()
+                                .sorted(Comparator.comparing(this::getPartitionSortKey))
+                                .collect(Collectors.toList());
+
+                if ((maxResults > sortedPartitions.size()) && pageToken == null) {
+                    response = new ListPartitionsResponse(sortedPartitions, null);
+                } else {
+                    response =
+                            generateListPartitionsResponse(sortedPartitions, maxResults, pageToken);
+                }
+            } else {
+                response = new ListPartitionsResponse(Collections.emptyList(), null);
+            }
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
+        }
+    }
+
+    private ListPartitionsResponse generateListPartitionsResponse(
+            List<Partition> sortedPartitions, int maxResults, String pageToken) {
+        List<Partition> pagedPartitions = new ArrayList<>();
+        for (Partition partition : sortedPartitions) {
+            if (pagedPartitions.size() < maxResults) {
+                if (pageToken == null) {
+                    pagedPartitions.add(partition);
+                } else if (getPartitionSortKey(partition).compareTo(pageToken) > 0) {
+                    pagedPartitions.add(partition);
+                }
+            } else {
+                break;
+            }
+        }
+        String nextPageToken = getNextPageTokenForPartitions(pagedPartitions, maxResults);
+        return new ListPartitionsResponse(pagedPartitions, nextPageToken);
+    }
+
     private MockResponse viewsApiHandler(RecordedRequest request, String databaseName)
             throws Exception {
         RESTResponse response;
         switch (request.getMethod()) {
             case "GET":
-                List<String> views =
-                        viewStore.keySet().stream()
-                                .map(Identifier::fromString)
-                                .filter(
-                                        identifier ->
-                                                identifier.getDatabaseName().equals(databaseName))
-                                .map(Identifier::getTableName)
-                                .collect(Collectors.toList());
+                List<String> views = listViews(databaseName);
                 response = new ListViewsResponse(views);
                 return mockResponse(response, 200);
             case "POST":
@@ -744,6 +961,140 @@ public class RESTCatalogServer {
                 return new MockResponse().setResponseCode(200);
             default:
                 return new MockResponse().setResponseCode(404);
+        }
+    }
+
+    private List<String> listViews(String databaseName) {
+        return viewStore.keySet().stream()
+                .map(Identifier::fromString)
+                .filter(identifier -> identifier.getDatabaseName().equals(databaseName))
+                .map(Identifier::getTableName)
+                .collect(Collectors.toList());
+    }
+
+    private List<GetViewResponse> listViewDetails(String databaseName) {
+        return viewStore.keySet().stream()
+                .map(Identifier::fromString)
+                .filter(identifier -> identifier.getDatabaseName().equals(databaseName))
+                .map(
+                        identifier -> {
+                            View view = viewStore.get(identifier.getFullName());
+                            ViewSchema schema =
+                                    new ViewSchema(
+                                            view.rowType().getFields(),
+                                            view.query(),
+                                            view.dialects(),
+                                            view.comment().orElse(null),
+                                            view.options());
+                            return new GetViewResponse("id", identifier.getTableName(), schema);
+                        })
+                .collect(Collectors.toList());
+    }
+
+    private MockResponse viewsPagedApiHandler(RecordedRequest request, String databaseName) {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())) {
+
+            List<String> views = listViews(databaseName);
+            if (!views.isEmpty()) {
+                int maxResults;
+                try {
+                    maxResults = getMaxResults(request);
+                } catch (Exception e) {
+                    LOG.error(
+                            "parse maxResults {} to int failed",
+                            request.getRequestUrl().queryParameter(MAX_RESULTS));
+                    return new MockResponse().setResponseCode(400);
+                }
+                String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+
+                List<String> sortedViews =
+                        views.stream().sorted(String::compareTo).collect(Collectors.toList());
+
+                if ((maxResults > sortedViews.size()) && pageToken == null) {
+                    response = new ListViewsResponse(sortedViews, null);
+                } else {
+                    response = generateListViewsResponse(sortedViews, maxResults, pageToken);
+                }
+            } else {
+                response = new ListViewsResponse(Collections.emptyList(), null);
+            }
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
+        }
+    }
+
+    private ListViewsResponse generateListViewsResponse(
+            List<String> sortedViews, int maxResults, String pageToken) {
+        List<String> pagedViews = new ArrayList<>();
+        for (String view : sortedViews) {
+            if (pagedViews.size() < maxResults) {
+                if (pageToken == null) {
+                    pagedViews.add(view);
+                } else if (view.compareTo(pageToken) > 0) {
+                    pagedViews.add(view);
+                }
+            } else {
+                break;
+            }
+        }
+        String nextPageToken = getNextPageTokenForNames(pagedViews, maxResults);
+        return new ListViewsResponse(pagedViews, nextPageToken);
+    }
+
+    private MockResponse viewDetailsApiHandler(RecordedRequest request, String databaseName) {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())) {
+
+            List<GetViewResponse> viewDetails = listViewDetails(databaseName);
+            if (!viewDetails.isEmpty()) {
+
+                int maxResults;
+                try {
+                    maxResults = getMaxResults(request);
+                } catch (Exception e) {
+                    LOG.error(
+                            "parse maxResults {} to int failed",
+                            request.getRequestUrl().queryParameter(MAX_RESULTS));
+                    return new MockResponse().setResponseCode(400);
+                }
+                String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+
+                List<GetViewResponse> sortedViewDetails =
+                        viewDetails.stream()
+                                .sorted(Comparator.comparing(GetViewResponse::getName))
+                                .collect(Collectors.toList());
+
+                if ((maxResults > sortedViewDetails.size()) && pageToken == null) {
+                    response = new ListViewDetailsResponse(sortedViewDetails, null);
+                } else {
+                    List<GetViewResponse> pagedViewDetails = new ArrayList<>();
+                    for (GetViewResponse getViewResponse : sortedViewDetails) {
+                        if (pagedViewDetails.size() < maxResults) {
+                            if (pageToken == null) {
+                                pagedViewDetails.add(getViewResponse);
+                                pageToken = getViewResponse.getName();
+                            } else if (getViewResponse.getName().compareTo(pageToken) > 0) {
+                                pagedViewDetails.add(getViewResponse);
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    String nextPageToken = getNextPageTokenForViews(pagedViewDetails, maxResults);
+                    response = new ListViewDetailsResponse(pagedViewDetails, nextPageToken);
+                }
+            } else {
+                response = new ListViewsResponse(Collections.emptyList(), null);
+            }
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
         }
     }
 
@@ -944,5 +1295,65 @@ public class RESTCatalogServer {
     private Partition spec2Partition(Map<String, String> spec) {
         // todo: need update
         return new Partition(spec, 123, 456, 789, 123);
+    }
+
+    private static int getMaxResults(RecordedRequest request) {
+        String strMaxResults = request.getRequestUrl().queryParameter(MAX_RESULTS);
+        Integer maxResults =
+                Objects.nonNull(strMaxResults) ? Integer.parseInt(strMaxResults) : null;
+        if (Objects.isNull(maxResults) || maxResults <= 0) {
+            maxResults = DEFAULT_MAX_RESULTS;
+        } else {
+            maxResults = Math.min(maxResults, DEFAULT_MAX_RESULTS);
+        }
+        return maxResults;
+    }
+
+    private String getNextPageTokenForNames(List<String> names, Integer maxResults) {
+        if (names == null
+                || names.isEmpty()
+                || Objects.isNull(maxResults)
+                || names.size() < maxResults) {
+            return null;
+        }
+        // return the last name
+        return names.get(names.size() - 1);
+    }
+
+    private String getNextPageTokenForTables(List<GetTableResponse> entities, Integer maxResults) {
+        if (entities == null
+                || entities.isEmpty()
+                || Objects.isNull(maxResults)
+                || entities.size() < maxResults) {
+            return null;
+        }
+        // return the last entity name
+        return entities.get(entities.size() - 1).getName();
+    }
+
+    private String getNextPageTokenForViews(List<GetViewResponse> entities, Integer maxResults) {
+        if (entities == null
+                || entities.isEmpty()
+                || Objects.isNull(maxResults)
+                || entities.size() < maxResults) {
+            return null;
+        }
+        // return the last entity name
+        return entities.get(entities.size() - 1).getName();
+    }
+
+    private String getNextPageTokenForPartitions(List<Partition> entities, Integer maxResults) {
+        if (entities == null
+                || entities.isEmpty()
+                || Objects.isNull(maxResults)
+                || entities.size() < maxResults) {
+            return null;
+        }
+        // return the last entity name
+        return getPartitionSortKey(entities.get(entities.size() - 1));
+    }
+
+    private String getPartitionSortKey(Partition partition) {
+        return partition.spec().toString().replace("{", "").replace("}", "");
     }
 }
