@@ -19,6 +19,7 @@
 package org.apache.paimon.rest;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.PagedList;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.catalog.Database;
@@ -50,7 +51,9 @@ import org.apache.paimon.rest.responses.GetTableTokenResponse;
 import org.apache.paimon.rest.responses.GetViewResponse;
 import org.apache.paimon.rest.responses.ListDatabasesResponse;
 import org.apache.paimon.rest.responses.ListPartitionsResponse;
+import org.apache.paimon.rest.responses.ListTableDetailsResponse;
 import org.apache.paimon.rest.responses.ListTablesResponse;
+import org.apache.paimon.rest.responses.ListViewDetailsResponse;
 import org.apache.paimon.rest.responses.ListViewsResponse;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
@@ -67,13 +70,17 @@ import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.testcontainers.shaded.com.google.common.collect.ImmutableMap;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static org.apache.paimon.rest.RESTObjectMapper.OBJECT_MAPPER;
 import static org.apache.paimon.utils.SnapshotManagerTest.createSnapshotWithMillis;
@@ -81,8 +88,13 @@ import static org.apache.paimon.utils.SnapshotManagerTest.createSnapshotWithMill
 /** Mock REST server for testing. */
 public class RESTCatalogServer {
 
+    private static final Logger LOG = LoggerFactory.getLogger(RESTCatalogServer.class);
+
     private static final String PREFIX = "paimon";
     private static final String DATABASE_URI = String.format("/v1/%s/databases", PREFIX);
+    public static final int DEFAULT_MAX_RESULTS = 100;
+    public static final String MAX_RESULTS = "maxResults";
+    public static final String PAGE_TOKEN = "pageToken";
 
     private final Catalog catalog;
     private final Dispatcher dispatcher;
@@ -136,7 +148,15 @@ public class RESTCatalogServer {
                                         .split("/");
                         String databaseName = resources[0];
                         boolean isViews = resources.length == 2 && "views".equals(resources[1]);
+                        boolean isViewsPaged =
+                                resources.length == 2 && resources[1].startsWith("views?");
+                        boolean isViewsDetails =
+                                resources.length == 2 && resources[1].startsWith("view-details");
                         boolean isTables = resources.length == 2 && "tables".equals(resources[1]);
+                        boolean isTablesPaged =
+                                resources.length == 2 && resources[1].startsWith("tables?");
+                        boolean isTableDetails =
+                                resources.length == 2 && resources[1].startsWith("table-details");
                         boolean isTableRename =
                                 resources.length == 3
                                         && "tables".equals(resources[1])
@@ -170,6 +190,10 @@ public class RESTCatalogServer {
                                 resources.length == 4
                                         && "tables".equals(resources[1])
                                         && "partitions".equals(resources[3]);
+                        boolean isPartitionsPaged =
+                                resources.length == 4
+                                        && "tables".equals(resources[1])
+                                        && resources[3].startsWith("partitions?");
 
                         boolean isDropPartitions =
                                 resources.length == 5
@@ -240,6 +264,16 @@ public class RESTCatalogServer {
                                 return error.get();
                             }
                             return partitionsApiHandler(catalog, request, databaseName, tableName);
+                        } else if (isPartitionsPaged) {
+                            String tableName = resources[2];
+                            Optional<MockResponse> error =
+                                    checkTablePartitioned(
+                                            catalog, Identifier.create(databaseName, tableName));
+                            if (error.isPresent()) {
+                                return error.get();
+                            }
+                            return partitionsPagedApiHandler(
+                                    catalog, request, databaseName, tableName);
                         } else if (isTableToken) {
                             GetTableTokenResponse getTableTokenResponse =
                                     new GetTableTokenResponse(
@@ -278,8 +312,16 @@ public class RESTCatalogServer {
                             return tableApiHandler(catalog, request, databaseName, tableName);
                         } else if (isTables) {
                             return tablesApiHandler(catalog, request, databaseName);
+                        } else if (isTablesPaged) {
+                            return tablesPagedApiHandler(catalog, request, databaseName);
+                        } else if (isTableDetails) {
+                            return tableDetailsApiHandler(catalog, request, databaseName);
                         } else if (isViews) {
                             return viewsApiHandler(catalog, request, databaseName);
+                        } else if (isViewsPaged) {
+                            return viewsPagedApiHandler(catalog, request, databaseName);
+                        } else if (isViewsDetails) {
+                            return viewDetailsApiHandler(catalog, request, databaseName);
                         } else if (isViewRename) {
                             return renameViewApiHandler(catalog, request);
                         } else if (isView) {
@@ -470,6 +512,76 @@ public class RESTCatalogServer {
         }
     }
 
+    private static MockResponse tablesPagedApiHandler(
+            Catalog catalog, RecordedRequest request, String databaseName) throws Exception {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())
+                && (Objects.nonNull(request.getRequestUrl().queryParameter(MAX_RESULTS))
+                        || Objects.nonNull(request.getRequestUrl().queryParameter(PAGE_TOKEN)))) {
+
+            int maxResults;
+            try {
+                maxResults = getMaxResults(request);
+            } catch (Exception e) {
+                LOG.error(
+                        "parse maxResults {} to int failed",
+                        request.getRequestUrl().queryParameter(MAX_RESULTS));
+                return new MockResponse().setResponseCode(400);
+            }
+            String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+
+            PagedList<String> pagedTableList =
+                    catalog.listTablesPaged(databaseName, maxResults, pageToken);
+            response =
+                    new ListTablesResponse(
+                            pagedTableList.getPagedLists(), pagedTableList.getNextPageToken());
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
+        }
+    }
+
+    private static MockResponse tableDetailsApiHandler(
+            Catalog catalog, RecordedRequest request, String databaseName) throws Exception {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())) {
+            int maxResults;
+            try {
+                maxResults = getMaxResults(request);
+            } catch (Exception e) {
+                LOG.error(
+                        "parse maxResults {} to int failed",
+                        request.getRequestUrl().queryParameter(MAX_RESULTS));
+                return new MockResponse().setResponseCode(400);
+            }
+            String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+            PagedList<Table> pagedTableDetailsList =
+                    catalog.listTableDetailsPaged(databaseName, maxResults, pageToken);
+            response =
+                    new ListTableDetailsResponse(
+                            pagedTableDetailsList.getPagedLists().stream()
+                                    .map(
+                                            table ->
+                                                    new GetTableResponse(
+                                                            table.uuid(),
+                                                            table.name(),
+                                                            false,
+                                                            ((FileStoreTable) table).schema().id(),
+                                                            ((FileStoreTable) table)
+                                                                    .schema()
+                                                                    .toSchema()))
+                                    .collect(Collectors.toList()),
+                            pagedTableDetailsList.getNextPageToken());
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
+        }
+    }
+
     private static MockResponse tableApiHandler(
             Catalog catalog, RecordedRequest request, String databaseName, String tableName)
             throws Exception {
@@ -522,6 +634,37 @@ public class RESTCatalogServer {
         }
     }
 
+    private static MockResponse partitionsPagedApiHandler(
+            Catalog catalog, RecordedRequest request, String databaseName, String tableName)
+            throws Exception {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())
+                && (Objects.nonNull(request.getRequestUrl().queryParameter(MAX_RESULTS))
+                        || Objects.nonNull(request.getRequestUrl().queryParameter(PAGE_TOKEN)))) {
+            int maxResults;
+            try {
+                maxResults = getMaxResults(request);
+            } catch (Exception e) {
+                LOG.error(
+                        "parse maxResults {} to int failed",
+                        request.getRequestUrl().queryParameter(MAX_RESULTS));
+                return new MockResponse().setResponseCode(400);
+            }
+            String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+            PagedList<Partition> pagedTableList =
+                    catalog.listPartitionsPaged(
+                            Identifier.create(databaseName, tableName), maxResults, pageToken);
+            response =
+                    new ListPartitionsResponse(
+                            pagedTableList.getPagedLists(), pagedTableList.getNextPageToken());
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
+        }
+    }
+
     private static MockResponse viewsApiHandler(
             Catalog catalog, RecordedRequest request, String databaseName) throws Exception {
         RESTResponse response;
@@ -546,6 +689,75 @@ public class RESTCatalogServer {
                 return new MockResponse().setResponseCode(200);
             default:
                 return new MockResponse().setResponseCode(404);
+        }
+    }
+
+    private static MockResponse viewsPagedApiHandler(
+            Catalog catalog, RecordedRequest request, String databaseName) throws Exception {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())
+                && (Objects.nonNull(request.getRequestUrl().queryParameter(MAX_RESULTS))
+                        || Objects.nonNull(request.getRequestUrl().queryParameter(PAGE_TOKEN)))) {
+            int maxResults;
+            try {
+                maxResults = getMaxResults(request);
+            } catch (Exception e) {
+                LOG.error(
+                        "parse maxResults {} to int failed",
+                        request.getRequestUrl().queryParameter(MAX_RESULTS));
+                return new MockResponse().setResponseCode(400);
+            }
+            String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+            PagedList<String> pagedTableList =
+                    catalog.listViewsPaged(databaseName, maxResults, pageToken);
+            response =
+                    new ListViewsResponse(
+                            pagedTableList.getPagedLists(), pagedTableList.getNextPageToken());
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
+        }
+    }
+
+    private static MockResponse viewDetailsApiHandler(
+            Catalog catalog, RecordedRequest request, String databaseName) throws Exception {
+        RESTResponse response;
+        if (Objects.nonNull(request)
+                && "GET".equals(request.getMethod())
+                && Objects.nonNull(request.getRequestUrl())) {
+            int maxResults;
+            try {
+                maxResults = getMaxResults(request);
+            } catch (Exception e) {
+                LOG.error(
+                        "parse maxResults {} to int failed",
+                        request.getRequestUrl().queryParameter(MAX_RESULTS));
+                return new MockResponse().setResponseCode(400);
+            }
+            String pageToken = request.getRequestUrl().queryParameter(PAGE_TOKEN);
+            PagedList<View> pagedTableDetailsList =
+                    catalog.listViewDetailsPaged(databaseName, maxResults, pageToken);
+            response =
+                    new ListViewDetailsResponse(
+                            pagedTableDetailsList.getPagedLists().stream()
+                                    .map(
+                                            view ->
+                                                    new GetViewResponse(
+                                                            "id",
+                                                            view.name(),
+                                                            new ViewSchema(
+                                                                    view.rowType().getFields(),
+                                                                    view.query(),
+                                                                    view.dialects(),
+                                                                    view.comment().orElse(null),
+                                                                    view.options())))
+                                    .collect(Collectors.toList()),
+                            pagedTableDetailsList.getNextPageToken());
+            return mockResponse(response, 200);
+        } else {
+            return new MockResponse().setResponseCode(404);
         }
     }
 
@@ -626,5 +838,17 @@ public class RESTCatalogServer {
                 warehouseStr,
                 "header.test-header",
                 "test-value");
+    }
+
+    private static int getMaxResults(RecordedRequest request) {
+        String strMaxResults = request.getRequestUrl().queryParameter(MAX_RESULTS);
+        Integer maxResults =
+                Objects.nonNull(strMaxResults) ? Integer.parseInt(strMaxResults) : null;
+        if (Objects.isNull(maxResults) || maxResults <= 0) {
+            maxResults = DEFAULT_MAX_RESULTS;
+        } else {
+            maxResults = Math.min(maxResults, DEFAULT_MAX_RESULTS);
+        }
+        return maxResults;
     }
 }
