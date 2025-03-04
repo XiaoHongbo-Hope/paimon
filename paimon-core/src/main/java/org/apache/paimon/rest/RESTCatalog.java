@@ -87,6 +87,7 @@ import org.apache.paimon.view.ViewSchema;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
 import org.apache.paimon.shade.guava30.com.google.common.collect.Maps;
 
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -295,7 +296,7 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
                             databaseName,
                             queryParams);
                 }
-            } while (pageToken != null);
+            } while (StringUtils.isNotEmpty(pageToken));
             return tables;
         } catch (NoSuchResourceException e) {
             throw new DatabaseNotExistException(databaseName);
@@ -358,32 +359,16 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
                         response.getTableDetails().stream()
                                 .map(
                                         getTableResponse -> {
-                                            Identifier identifier =
-                                                    Identifier.create(
-                                                            databaseName,
-                                                            getTableResponse.getName());
                                             try {
-                                                return CatalogUtils.loadTable(
-                                                        this,
-                                                        identifier,
-                                                        path -> fileIOForData(path, identifier),
-                                                        this::fileIOFromOptions,
-                                                        tableIdentifier -> {
-                                                            TableSchema schema =
-                                                                    TableSchema.create(
-                                                                            getTableResponse
-                                                                                    .getSchemaId(),
-                                                                            getTableResponse
-                                                                                    .getSchema());
-                                                            return new TableMetadata(
-                                                                    schema,
-                                                                    getTableResponse.isExternal(),
-                                                                    getTableResponse.getId());
-                                                        },
-                                                        null,
-                                                        null);
+                                                return loadTableByResponse(
+                                                        getTableResponse, databaseName);
                                             } catch (TableNotExistException e) {
-                                                LOG.error("Failed to load table {}", identifier, e);
+                                                LOG.error(
+                                                        "load table {}.{} by response {} failed",
+                                                        databaseName,
+                                                        getTableResponse.getName(),
+                                                        getTableResponse,
+                                                        e);
                                                 throw new RuntimeException(e);
                                             }
                                         })
@@ -716,7 +701,7 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
                             identifier.getTableName(),
                             queryParams);
                 }
-            } while (pageToken != null);
+            } while (StringUtils.isNotEmpty(pageToken));
             return partitions;
         } catch (NoSuchResourceException e) {
             throw new TableNotExistException(identifier);
@@ -903,7 +888,7 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
             String pageToken = null;
             Map<String, String> queryParams = Maps.newHashMap();
             Integer maxResults = context.options().get(RESTCatalogOptions.REST_PAGE_MAX_RESULTS);
-            if (maxResults != null) {
+            if (Objects.nonNull(maxResults) && maxResults > 0) {
                 queryParams.put(MAX_RESULTS, String.valueOf(maxResults));
             }
             List<String> views = new ArrayList<>();
@@ -924,7 +909,7 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
                             databaseName,
                             queryParams);
                 }
-            } while (pageToken != null);
+            } while (StringUtils.isNotEmpty(pageToken));
             return views;
         } catch (NoSuchResourceException e) {
             throw new DatabaseNotExistException(databaseName);
@@ -1060,5 +1045,26 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
         }
 
         return refreshExecutor;
+    }
+
+    private Table loadTableByResponse(GetTableResponse getTableResponse, String databaseName)
+            throws TableNotExistException {
+        Identifier identifier = Identifier.create(databaseName, getTableResponse.getName());
+        TableMetadata.Loader tableMetaDataLoader =
+                tableIdentifier -> {
+                    TableSchema schema =
+                            TableSchema.create(
+                                    getTableResponse.getSchemaId(), getTableResponse.getSchema());
+                    return new TableMetadata(
+                            schema, getTableResponse.isExternal(), getTableResponse.getId());
+                };
+        return CatalogUtils.loadTable(
+                this,
+                identifier,
+                path -> fileIOForData(path, identifier),
+                this::fileIOFromOptions,
+                tableMetaDataLoader,
+                null,
+                null);
     }
 }

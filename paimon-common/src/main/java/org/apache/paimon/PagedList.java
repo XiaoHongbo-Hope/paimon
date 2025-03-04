@@ -18,11 +18,10 @@
 
 package org.apache.paimon;
 
-import java.io.Serializable;
 import java.util.List;
 
 /** Paged List which supports request data from page streaming. */
-public class PagedList<T> implements Serializable {
+public class PagedList<T> {
     private final List<T> pagedLists;
 
     private final String nextPageToken;

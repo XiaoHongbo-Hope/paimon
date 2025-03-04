@@ -144,8 +144,9 @@ class RESTCatalogTest extends CatalogTestBase {
                         Identifier.create(databaseName, tableName), DEFAULT_TABLE_SCHEMA, false);
             }
 
+            String[] sortedTableNames = Arrays.stream(tableNames).sorted().toArray(String[]::new);
             restTables = restCatalog.listTables(databaseName);
-            assertThat(restTables).containsExactlyInAnyOrder(tableNames);
+            assertThat(restTables).containsExactly(sortedTableNames);
 
             // List tables throws DatabaseNotExistException when the database does not exist
             assertThatExceptionOfType(Catalog.DatabaseNotExistException.class)
@@ -175,9 +176,10 @@ class RESTCatalogTest extends CatalogTestBase {
         }
 
         // when maxResults is null or 0, the page length is set to a server configured value
+        String[] sortedTableNames = Arrays.stream(tableNames).sorted().toArray(String[]::new);
         pagedTables = catalog.listTablesPaged(databaseName, null, null);
         List<String> tables = pagedTables.getPagedLists();
-        assertThat(tables).containsExactlyInAnyOrder(tableNames);
+        assertThat(tables).containsExactly(sortedTableNames);
         assertNull(pagedTables.getNextPageToken());
 
         // when maxResults is greater than 0, the page length is the minimum of this value and a
@@ -317,12 +319,11 @@ class RESTCatalogTest extends CatalogTestBase {
             }
 
             // when maxResults is null or 0, the page length is set to a server configured value
-            views = restCatalog.listViews(databaseName);
             restViews = restCatalog.listViews(databaseName);
         }
 
-        assertThat(views).containsExactlyInAnyOrder(viewNames);
-        assertThat(restViews).containsExactlyInAnyOrder(viewNames);
+        String[] sortedViewNames = Arrays.stream(viewNames).sorted().toArray(String[]::new);
+        assertThat(restViews).containsExactly(sortedViewNames);
 
         options.set(RESTCatalogOptions.REST_PAGE_MAX_RESULTS.key(), "dummy");
         try (RESTCatalog dummyCatalog = new RESTCatalog(CatalogContext.create(options))) {
@@ -355,7 +356,7 @@ class RESTCatalogTest extends CatalogTestBase {
         }
 
         pagedViews = catalog.listViewsPaged(databaseName, null, null);
-        assertThat(pagedViews.getPagedLists()).containsExactlyInAnyOrder(viewNames);
+        assertThat(pagedViews.getPagedLists()).containsExactly(sortedViewNames);
         assertNull(pagedViews.getNextPageToken());
 
         int maxResults = 2;
@@ -509,8 +510,11 @@ class RESTCatalogTest extends CatalogTestBase {
             restCatalog.createPartitions(identifier, partitionSpecs);
 
             List<Partition> restPartitions = restCatalog.listPartitions(identifier);
-            assertThat(restPartitions.stream().map(Partition::spec))
-                    .containsExactlyInAnyOrder(partitionSpecs.toArray(new Map[] {}));
+            Map[] sortedSpecs =
+                    partitionSpecs.stream()
+                            .sorted(Comparator.comparing(i -> i.get("dt")))
+                            .toArray(Map[]::new);
+            assertThat(restPartitions.stream().map(Partition::spec)).containsExactly(sortedSpecs);
 
             assertThatExceptionOfType(Catalog.TableNotExistException.class)
                     .isThrownBy(
@@ -553,8 +557,11 @@ class RESTCatalogTest extends CatalogTestBase {
 
         catalog.createPartitions(identifier, partitionSpecs);
         PagedList<Partition> pagedPartitions = catalog.listPartitionsPaged(identifier, null, null);
-        assertPagedPartitions(
-                pagedPartitions, partitionSpecs.size(), partitionSpecs.toArray(new Map[0]));
+        Map[] sortedSpecs =
+                partitionSpecs.stream()
+                        .sorted(Comparator.comparing(i -> i.get("dt")))
+                        .toArray(Map[]::new);
+        assertPagedPartitions(pagedPartitions, partitionSpecs.size(), sortedSpecs);
 
         int maxResults = 2;
         pagedPartitions = catalog.listPartitionsPaged(identifier, maxResults, null);
@@ -584,10 +591,7 @@ class RESTCatalogTest extends CatalogTestBase {
 
         maxResults = 8;
         pagedPartitions = catalog.listPartitionsPaged(identifier, maxResults, null);
-        Map[] sortedSpecs =
-                partitionSpecs.stream()
-                        .sorted(Comparator.comparing(i -> i.get("dt")))
-                        .toArray(Map[]::new);
+
         assertPagedPartitions(
                 pagedPartitions, Math.min(maxResults, partitionSpecs.size()), sortedSpecs);
         assertNull(pagedPartitions.getNextPageToken());

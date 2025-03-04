@@ -26,6 +26,8 @@ import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.view.View;
 
+import javax.annotation.Nullable;
+
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -146,7 +148,8 @@ public interface Catalog extends AutoCloseable {
      *     token
      * @throws DatabaseNotExistException if the database does not exist
      */
-    PagedList<String> listTablesPaged(String databaseName, Integer maxResults, String pageToken)
+    PagedList<String> listTablesPaged(
+            String databaseName, @Nullable Integer maxResults, @Nullable String pageToken)
             throws DatabaseNotExistException;
 
     /**
@@ -166,7 +169,7 @@ public interface Catalog extends AutoCloseable {
      * @throws DatabaseNotExistException if the database does not exist
      */
     PagedList<Table> listTableDetailsPaged(
-            String databaseName, Integer maxResults, String pageToken)
+            String databaseName, @Nullable Integer maxResults, @Nullable String pageToken)
             throws DatabaseNotExistException;
 
     /**
@@ -328,7 +331,7 @@ public interface Catalog extends AutoCloseable {
      * @throws TableNotExistException if the table does not exist
      */
     PagedList<Partition> listPartitionsPaged(
-            Identifier identifier, Integer maxResults, String pageToken)
+            Identifier identifier, @Nullable Integer maxResults, @Nullable String pageToken)
             throws TableNotExistException;
 
     // ======================= view methods ===============================
@@ -397,7 +400,7 @@ public interface Catalog extends AutoCloseable {
      * @throws DatabaseNotExistException if the database does not exist
      */
     default PagedList<String> listViewsPaged(
-            String databaseName, Integer maxResults, String pageToken)
+            String databaseName, @Nullable Integer maxResults, @Nullable String pageToken)
             throws DatabaseNotExistException {
         return new PagedList<>(listViews(databaseName), null);
     }
@@ -417,7 +420,7 @@ public interface Catalog extends AutoCloseable {
      * @throws DatabaseNotExistException if the database does not exist
      */
     default PagedList<View> listViewDetailsPaged(
-            String databaseName, Integer maxResults, String pageToken)
+            String databaseName, @Nullable Integer maxResults, @Nullable String pageToken)
             throws DatabaseNotExistException {
         return new PagedList<>(Collections.emptyList(), null);
     }
