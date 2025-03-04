@@ -314,6 +314,7 @@ class RESTCatalogTest extends CatalogTestBase {
             View view = buildView(databaseName);
             viewNames = new String[] {"view1", "view2", "view3", "abd", "def", "opr", "xyz"};
 
+
             for (String viewName : viewNames) {
                 restCatalog.createView(Identifier.create(databaseName, viewName), view, false);
             }
