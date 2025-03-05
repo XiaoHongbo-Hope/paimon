@@ -291,6 +291,7 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
                             "response of listTables for {} is null with params {}",
                             databaseName,
                             queryParams);
+                    pageToken = null;
                 }
             } while (StringUtils.isNotEmpty(pageToken));
             return tables;
@@ -680,6 +681,7 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
                             identifier.getDatabaseName(),
                             identifier.getTableName(),
                             queryParams);
+                    pageToken = null;
                 }
             } while (StringUtils.isNotEmpty(pageToken));
             return partitions;
@@ -878,6 +880,7 @@ public class RESTCatalog implements Catalog, SupportsSnapshots, SupportsBranches
                             "response of listViews for {} is null with params {}",
                             databaseName,
                             queryParams);
+                    pageToken = null;
                 }
             } while (StringUtils.isNotEmpty(pageToken));
             return views;
