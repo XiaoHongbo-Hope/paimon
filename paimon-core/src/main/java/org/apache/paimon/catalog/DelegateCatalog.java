@@ -24,9 +24,11 @@ import org.apache.paimon.partition.Partition;
 import org.apache.paimon.partition.PartitionStatistics;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableSnapshot;
 import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewChange;
 
 import javax.annotation.Nullable;
 
@@ -135,9 +137,20 @@ public abstract class DelegateCatalog implements Catalog {
     }
 
     @Override
+    public boolean supportsVersionManagement() {
+        return wrapped.supportsVersionManagement();
+    }
+
+    @Override
     public Optional<TableSnapshot> loadSnapshot(Identifier identifier)
             throws TableNotExistException {
         return wrapped.loadSnapshot(identifier);
+    }
+
+    @Override
+    public void rollbackTo(Identifier identifier, Instant instant)
+            throws Catalog.TableNotExistException {
+        wrapped.rollbackTo(identifier, instant);
     }
 
     @Override
@@ -237,6 +250,12 @@ public abstract class DelegateCatalog implements Catalog {
     public void renameView(Identifier fromView, Identifier toView, boolean ignoreIfNotExists)
             throws ViewNotExistException, ViewAlreadyExistException {
         wrapped.renameView(fromView, toView, ignoreIfNotExists);
+    }
+
+    @Override
+    public void alterView(Identifier view, List<ViewChange> viewChanges, boolean ignoreIfNotExists)
+            throws ViewNotExistException, DialectAlreadyExistException, DialectNotExistException {
+        wrapped.alterView(view, viewChanges, ignoreIfNotExists);
     }
 
     @Override

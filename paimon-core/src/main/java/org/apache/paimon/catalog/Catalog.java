@@ -25,10 +25,11 @@ import org.apache.paimon.partition.Partition;
 import org.apache.paimon.partition.PartitionStatistics;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableSnapshot;
-import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewChange;
 
 import javax.annotation.Nullable;
 
@@ -437,6 +438,21 @@ public interface Catalog extends AutoCloseable {
         throw new UnsupportedOperationException();
     }
 
+    /**
+     * Alter a view.
+     *
+     * @param view identifier of the view to alter
+     * @param viewChanges - changes of view
+     * @param ignoreIfNotExists
+     * @throws ViewNotExistException if the view does not exist
+     * @throws DialectAlreadyExistException if the dialect already exists
+     * @throws DialectNotExistException if the dialect not exists
+     */
+    default void alterView(Identifier view, List<ViewChange> viewChanges, boolean ignoreIfNotExists)
+            throws ViewNotExistException, DialectAlreadyExistException, DialectNotExistException {
+        throw new UnsupportedOperationException();
+    }
+
     // ======================= repair methods ===============================
 
     /**
@@ -463,7 +479,60 @@ public interface Catalog extends AutoCloseable {
         throw new UnsupportedOperationException();
     }
 
-    // ==================== Branch methods ==========================
+    // ==================== Version management methods ==========================
+
+    /**
+     * Whether this catalog supports version management for tables. If not, corresponding methods
+     * will throw an {@link UnsupportedOperationException}, affect the following methods:
+     *
+     * <ul>
+     *   <li>{@link #commitSnapshot(Identifier, Snapshot, List)}.
+     *   <li>{@link #loadSnapshot(Identifier)}.
+     *   <li>{@link #rollbackTo(Identifier, Instant)}.
+     *   <li>{@link #createBranch(Identifier, String, String)}.
+     *   <li>{@link #dropBranch(Identifier, String)}.
+     *   <li>{@link #listBranches(Identifier)}.
+     * </ul>
+     */
+    boolean supportsVersionManagement();
+
+    /**
+     * Commit the {@link Snapshot} for table identified by the given {@link Identifier}.
+     *
+     * @param identifier Path of the table
+     * @param snapshot Snapshot to be committed
+     * @param statistics statistics information of this change
+     * @return Success or not
+     * @throws Catalog.TableNotExistException if the target does not exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    boolean commitSnapshot(
+            Identifier identifier, Snapshot snapshot, List<PartitionStatistics> statistics)
+            throws Catalog.TableNotExistException;
+
+    /**
+     * Return the snapshot of table identified by the given {@link Identifier}.
+     *
+     * @param identifier Path of the table
+     * @return The requested snapshot of the table
+     * @throws Catalog.TableNotExistException if the target does not exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    Optional<TableSnapshot> loadSnapshot(Identifier identifier)
+            throws Catalog.TableNotExistException;
+
+    /**
+     * rollback table by the given {@link Identifier} and instant.
+     *
+     * @param identifier path of the table
+     * @param instant like snapshotId or tagName
+     * @throws Catalog.TableNotExistException if the table does not exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
+     */
+    void rollbackTo(Identifier identifier, Instant instant) throws Catalog.TableNotExistException;
 
     /**
      * Create a new branch for this table. By default, an empty branch will be created using the
@@ -476,6 +545,8 @@ public interface Catalog extends AutoCloseable {
      * @throws TableNotExistException if the table in identifier doesn't exist
      * @throws BranchAlreadyExistException if the branch already exists
      * @throws TagNotExistException if the tag doesn't exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
      */
     void createBranch(Identifier identifier, String branch, @Nullable String fromTag)
             throws TableNotExistException, BranchAlreadyExistException, TagNotExistException;
@@ -486,6 +557,8 @@ public interface Catalog extends AutoCloseable {
      * @param identifier path of the table, cannot be system or branch name.
      * @param branch the branch name
      * @throws BranchNotExistException if the branch doesn't exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
      */
     void dropBranch(Identifier identifier, String branch) throws BranchNotExistException;
 
@@ -495,6 +568,8 @@ public interface Catalog extends AutoCloseable {
      * @param identifier path of the table, cannot be system or branch name.
      * @param branch the branch name
      * @throws BranchNotExistException if the branch doesn't exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
      */
     void fastForward(Identifier identifier, String branch) throws BranchNotExistException;
 
@@ -503,33 +578,10 @@ public interface Catalog extends AutoCloseable {
      *
      * @param identifier path of the table, cannot be system or branch name.
      * @throws TableNotExistException if the table in identifier doesn't exist
+     * @throws UnsupportedOperationException if the catalog does not {@link
+     *     #supportsVersionManagement()}
      */
     List<String> listBranches(Identifier identifier) throws TableNotExistException;
-
-    // ==================== Snapshot Operations ==========================
-
-    /**
-     * Commit the {@link Snapshot} for table identified by the given {@link Identifier}.
-     *
-     * @param identifier Path of the table
-     * @param snapshot Snapshot to be committed
-     * @param statistics statistics information of this change
-     * @return Success or not
-     * @throws Catalog.TableNotExistException if the target does not exist
-     */
-    boolean commitSnapshot(
-            Identifier identifier, Snapshot snapshot, List<PartitionStatistics> statistics)
-            throws Catalog.TableNotExistException;
-
-    /**
-     * Return the snapshot of table identified by the given {@link Identifier}.
-     *
-     * @param identifier Path of the table
-     * @return The requested snapshot of the table
-     * @throws Catalog.TableNotExistException if the target does not exist
-     */
-    Optional<TableSnapshot> loadSnapshot(Identifier identifier)
-            throws Catalog.TableNotExistException;
 
     // ==================== Partition Modifications ==========================
 
@@ -540,8 +592,8 @@ public interface Catalog extends AutoCloseable {
      * @param partitions partitions to be created
      * @throws TableNotExistException if the table does not exist
      */
-    default void createPartitions(Identifier identifier, List<Map<String, String>> partitions)
-            throws TableNotExistException {}
+    void createPartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException;
 
     /**
      * Drop partitions of the specify table. Ignore non-existent partitions.
@@ -550,15 +602,8 @@ public interface Catalog extends AutoCloseable {
      * @param partitions partitions to be deleted
      * @throws TableNotExistException if the table does not exist
      */
-    default void dropPartitions(Identifier identifier, List<Map<String, String>> partitions)
-            throws TableNotExistException {
-        Table table = getTable(identifier);
-        try (BatchTableCommit commit = table.newBatchWriteBuilder().newCommit()) {
-            commit.truncatePartitions(partitions);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
+    void dropPartitions(Identifier identifier, List<Map<String, String>> partitions)
+            throws TableNotExistException;
 
     /**
      * Alter partitions of the specify table. For non-existent partitions, partitions will be
@@ -568,8 +613,8 @@ public interface Catalog extends AutoCloseable {
      * @param partitions partitions to be altered
      * @throws TableNotExistException if the table does not exist
      */
-    default void alterPartitions(Identifier identifier, List<PartitionStatistics> partitions)
-            throws TableNotExistException {}
+    void alterPartitions(Identifier identifier, List<PartitionStatistics> partitions)
+            throws TableNotExistException;
 
     // ==================== Catalog Information ==========================
 
@@ -855,6 +900,34 @@ public interface Catalog extends AutoCloseable {
         }
     }
 
+    /** Exception for trying to add a dialect that already exists. */
+    class DialectAlreadyExistException extends Exception {
+
+        private static final String MSG = "Dialect %s in view %s already exists.";
+
+        private final Identifier identifier;
+        private final String dialect;
+
+        public DialectAlreadyExistException(Identifier identifier, String dialect) {
+            this(identifier, dialect, null);
+        }
+
+        public DialectAlreadyExistException(
+                Identifier identifier, String dialect, Throwable cause) {
+            super(String.format(MSG, dialect, identifier.getFullName()), cause);
+            this.identifier = identifier;
+            this.dialect = dialect;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+
+        public String dialect() {
+            return dialect;
+        }
+    }
+
     /** Exception for trying to create a branch that already exists. */
     class BranchAlreadyExistException extends Exception {
 
@@ -933,6 +1006,33 @@ public interface Catalog extends AutoCloseable {
 
         public String tag() {
             return tag;
+        }
+    }
+
+    /** Exception for trying to update dialect that doesn't exist. */
+    class DialectNotExistException extends Exception {
+
+        private static final String MSG = "Dialect %s in view %s doesn't exist.";
+
+        private final Identifier identifier;
+        private final String dialect;
+
+        public DialectNotExistException(Identifier identifier, String dialect) {
+            this(identifier, dialect, null);
+        }
+
+        public DialectNotExistException(Identifier identifier, String dialect, Throwable cause) {
+            super(String.format(MSG, dialect, identifier.getFullName()), cause);
+            this.identifier = identifier;
+            this.dialect = dialect;
+        }
+
+        public Identifier identifier() {
+            return identifier;
+        }
+
+        public String dialect() {
+            return dialect;
         }
     }
 }

@@ -18,7 +18,7 @@
 ---
 openapi: 3.0.1
 info:
-  title: RESTCatalog API
+  title: REST Catalog API
   description: This API exposes endpoints to RESTCatalog.
   license:
     name: Apache 2.0
@@ -182,6 +182,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConfigResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
   /v1/{prefix}/databases:
@@ -197,14 +203,12 @@ paths:
           schema:
             type: string
         - name: maxResults
-          in: path
-          required: false
+          in: query
           schema:
             type: integer
             format: int32
         - name: pageToken
-          in: path
-          required: false
+          in: query
           schema:
             type: string
       responses:
@@ -214,6 +218,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListDatabasesResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
     post:
@@ -234,11 +244,13 @@ paths:
               $ref: '#/components/schemas/CreateDatabaseRequest'
       responses:
         "200":
-          description: OK
+          description: Success, no content
+        "401":
+          description: Unauthorized
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CreateDatabaseResponse'
+                $ref: '#/components/schemas/ErrorResponse'
         "409":
           description: Resource has exist
           content:
@@ -271,6 +283,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetDatabaseResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -298,6 +316,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -335,6 +359,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AlterDatabaseResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -361,14 +391,12 @@ paths:
           schema:
             type: string
         - name: maxResults
-          in: path
-          required: false
+          in: query
           schema:
             type: integer
             format: int32
         - name: pageToken
-          in: path
-          required: false
+          in: query
           schema:
             type: string
       responses:
@@ -378,6 +406,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListTablesResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
     post:
@@ -404,6 +438,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
   /v1/{prefix}/databases/{database}/table-details:
@@ -424,14 +464,12 @@ paths:
           schema:
             type: string
         - name: maxResults
-          in: path
-          required: false
+          in: query
           schema:
             type: integer
             format: int32
         - name: pageToken
-          in: path
-          required: false
+          in: query
           schema:
             type: string
       responses:
@@ -441,6 +479,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListTableDetailsResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
   /v1/{prefix}/databases/{database}/tables/{table}:
@@ -472,6 +516,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetTableResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -515,6 +565,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "409":
           description: Resource has exist
           content:
@@ -553,6 +609,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
   /v1/{prefix}/tables/rename:
@@ -567,11 +629,6 @@ paths:
           required: true
           schema:
             type: string
-        - name: database
-          in: path
-          required: true
-          schema:
-            type: string
       requestBody:
         content:
           application/json:
@@ -580,6 +637,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -628,6 +691,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CommitTableResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -636,6 +705,50 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         "409":
           description: Resource has exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal Server Error
+  /v1/{prefix}/databases/{database}/tables/{table}/rollback:
+    post:
+      tags:
+        - table
+      summary: Rollback table
+      operationId: rollbackTable
+      parameters:
+        - name: prefix
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: database
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: table
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RollbackTableRequest'
+      responses:
+        "200":
+          description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Resource not found
           content:
             application/json:
               schema:
@@ -671,6 +784,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetTableDataTokenResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -708,6 +827,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetTableSnapshotResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -739,14 +864,12 @@ paths:
           schema:
             type: string
         - name: maxResults
-          in: path
-          required: false
+          in: query
           schema:
             type: integer
             format: int32
         - name: pageToken
-          in: path
-          required: false
+          in: query
           schema:
             type: string
       responses:
@@ -756,6 +879,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListPartitionsResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -768,7 +897,7 @@ paths:
     post:
       tags:
         - partition
-      summary: MarkDone partitions, for non-existent partitions, partitions will be created directly
+      summary: MarkDone partitions
       operationId: markDonePartitions
       parameters:
         - name: prefix
@@ -794,6 +923,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -831,6 +966,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListBranchesResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -868,6 +1009,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -906,6 +1053,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -949,6 +1102,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -981,14 +1140,12 @@ paths:
           schema:
             type: string
         - name: maxResults
-          in: path
-          required: false
+          in: query
           schema:
             type: integer
             format: int32
         - name: pageToken
-          in: path
-          required: false
+          in: query
           schema:
             type: string
       responses:
@@ -998,6 +1155,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListViewsResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
     post:
@@ -1024,6 +1187,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -1050,14 +1219,12 @@ paths:
           schema:
             type: string
         - name: maxResults
-          in: path
-          required: false
+          in: query
           schema:
             type: integer
             format: int32
         - name: pageToken
-          in: path
-          required: false
+          in: query
           schema:
             type: string
       responses:
@@ -1067,6 +1234,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListViewDetailsResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
   /v1/{prefix}/databases/{database}/views/{view}:
@@ -1098,6 +1271,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetViewResponse'
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -1106,6 +1285,53 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         "500":
           description: Internal Server Error
+    post:
+      tags:
+        - view
+      summary: Alter view
+      operationId: alterView
+      parameters:
+        - name: prefix
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: database
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: view
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlterViewRequest'
+      responses:
+        "200":
+          description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Resource not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     delete:
       tags:
         - view
@@ -1130,6 +1356,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -1158,6 +1390,12 @@ paths:
       responses:
         "200":
           description: Success, no content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         "404":
           description: Resource not found
           content:
@@ -1304,13 +1542,14 @@ components:
       properties:
         message:
           type: string
+        resourceType:
+          type: string
+          enum: ["DATABASE", "TABLE", "COLUMN", "SNAPSHOT", "BRANCH", "TAG", "VIEW", "DIALECT", "UNKNOWN"]
+        resourceName:
+          type: string
         code:
           type: integer
           format: int32
-        stack:
-          type: array
-          items:
-            type: string
     CreateTableRequest:
       type: object
       properties:
@@ -1325,6 +1564,80 @@ components:
           $ref: '#/components/schemas/Identifier'
         schema:
           $ref: '#/components/schemas/ViewSchema'
+    AlterViewRequest:
+      type: object
+      properties:
+        changes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ViewChange'
+    ViewChange:
+      anyOf:
+        - $ref: '#/components/schemas/SetViewOption'
+        - $ref: '#/components/schemas/RemoveViewOption'
+        - $ref: '#/components/schemas/UpdateViewComment'
+        - $ref: '#/components/schemas/AddDialect'
+        - $ref: '#/components/schemas/UpdateDialect'
+        - $ref: '#/components/schemas/DropDialect'
+      required:
+        - action
+      properties:
+        action:
+          type: string
+    SetViewOption:
+      type: object
+      properties:
+        action:
+          type: string
+          const: "setOption"
+        key:
+          type: string
+        value:
+          type: string
+    RemoveViewOption:
+      type: object
+      properties:
+        action:
+          type: string
+          const: "removeOption"
+        key:
+          type: string
+    UpdateViewComment:
+      type: object
+      properties:
+        action:
+          type: string
+          const: "comment"
+        key:
+          type: string
+    AddDialect:
+      type: object
+      properties:
+        action:
+          type: string
+          const: "addDialect"
+        dialect:
+          type: string
+        query:
+          type: string
+    UpdateDialect:
+      type: object
+      properties:
+        action:
+          type: string
+          const: "updateDialect"
+        dialect:
+          type: string
+        query:
+          type: string
+    DropDialect:
+      type: object
+      properties:
+        action:
+          type: string
+          const: "dropDialect"
+        dialect:
+          type: string
     DataField:
       type: object
       properties:
@@ -1391,9 +1704,7 @@ components:
       properties:
         database:
           type: string
-        table:
-          type: string
-        branch:
+        object:
           type: string
     Schema:
       type: object
@@ -1423,6 +1734,8 @@ components:
           type: string
         name:
           type: string
+        path:
+          type: string
         isExternal:
           type: boolean
         schemaId:
@@ -1430,8 +1743,6 @@ components:
           format: int64
         schema:
           $ref: '#/components/schemas/Schema'
-        uuid:
-          type: string
         owner:
           type: string
         createdAt:
@@ -1454,12 +1765,17 @@ components:
         - $ref: '#/components/schemas/UpdateColumnType'
         - $ref: '#/components/schemas/UpdateColumnPosition'
         - $ref: '#/components/schemas/UpdateColumnNullability'
+      required:
+        - action
+      properties:
+        action:
+          type: string
     SetOption:
       type: object
       properties:
         action:
           type: string
-          enum: ["setOption"]
+          const: "setOption"
         key:
           type: string
         value:
@@ -1469,7 +1785,7 @@ components:
       properties:
         action:
           type: string
-          enum: ["removeOption"]
+          const: "removeOption"
         key:
           type: string
     UpdateComment:
@@ -1477,7 +1793,7 @@ components:
       properties:
         action:
           type: string
-          enum: ["updateComment"]
+          const: "updateComment"
         comment:
           type: string
     AddColumn:
@@ -1485,7 +1801,7 @@ components:
       properties:
         action:
           type: string
-          enum: ["addColumn"]
+          const: "addColumn"
         fieldNames:
           type: array
           items:
@@ -1501,7 +1817,7 @@ components:
       properties:
         action:
           type: string
-          enum: ["renameColumn"]
+          const: "renameColumn"
         fieldNames:
           type: array
           items:
@@ -1513,7 +1829,7 @@ components:
       properties:
         action:
           type: string
-          enum: ["dropColumn"]
+          const: "dropColumn"
         fieldNames:
           type: array
           items:
@@ -1523,7 +1839,7 @@ components:
       properties:
         action:
           type: string
-          enum: [ "updateColumnComment" ]
+          const: "updateColumnComment"
         fieldNames:
           type: array
           items:
@@ -1535,7 +1851,7 @@ components:
       properties:
         action:
           type: string
-          enum: [ "updateColumnType" ]
+          const: "updateColumnType"
         fieldNames:
           type: array
           items:
@@ -1549,7 +1865,7 @@ components:
       properties:
         action:
           type: string
-          enum: [ "updateColumnPosition" ]
+          const: "updateColumnPosition"
         move:
           $ref: '#/components/schemas/Move'
     UpdateColumnNullability:
@@ -1557,7 +1873,7 @@ components:
       properties:
         action:
           type: string
-          enum: [ "update_column_nullability" ]
+          const: "update_column_nullability"
         fieldNames:
           type: array
           items:
@@ -1583,14 +1899,43 @@ components:
     CommitTableRequest:
       type: object
       properties:
-        identifier:
-          $ref: '#/components/schemas/Identifier'
         snapshot:
           $ref: '#/components/schemas/Snapshot'
         statistics:
           type: array
           items:
             $ref: '#/components/schemas/PartitionStatistics'
+    RollbackTableRequest:
+      type: object
+      properties:
+        instant:
+          $ref: '#/components/schemas/Instant'
+    Instant:
+      anyOf:
+        - $ref: '#/components/schemas/SnapshotInstant'
+        - $ref: '#/components/schemas/TagInstant'
+      required:
+        - type
+      properties:
+        type:
+          type: string
+    SnapshotInstant:
+      type: object
+      properties:
+        'type':
+          type: string
+          const: "snapshot"
+        snapshotId:
+          type: integer
+          format: int64
+    TagInstant:
+      type: object
+      properties:
+        'type':
+          type: string
+          const: "tag"
+        tagName:
+          type: string
     Snapshot:
       type: object
       properties:
@@ -1728,6 +2073,8 @@ components:
           type: string
         name:
           type: string
+        location:
+          type: string
         options:
           type: object
           additionalProperties:
@@ -1778,8 +2125,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Partition'
-          nextPageToken:
-            type: string
+        nextPageToken:
+          type: string
     CreateBranchRequest:
       type: object
       properties:
@@ -1826,8 +2173,8 @@ components:
           type: array
           items:
             type: string
-          nextPageToken:
-            type: string
+        nextPageToken:
+          type: string
     ListViewDetailsResponse:
       type: object
       properties:

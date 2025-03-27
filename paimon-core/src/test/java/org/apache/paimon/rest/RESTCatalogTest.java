@@ -42,12 +42,15 @@ import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.sink.BatchTableWrite;
 import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.table.sink.StreamTableCommit;
+import org.apache.paimon.table.sink.StreamTableWrite;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.Split;
 import org.apache.paimon.table.source.TableRead;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.view.View;
+import org.apache.paimon.view.ViewChange;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
@@ -80,12 +83,13 @@ import static org.apache.paimon.rest.auth.DLFAuthProvider.TOKEN_DATE_FORMATTER;
 import static org.apache.paimon.utils.SnapshotManagerTest.createSnapshotWithMillis;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** Base test class for {@link RESTCatalog}. */
-public abstract class RESTCatalogTestBase extends CatalogTestBase {
+public abstract class RESTCatalogTest extends CatalogTestBase {
 
     protected ConfigResponse config;
     protected Options options = new Options();
@@ -625,7 +629,7 @@ public abstract class RESTCatalogTestBase extends CatalogTestBase {
             }
             commit.commit(write.prepareCommit());
         }
-        assertThat(catalog.listPartitions(identifier).stream().map(Partition::spec))
+        assertThat(catalog.listPartitions(branchIdentifier).stream().map(Partition::spec))
                 .containsExactlyInAnyOrder(partitionSpecs.get(0), partitionSpecs.get(1));
     }
 
@@ -871,6 +875,37 @@ public abstract class RESTCatalogTestBase extends CatalogTestBase {
     }
 
     @Test
+    public void testTableRollback() throws Exception {
+        Identifier identifier = Identifier.create("test_rollback", "table_for_rollback");
+        createTable(identifier, Maps.newHashMap(), Lists.newArrayList("col1"));
+        FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
+        StreamTableWrite write = table.newWrite("commitUser");
+        StreamTableCommit commit = table.newCommit("commitUser");
+        for (int i = 0; i < 10; i++) {
+            GenericRow record = GenericRow.of(i);
+            write.write(record);
+            commit.commit(i, write.prepareCommit(false, i));
+            table.createTag("tag-" + i);
+        }
+        write.close();
+        commit.close();
+        long rollbackToSnapshotId = 4;
+        table.rollbackTo(rollbackToSnapshotId);
+        assertThat(table.snapshotManager().snapshot(rollbackToSnapshotId))
+                .isEqualTo(restCatalog.loadSnapshot(identifier).get().snapshot());
+        assertThat(table.tagManager().tagExists("tag-" + (rollbackToSnapshotId + 2))).isFalse();
+        assertThat(table.snapshotManager().snapshotExists(rollbackToSnapshotId + 1)).isFalse();
+
+        assertThrows(
+                IllegalArgumentException.class, () -> table.rollbackTo(rollbackToSnapshotId + 1));
+
+        String rollbackToTagName = "tag-" + (rollbackToSnapshotId - 1);
+        table.rollbackTo(rollbackToTagName);
+        Snapshot tagSnapshot = table.tagManager().getOrThrow(rollbackToTagName).trimToSnapshot();
+        assertThat(tagSnapshot).isEqualTo(restCatalog.loadSnapshot(identifier).get().snapshot());
+    }
+
+    @Test
     public void testDataTokenExpired() throws Exception {
         this.catalog = newRestCatalogWithDataToken();
         Identifier identifier =
@@ -925,6 +960,31 @@ public abstract class RESTCatalogTestBase extends CatalogTestBase {
         // read
         List<String> result = batchRead(tableTestWrite);
         assertThat(result).containsExactlyInAnyOrder("+I[5]", "+I[12]", "+I[18]");
+    }
+
+    @Test
+    public void testBranchBatchRecordsWrite() throws Exception {
+        Identifier tableIdentifier = Identifier.create("my_db", "my_table");
+
+        Identifier tableBranchIdentifier =
+                new Identifier(
+                        tableIdentifier.getDatabaseName(),
+                        tableIdentifier.getTableName(),
+                        "branch1");
+        createTable(tableIdentifier, Maps.newHashMap(), Lists.newArrayList("col1"));
+        FileStoreTable tableTestWrite = (FileStoreTable) catalog.getTable(tableIdentifier);
+        // write
+        batchWrite(tableTestWrite, Lists.newArrayList(12, 5, 18));
+        restCatalog.createBranch(tableIdentifier, tableBranchIdentifier.getBranchName(), null);
+        FileStoreTable branchTableTestWrite =
+                (FileStoreTable) catalog.getTable(tableBranchIdentifier);
+        batchWrite(branchTableTestWrite, Lists.newArrayList(1, 9, 2));
+        // read
+        List<String> result = batchRead(tableTestWrite);
+        List<String> branchResult = batchRead(branchTableTestWrite);
+        assertThat(result).containsExactlyInAnyOrder("+I[5]", "+I[12]", "+I[18]");
+        assertThat(branchResult)
+                .containsExactlyInAnyOrder("+I[5]", "+I[12]", "+I[18]", "+I[2]", "+I[1]", "+I[9]");
     }
 
     @Test
@@ -993,6 +1053,78 @@ public abstract class RESTCatalogTestBase extends CatalogTestBase {
 
         assertEquals(fetchTimes.get(), testData.size() / maxResults + 1);
         assertThat(fetchData).containsSequence(testData);
+    }
+
+    @Test
+    void testAlterView() throws Exception {
+        Identifier identifier = new Identifier("rest_catalog_db", "my_view");
+        View view = createView(identifier);
+        catalog.createDatabase(identifier.getDatabaseName(), false);
+        ViewChange.AddDialect addDialect =
+                (ViewChange.AddDialect)
+                        ViewChange.addDialect("flink_1", "SELECT * FROM FLINK_TABLE_1");
+        assertDoesNotThrow(() -> catalog.alterView(identifier, ImmutableList.of(addDialect), true));
+        assertThrows(
+                Catalog.ViewNotExistException.class,
+                () -> catalog.alterView(identifier, ImmutableList.of(addDialect), false));
+        catalog.createView(identifier, view, false);
+        // set options
+        String key = UUID.randomUUID().toString();
+        String value = UUID.randomUUID().toString();
+        ViewChange setOption = ViewChange.setOption(key, value);
+        catalog.alterView(identifier, ImmutableList.of(setOption), false);
+        View catalogView = catalog.getView(identifier);
+        assertThat(catalogView.options().get(key)).isEqualTo(value);
+
+        // remove options
+        catalog.alterView(identifier, ImmutableList.of(ViewChange.removeOption(key)), false);
+        catalogView = catalog.getView(identifier);
+        assertThat(catalogView.options().containsKey(key)).isEqualTo(false);
+
+        // update comment
+        String newComment = "new comment";
+        catalog.alterView(
+                identifier, ImmutableList.of(ViewChange.updateComment(newComment)), false);
+        catalogView = catalog.getView(identifier);
+        assertThat(catalogView.comment().get()).isEqualTo(newComment);
+        // add dialect
+        catalog.alterView(identifier, ImmutableList.of(addDialect), false);
+        catalogView = catalog.getView(identifier);
+        assertThat(catalogView.query(addDialect.dialect())).isEqualTo(addDialect.query());
+        assertThrows(
+                Catalog.DialectAlreadyExistException.class,
+                () -> catalog.alterView(identifier, ImmutableList.of(addDialect), false));
+
+        // update dialect
+        ViewChange.UpdateDialect updateDialect =
+                (ViewChange.UpdateDialect)
+                        ViewChange.updateDialect("flink_1", "SELECT * FROM FLINK_TABLE_2");
+        catalog.alterView(identifier, ImmutableList.of(updateDialect), false);
+        catalogView = catalog.getView(identifier);
+        assertThat(catalogView.query(updateDialect.dialect())).isEqualTo(updateDialect.query());
+        assertThrows(
+                Catalog.DialectNotExistException.class,
+                () ->
+                        catalog.alterView(
+                                identifier,
+                                ImmutableList.of(
+                                        ViewChange.updateDialect(
+                                                "no_exist", "SELECT * FROM FLINK_TABLE_2")),
+                                false));
+
+        // drop dialect
+        ViewChange.DropDialect dropDialect =
+                (ViewChange.DropDialect) ViewChange.dropDialect(updateDialect.dialect());
+        catalog.alterView(identifier, ImmutableList.of(dropDialect), false);
+        catalogView = catalog.getView(identifier);
+        assertThat(catalogView.query(dropDialect.dialect())).isEqualTo(catalogView.query());
+        assertThrows(
+                Catalog.DialectNotExistException.class,
+                () ->
+                        catalog.alterView(
+                                identifier,
+                                ImmutableList.of(ViewChange.dropDialect("no_exist")),
+                                false));
     }
 
     private TestPagedResponse generateTestPagedResponse(
@@ -1066,7 +1198,7 @@ public abstract class RESTCatalogTestBase extends CatalogTestBase {
                 true);
     }
 
-    protected abstract Catalog newRestCatalogWithDataToken();
+    protected abstract Catalog newRestCatalogWithDataToken() throws IOException;
 
     protected abstract void revokeTablePermission(Identifier identifier);
 

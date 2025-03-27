@@ -19,9 +19,7 @@
 package org.apache.paimon.table.source.snapshot;
 
 import org.apache.paimon.Snapshot;
-import org.apache.paimon.Snapshot.CommitKind;
 import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.FileKind;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFileMeta;
@@ -44,7 +42,6 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import java.util.stream.LongStream;
@@ -52,15 +49,18 @@ import java.util.stream.LongStream;
 import static org.apache.paimon.utils.ManifestReadThreadPool.randomlyExecuteSequentialReturn;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
-/** {@link StartingScanner} for incremental changes by snapshot. */
-public class IncrementalStartingScanner extends AbstractStartingScanner {
+/**
+ * Get incremental data by reading delta or changelog files from snapshots between start and end.
+ */
+public class IncrementalDeltaStartingScanner extends AbstractStartingScanner {
 
-    private static final Logger LOG = LoggerFactory.getLogger(IncrementalStartingScanner.class);
+    private static final Logger LOG =
+            LoggerFactory.getLogger(IncrementalDeltaStartingScanner.class);
 
     private final long endingSnapshotId;
     private final ScanMode scanMode;
 
-    public IncrementalStartingScanner(
+    public IncrementalDeltaStartingScanner(
             SnapshotManager snapshotManager, long start, long end, ScanMode scanMode) {
         super(snapshotManager);
         this.startingSnapshotId = start;
@@ -70,12 +70,7 @@ public class IncrementalStartingScanner extends AbstractStartingScanner {
 
     @Override
     public Result scan(SnapshotReader reader) {
-        // Check the validity of scan staring snapshotId.
-        Optional<Result> checkResult = checkScanSnapshotIdValidity();
-        if (checkResult.isPresent()) {
-            return checkResult.get();
-        }
-        Map<Pair<BinaryRow, Integer>, List<DataFileMeta>> grouped = new ConcurrentHashMap<>();
+        Map<Pair<BinaryRow, Integer>, List<ManifestEntry>> grouped = new ConcurrentHashMap<>();
         ManifestsReader manifestsReader = reader.manifestsReader();
 
         List<Long> snapshots =
@@ -89,13 +84,13 @@ public class IncrementalStartingScanner extends AbstractStartingScanner {
                             Snapshot snapshot = snapshotManager.snapshot(id);
                             switch (scanMode) {
                                 case DELTA:
-                                    if (snapshot.commitKind() != CommitKind.APPEND) {
+                                    if (snapshot.commitKind() != Snapshot.CommitKind.APPEND) {
                                         // ignore COMPACT and OVERWRITE
                                         return Collections.emptyList();
                                     }
                                     break;
                                 case CHANGELOG:
-                                    if (snapshot.commitKind() == CommitKind.OVERWRITE) {
+                                    if (snapshot.commitKind() == Snapshot.CommitKind.OVERWRITE) {
                                         // ignore OVERWRITE
                                         return Collections.emptyList();
                                     }
@@ -118,29 +113,28 @@ public class IncrementalStartingScanner extends AbstractStartingScanner {
             ManifestEntry entry = entries.next();
             checkArgument(
                     entry.kind() == FileKind.ADD, "Delta or changelog should only have ADD files.");
-            grouped.compute(
-                    Pair.of(entry.partition(), entry.bucket()),
-                    (key, files) -> {
-                        if (files == null) {
-                            files = new ArrayList<>();
-                        }
-                        files.add(entry.file());
-                        return files;
-                    });
+            grouped.computeIfAbsent(
+                            Pair.of(entry.partition(), entry.bucket()), ignore -> new ArrayList<>())
+                    .add(entry);
         }
 
         List<Split> result = new ArrayList<>();
-        for (Map.Entry<Pair<BinaryRow, Integer>, List<DataFileMeta>> entry : grouped.entrySet()) {
+        for (Map.Entry<Pair<BinaryRow, Integer>, List<ManifestEntry>> entry : grouped.entrySet()) {
             BinaryRow partition = entry.getKey().getLeft();
             int bucket = entry.getKey().getRight();
             String bucketPath = reader.pathFactory().bucketPath(partition, bucket).toString();
             for (SplitGenerator.SplitGroup splitGroup :
-                    reader.splitGenerator().splitForBatch(entry.getValue())) {
+                    reader.splitGenerator()
+                            .splitForBatch(
+                                    entry.getValue().stream()
+                                            .map(ManifestEntry::file)
+                                            .collect(Collectors.toList()))) {
                 DataSplit.Builder dataSplitBuilder =
                         DataSplit.builder()
                                 .withSnapshot(endingSnapshotId)
                                 .withPartition(partition)
                                 .withBucket(bucket)
+                                .withTotalBuckets(entry.getValue().get(0).totalBuckets())
                                 .withDataFiles(splitGroup.files)
                                 .rawConvertible(splitGroup.rawConvertible)
                                 .withBucketPath(bucketPath);
@@ -151,38 +145,41 @@ public class IncrementalStartingScanner extends AbstractStartingScanner {
         return StartingScanner.fromPlan(new PlanImpl(null, endingSnapshotId, result));
     }
 
-    /**
-     * Check the validity of staring snapshotId early.
-     *
-     * @return If the check passes return empty.
-     */
-    public Optional<Result> checkScanSnapshotIdValidity() {
-        Long earliestSnapshotId = snapshotManager.earliestSnapshotId();
-        Long latestSnapshotId = snapshotManager.latestSnapshotId();
-
-        if (earliestSnapshotId == null || latestSnapshotId == null) {
-            LOG.warn("There is currently no snapshot. Waiting for snapshot generation.");
-            return Optional.of(new NoSnapshot());
-        }
-
-        checkArgument(
-                startingSnapshotId <= endingSnapshotId,
-                "Starting snapshotId %s must less than ending snapshotId %s.",
-                startingSnapshotId,
-                endingSnapshotId);
+    public static StartingScanner betweenSnapshotIds(
+            long startId, long endId, SnapshotManager snapshotManager, ScanMode scanMode) {
+        long earliestSnapshotId = snapshotManager.earliestSnapshotId();
+        long latestSnapshotId = snapshotManager.latestSnapshotId();
 
         // because of the left open right closed rule of IncrementalStartingScanner that is
         // different from StaticFromStartingScanner, so we should allow starting snapshotId to be
         // equal to the earliestSnapshotId - 1.
         checkArgument(
-                startingSnapshotId >= earliestSnapshotId - 1
-                        && endingSnapshotId <= latestSnapshotId,
+                startId >= earliestSnapshotId - 1 && endId <= latestSnapshotId,
                 "The specified scan snapshotId range [%s, %s] is out of available snapshotId range [%s, %s].",
-                startingSnapshotId,
-                endingSnapshotId,
+                startId,
+                endId,
                 earliestSnapshotId,
                 latestSnapshotId);
 
-        return Optional.empty();
+        return new IncrementalDeltaStartingScanner(snapshotManager, startId, endId, scanMode);
+    }
+
+    public static IncrementalDeltaStartingScanner betweenTimestamps(
+            long startTimestamp,
+            long endTimestamp,
+            SnapshotManager snapshotManager,
+            ScanMode scanMode) {
+        Snapshot startingSnapshot = snapshotManager.earlierOrEqualTimeMills(startTimestamp);
+        Snapshot earliestSnapshot = snapshotManager.earliestSnapshot();
+        // if earliestSnapShot.timeMillis() > startTimestamp we should include the earliestSnapShot
+        long startId =
+                (startingSnapshot == null || earliestSnapshot.timeMillis() > startTimestamp)
+                        ? earliestSnapshot.id() - 1
+                        : startingSnapshot.id();
+
+        Snapshot endSnapshot = snapshotManager.earlierOrEqualTimeMills(endTimestamp);
+        long endId = endSnapshot == null ? snapshotManager.latestSnapshot().id() : endSnapshot.id();
+
+        return new IncrementalDeltaStartingScanner(snapshotManager, startId, endId, scanMode);
     }
 }

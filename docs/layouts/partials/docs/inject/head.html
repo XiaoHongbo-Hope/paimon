@@ -22,4 +22,7 @@ under the License.
 <link rel="stylesheet" type="text/css" href="{{.Site.BaseURL}}/font-awesome/css/font-awesome.min.css">
 <script src="{{.Site.BaseURL}}/js/anchor.min.js"></script>
 <script src="{{.Site.BaseURL}}/js/flink.js"></script>
-
+<!-- Only takes effect when the `redocPage` variable is true. -->
+{{ if .Params.redocPage }}
+    <script src="{{.Site.BaseURL}}/js/redoc.standalone.js"></script>
+{{ end }}

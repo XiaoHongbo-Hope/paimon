@@ -22,12 +22,13 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.partition.Partition;
 import org.apache.paimon.rest.requests.AlterDatabaseRequest;
 import org.apache.paimon.rest.requests.AlterTableRequest;
+import org.apache.paimon.rest.requests.AlterViewRequest;
 import org.apache.paimon.rest.requests.CreateDatabaseRequest;
 import org.apache.paimon.rest.requests.CreateTableRequest;
 import org.apache.paimon.rest.requests.CreateViewRequest;
 import org.apache.paimon.rest.requests.RenameTableRequest;
+import org.apache.paimon.rest.requests.RollbackTableRequest;
 import org.apache.paimon.rest.responses.AlterDatabaseResponse;
-import org.apache.paimon.rest.responses.CreateDatabaseResponse;
 import org.apache.paimon.rest.responses.GetDatabaseResponse;
 import org.apache.paimon.rest.responses.GetTableResponse;
 import org.apache.paimon.rest.responses.GetTableTokenResponse;
@@ -38,11 +39,13 @@ import org.apache.paimon.rest.responses.ListTablesResponse;
 import org.apache.paimon.rest.responses.ListViewsResponse;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
+import org.apache.paimon.table.Instant;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.view.ViewChange;
 import org.apache.paimon.view.ViewSchema;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
@@ -72,12 +75,6 @@ public class MockRESTMessage {
         return new CreateDatabaseRequest(name, options);
     }
 
-    public static CreateDatabaseResponse createDatabaseResponse(String name) {
-        Map<String, String> options = new HashMap<>();
-        options.put("a", "b");
-        return new CreateDatabaseResponse(name, options);
-    }
-
     public static GetDatabaseResponse getDatabaseResponse(String name) {
         Map<String, String> options = new HashMap<>();
         options.put("a", "b");
@@ -85,6 +82,7 @@ public class MockRESTMessage {
         return new GetDatabaseResponse(
                 UUID.randomUUID().toString(),
                 name,
+                "/tmp/",
                 options,
                 "owner",
                 System.currentTimeMillis(),
@@ -230,6 +228,7 @@ public class MockRESTMessage {
         return new GetTableResponse(
                 UUID.randomUUID().toString(),
                 "",
+                "/tmp/",
                 false,
                 1,
                 schema(options),
@@ -266,6 +265,25 @@ public class MockRESTMessage {
                 ImmutableMap.of("key", "value"), System.currentTimeMillis());
     }
 
+    public static RollbackTableRequest rollbackTableRequestBySnapshot(long snapshotId) {
+        return new RollbackTableRequest(Instant.snapshot(snapshotId));
+    }
+
+    public static RollbackTableRequest rollbackTableRequestByTag(String tagName) {
+        return new RollbackTableRequest(Instant.tag(tagName));
+    }
+
+    public static AlterViewRequest alterViewRequest() {
+        List<ViewChange> viewChanges = new ArrayList<>();
+        viewChanges.add(ViewChange.setOption("key", "value"));
+        viewChanges.add(ViewChange.removeOption("key"));
+        viewChanges.add(ViewChange.updateComment("comment"));
+        viewChanges.add(ViewChange.addDialect("dialect", "query"));
+        viewChanges.add(ViewChange.updateDialect("dialect", "query"));
+        viewChanges.add(ViewChange.dropDialect("dialect"));
+        return new AlterViewRequest(viewChanges);
+    }
+
     private static ViewSchema viewSchema() {
         List<DataField> fields =
                 Arrays.asList(
@@ -277,10 +295,6 @@ public class MockRESTMessage {
                 Collections.emptyMap(),
                 "comment",
                 Collections.singletonMap("pt", "1"));
-    }
-
-    private static Partition partition() {
-        return new Partition(Collections.singletonMap("pt", "1"), 1, 1, 1, 1, false);
     }
 
     private static Schema schema(Map<String, String> options) {

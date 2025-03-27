@@ -22,17 +22,16 @@ import org.apache.paimon.CoreOptions;
 import org.apache.paimon.FileStore;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.TestFileStore;
+import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.BinaryRowWriter;
 import org.apache.paimon.data.BinaryString;
-import org.apache.paimon.data.DataFormatTestUtil;
 import org.apache.paimon.data.GenericMap;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.data.JoinedRow;
 import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.disk.IOManager;
-import org.apache.paimon.fs.FileIOFinder;
 import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.fs.local.LocalFileIO;
@@ -78,12 +77,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.File;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -125,10 +121,12 @@ import static org.apache.paimon.utils.Preconditions.checkNotNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.params.provider.Arguments.arguments;
 
-/** Base test class for {@link FileStoreTable}. */
-public abstract class FileStoreTableTestBase {
+/**
+ * Base test class for simple table, simple representation means a fixed schema, see {@link
+ * #ROW_TYPE}.
+ */
+public abstract class SimpleTableTestBase {
 
     protected static final String BRANCH_NAME = "branch1";
 
@@ -144,14 +142,6 @@ public abstract class FileStoreTableTestBase {
                         DataTypes.MULTISET(DataTypes.VARCHAR(8))
                     },
                     new String[] {"pt", "a", "b", "c", "d", "e", "f"});
-
-    // for overwrite test
-    protected static final RowType OVERWRITE_TEST_ROW_TYPE =
-            RowType.of(
-                    new DataType[] {
-                        DataTypes.INT(), DataTypes.INT(), DataTypes.STRING(), DataTypes.STRING()
-                    },
-                    new String[] {"pk", "pt0", "pt1", "v"});
 
     protected static final int[] PROJECTION = new int[] {2, 1};
     protected static final Function<InternalRow, String> BATCH_ROW_TO_STRING =
@@ -189,16 +179,18 @@ public abstract class FileStoreTableTestBase {
     @TempDir java.nio.file.Path tempDir;
 
     protected Path tablePath;
+    protected Identifier identifier;
     protected String commitUser;
 
     @BeforeEach
-    public void before() {
-        tablePath = new Path(TraceableFileIO.SCHEME + "://" + tempDir.toString());
+    public void before() throws Exception {
+        identifier = Identifier.create("default", "table_test");
+        tablePath = new Path(String.format("%s://%s", TraceableFileIO.SCHEME, tempDir.toString()));
         commitUser = UUID.randomUUID().toString();
     }
 
     @AfterEach
-    public void after() throws IOException {
+    public void after() throws Exception {
         // assert all connections are closed
         Predicate<Path> pathPredicate = path -> path.toString().contains(tempDir.toString());
         assertThat(TraceableFileIO.openInputStreams(pathPredicate)).isEmpty();
@@ -275,62 +267,6 @@ public abstract class FileStoreTableTestBase {
                                 toSplits(table.newSnapshotReader().read().dataSplits()),
                                 BATCH_ROW_TO_STRING))
                 .containsExactlyElementsOf(expected);
-    }
-
-    @ParameterizedTest(name = "dynamic = {0}, partition={2}")
-    @MethodSource("overwriteTestData")
-    public void testOverwriteNothing(
-            boolean dynamicPartitionOverwrite,
-            List<InternalRow> overwriteData,
-            Map<String, String> overwritePartition,
-            List<String> expected)
-            throws Exception {
-        FileStoreTable table = overwriteTestFileStoreTable();
-        if (!dynamicPartitionOverwrite) {
-            table =
-                    table.copy(
-                            Collections.singletonMap(
-                                    CoreOptions.DYNAMIC_PARTITION_OVERWRITE.key(), "false"));
-        }
-
-        // prepare data
-        // (1, 1, 'A', 'Hi'), (2, 1, 'A', 'Hello'), (3, 1, 'A', 'World'),
-        // (4, 1, 'B', 'To'), (5, 1, 'B', 'Apache'), (6, 1, 'B', 'Paimon')
-        // (7, 2, 'A', 'Test')
-        // (8, 2, 'B', 'Case')
-        try (StreamTableWrite write = table.newWrite(commitUser);
-                InnerTableCommit commit = table.newCommit(commitUser)) {
-            write.write(overwriteRow(1, 1, "A", "Hi"));
-            write.write(overwriteRow(2, 1, "A", "Hello"));
-            write.write(overwriteRow(3, 1, "A", "World"));
-            write.write(overwriteRow(4, 1, "B", "To"));
-            write.write(overwriteRow(5, 1, "B", "Apache"));
-            write.write(overwriteRow(6, 1, "B", "Paimon"));
-            write.write(overwriteRow(7, 2, "A", "Test"));
-            write.write(overwriteRow(8, 2, "B", "Case"));
-            commit.commit(0, write.prepareCommit(true, 0));
-        }
-
-        // overwrite data
-        try (StreamTableWrite write = table.newWrite(commitUser).withIgnorePreviousFiles(true);
-                InnerTableCommit commit = table.newCommit(commitUser)) {
-            for (InternalRow row : overwriteData) {
-                write.write(row);
-            }
-            commit.withOverwrite(overwritePartition).commit(1, write.prepareCommit(true, 1));
-        }
-
-        // validate
-        List<Split> splits = toSplits(table.newSnapshotReader().read().dataSplits());
-        TableRead read = table.newRead();
-        assertThat(
-                        getResult(
-                                read,
-                                splits,
-                                row ->
-                                        DataFormatTestUtil.toStringNoRowKind(
-                                                row, OVERWRITE_TEST_ROW_TYPE)))
-                .hasSameElementsAs(expected);
     }
 
     @Test
@@ -507,7 +443,8 @@ public abstract class FileStoreTableTestBase {
         commit.abort(messages);
 
         FileStatus[] files =
-                LocalFileIO.create().listStatus(new Path(tablePath + "/pt=1/bucket-0"));
+                LocalFileIO.create()
+                        .listStatus(new Path(table.location().toString() + "/pt=1/bucket-0"));
         assertThat(files).isEmpty();
         write.close();
         commit.close();
@@ -651,7 +588,6 @@ public abstract class FileStoreTableTestBase {
                             conf.set(SNAPSHOT_NUM_RETAINED_MIN, 3);
                             conf.set(SNAPSHOT_NUM_RETAINED_MAX, 3);
                         });
-
         StreamTableWrite write = table.newWrite(commitUser);
         StreamTableCommit commit = table.newCommit(commitUser);
         for (int i = 0; i < 10; i++) {
@@ -669,8 +605,7 @@ public abstract class FileStoreTableTestBase {
             assertThat(file.level()).isEqualTo(0);
         }
 
-        SnapshotManager snapshotManager =
-                newSnapshotManager(FileIOFinder.find(tablePath), table.location());
+        SnapshotManager snapshotManager = newSnapshotManager(table.fileIO(), table.location());
         Long latestSnapshotId = snapshotManager.latestSnapshotId();
         assertThat(latestSnapshotId).isNotNull();
         for (int i = 1; i <= latestSnapshotId; i++) {
@@ -859,7 +794,7 @@ public abstract class FileStoreTableTestBase {
                 .containsExactlyInAnyOrder("0|0|0|binary|varbinary|mapKey:mapVal|multiset");
 
         List<java.nio.file.Path> files =
-                Files.walk(new File(tablePath.toUri().getPath()).toPath())
+                Files.walk(new File(table.location().toUri().getPath()).toPath())
                         .collect(Collectors.toList());
         assertThat(files.size()).isEqualTo(14);
     }
@@ -885,7 +820,7 @@ public abstract class FileStoreTableTestBase {
                 .containsExactlyInAnyOrder("0|0|0|binary|varbinary|mapKey:mapVal|multiset");
 
         List<java.nio.file.Path> files =
-                Files.walk(new File(tablePath.toUri().getPath()).toPath())
+                Files.walk(new File(table.location().toUri().getPath()).toPath())
                         .collect(Collectors.toList());
         assertThat(files.size()).isEqualTo(15);
         // table-path
@@ -937,7 +872,7 @@ public abstract class FileStoreTableTestBase {
                 .containsExactlyInAnyOrder("0|0|0|binary|varbinary|mapKey:mapVal|multiset");
 
         List<java.nio.file.Path> files =
-                Files.walk(new File(tablePath.toUri().getPath()).toPath())
+                Files.walk(new File(table.location().toUri().getPath()).toPath())
                         .collect(Collectors.toList());
         assertThat(files.size()).isEqualTo(16);
         // case 0 plus 1:
@@ -978,7 +913,7 @@ public abstract class FileStoreTableTestBase {
                 .containsExactlyInAnyOrder("0|0|0|binary|varbinary|mapKey:mapVal|multiset");
 
         List<java.nio.file.Path> files =
-                Files.walk(new File(tablePath.toUri().getPath()).toPath())
+                Files.walk(new File(table.location().toUri().getPath()).toPath())
                         .collect(Collectors.toList());
         assertThat(files.size()).isEqualTo(23);
         // case 0 plus 7:
@@ -1034,7 +969,7 @@ public abstract class FileStoreTableTestBase {
                 .containsExactlyInAnyOrder("0|0|0|binary|varbinary|mapKey:mapVal|multiset");
 
         List<java.nio.file.Path> files =
-                Files.walk(new File(tablePath.toUri().getPath()).toPath())
+                Files.walk(new File(table.location().toUri().getPath()).toPath())
                         .collect(Collectors.toList());
         assertThat(files.size()).isEqualTo(16);
         // rollback snapshot case 0 plus 1:
@@ -1081,7 +1016,7 @@ public abstract class FileStoreTableTestBase {
         table.createTag("test-tag", 2);
 
         // verify that tag file exist
-        TagManager tagManager = new TagManager(new TraceableFileIO(), tablePath);
+        TagManager tagManager = new TagManager(table.fileIO(), table.location());
         assertThat(tagManager.tagExists("test-tag")).isTrue();
 
         // verify that test-tag is equal to snapshot 2
@@ -1105,7 +1040,7 @@ public abstract class FileStoreTableTestBase {
             commit.commit(0, write.prepareCommit(false, 1));
             table.createTag("test-tag", 1);
             // verify that tag file exist
-            TagManager tagManager = new TagManager(new TraceableFileIO(), tablePath);
+            TagManager tagManager = new TagManager(table.fileIO(), table.location());
             assertThat(tagManager.tagExists("test-tag")).isTrue();
             // verify that test-tag is equal to snapshot 1
             Snapshot tagged = tagManager.getOrThrow("test-tag").trimToSnapshot();
@@ -1114,7 +1049,7 @@ public abstract class FileStoreTableTestBase {
             // snapshot 2
             write.write(rowData(2, 20, 200L));
             commit.commit(1, write.prepareCommit(false, 2));
-            SnapshotManager snapshotManager = newSnapshotManager(new TraceableFileIO(), tablePath);
+            SnapshotManager snapshotManager = newSnapshotManager(table.fileIO(), table.location());
             // The snapshot 1 is expired.
             assertThat(snapshotManager.snapshotExists(1)).isFalse();
             table.createTag("test-tag-2", 1);
@@ -1137,7 +1072,7 @@ public abstract class FileStoreTableTestBase {
             // snapshot 2
             write.write(rowData(1, 10, 100L));
             commit.commit(1, write.prepareCommit(false, 2));
-            TagManager tagManager = new TagManager(new TraceableFileIO(), tablePath);
+            TagManager tagManager = new TagManager(table.fileIO(), table.location());
             table.createTag("test-tag", 1);
             // verify that tag file exist
             assertThat(tagManager.tagExists("test-tag")).isTrue();
@@ -1152,7 +1087,6 @@ public abstract class FileStoreTableTestBase {
     @Test
     public void testCreateBranch() throws Exception {
         FileStoreTable table = createFileStoreTable();
-
         try (StreamTableWrite write = table.newWrite(commitUser);
                 StreamTableCommit commit = table.newCommit(commitUser)) {
             // snapshot 1
@@ -1166,7 +1100,7 @@ public abstract class FileStoreTableTestBase {
         table.createTag("test-tag", 2);
 
         // verify that tag file exist
-        TagManager tagManager = new TagManager(new TraceableFileIO(), tablePath);
+        TagManager tagManager = new TagManager(table.fileIO(), table.location());
         assertThat(tagManager.tagExists("test-tag")).isTrue();
 
         // verify that test-tag is equal to snapshot 2
@@ -1183,22 +1117,22 @@ public abstract class FileStoreTableTestBase {
         // verify test-tag in test-branch is equal to snapshot 2
         Snapshot branchTag =
                 Snapshot.fromPath(
-                        new TraceableFileIO(),
+                        table.fileIO(),
                         tagManager.copyWithBranch("test-branch").tagPath("test-tag"));
         assertThat(branchTag.equals(snapshot2)).isTrue();
 
         // verify snapshot in test-branch is equal to snapshot 2
         SnapshotManager snapshotManager =
-                newSnapshotManager(new TraceableFileIO(), tablePath, "test-branch");
+                newSnapshotManager(table.fileIO(), table.location(), "test-branch");
         Snapshot branchSnapshot =
-                Snapshot.fromPath(new TraceableFileIO(), snapshotManager.snapshotPath(2));
+                Snapshot.fromPath(table.fileIO(), snapshotManager.snapshotPath(2));
         assertThat(branchSnapshot.equals(snapshot2)).isTrue();
 
         // verify schema in test-branch is equal to schema 0
         SchemaManager schemaManager =
-                new SchemaManager(new TraceableFileIO(), tablePath, "test-branch");
+                new SchemaManager(table.fileIO(), table.location(), "test-branch");
         TableSchema branchSchema =
-                TableSchema.fromPath(new TraceableFileIO(), schemaManager.toSchemaPath(0));
+                TableSchema.fromPath(table.fileIO(), schemaManager.toSchemaPath(0));
         TableSchema schema0 = schemaManager.schema(0);
         assertThat(branchSchema.equals(schema0)).isTrue();
     }
@@ -1291,7 +1225,7 @@ public abstract class FileStoreTableTestBase {
     public void testFastForward() throws Exception {
         FileStoreTable table = createFileStoreTable();
         generateBranch(table);
-        FileStoreTable tableBranch = createFileStoreTable(BRANCH_NAME);
+        FileStoreTable tableBranch = createBranchTable(BRANCH_NAME);
 
         // Verify branch1 and the main branch have the same data
         assertThat(
@@ -1353,21 +1287,19 @@ public abstract class FileStoreTableTestBase {
                         "2|20|200|binary|varbinary|mapKey:mapVal|multiset");
 
         // verify snapshot in branch1 and main branch is same
-        SnapshotManager snapshotManager = newSnapshotManager(new TraceableFileIO(), tablePath);
+        SnapshotManager snapshotManager = newSnapshotManager(table.fileIO(), table.location());
         Snapshot branchSnapshot =
                 Snapshot.fromPath(
-                        new TraceableFileIO(),
+                        table.fileIO(),
                         snapshotManager.copyWithBranch(BRANCH_NAME).snapshotPath(2));
-        Snapshot snapshot =
-                Snapshot.fromPath(new TraceableFileIO(), snapshotManager.snapshotPath(2));
+        Snapshot snapshot = Snapshot.fromPath(table.fileIO(), snapshotManager.snapshotPath(2));
         assertThat(branchSnapshot.equals(snapshot)).isTrue();
 
         // verify schema in branch1 and main branch is same
-        SchemaManager schemaManager = new SchemaManager(new TraceableFileIO(), tablePath);
+        SchemaManager schemaManager = new SchemaManager(table.fileIO(), table.location());
         TableSchema branchSchema =
                 TableSchema.fromPath(
-                        new TraceableFileIO(),
-                        schemaManager.copyWithBranch(BRANCH_NAME).toSchemaPath(0));
+                        table.fileIO(), schemaManager.copyWithBranch(BRANCH_NAME).toSchemaPath(0));
         TableSchema schema0 = schemaManager.schema(0);
         assertThat(branchSchema.equals(schema0)).isTrue();
 
@@ -1601,25 +1533,12 @@ public abstract class FileStoreTableTestBase {
     }
 
     @Test
-    public void testSchemaPathOption() throws Exception {
-        String fakePath = "fake path";
-        FileStoreTable table = createFileStoreTable(conf -> conf.set(CoreOptions.PATH, fakePath));
-        String originSchemaPath = table.schema().options().get(CoreOptions.PATH.key());
-        assertThat(originSchemaPath).isEqualTo(fakePath);
-        // reset PATH of schema option to table location
-        table = table.copy(Collections.emptyMap());
-        String schemaPath = table.schema().options().get(CoreOptions.PATH.key());
-        String tablePath = table.location().toString();
-        assertThat(schemaPath).isEqualTo(tablePath);
-    }
-
-    @Test
     public void testBranchWriteAndRead() throws Exception {
         FileStoreTable table = createFileStoreTable();
 
         generateBranch(table);
 
-        FileStoreTable tableBranch = createFileStoreTable(BRANCH_NAME);
+        FileStoreTable tableBranch = createBranchTable(BRANCH_NAME);
         // Write data to branch1
         try (StreamTableWrite write = tableBranch.newWrite(commitUser);
                 StreamTableCommit commit = tableBranch.newCommit(commitUser)) {
@@ -1728,7 +1647,7 @@ public abstract class FileStoreTableTestBase {
         }
     }
 
-    protected List<String> getResult(
+    public static List<String> getResult(
             TableRead read,
             List<Split> splits,
             BinaryRow partition,
@@ -1738,7 +1657,7 @@ public abstract class FileStoreTableTestBase {
         return getResult(read, getSplitsFor(splits, partition, bucket), rowDataToString);
     }
 
-    protected List<String> getResult(
+    public static List<String> getResult(
             TableRead read, List<Split> splits, Function<InternalRow, String> rowDataToString)
             throws Exception {
         List<ReaderSupplier<InternalRow>> readers = new ArrayList<>();
@@ -1756,7 +1675,7 @@ public abstract class FileStoreTableTestBase {
         return result;
     }
 
-    private List<Split> getSplitsFor(List<Split> splits, BinaryRow partition, int bucket) {
+    private static List<Split> getSplitsFor(List<Split> splits, BinaryRow partition, int bucket) {
         List<Split> result = new ArrayList<>();
         for (Split split : splits) {
             DataSplit dataSplit = (DataSplit) split;
@@ -1808,12 +1727,9 @@ public abstract class FileStoreTableTestBase {
         return createFileStoreTable(conf -> conf.set(BUCKET, numOfBucket));
     }
 
-    protected FileStoreTable createFileStoreTable(String branch, int numOfBucket) throws Exception {
-        return createFileStoreTable(branch, conf -> conf.set(BUCKET, numOfBucket));
-    }
-
-    protected FileStoreTable createFileStoreTable(String branch) throws Exception {
-        return createFileStoreTable(branch, 1);
+    protected FileStoreTable createBranchTable(String branch) throws Exception {
+        FileStoreTable table = createFileStoreTable();
+        return table.switchToBranch(branch);
     }
 
     protected FileStoreTable createFileStoreTable() throws Exception {
@@ -1826,99 +1742,6 @@ public abstract class FileStoreTableTestBase {
 
     protected abstract FileStoreTable createFileStoreTable(
             Consumer<Options> configure, RowType rowType) throws Exception;
-
-    protected abstract FileStoreTable createFileStoreTable(
-            String branch, Consumer<Options> configure) throws Exception;
-
-    protected abstract FileStoreTable overwriteTestFileStoreTable() throws Exception;
-
-    private static InternalRow overwriteRow(Object... values) {
-        return GenericRow.of(
-                values[0],
-                values[1],
-                BinaryString.fromString((String) values[2]),
-                BinaryString.fromString((String) values[3]));
-    }
-
-    private static List<Arguments> overwriteTestData() {
-        // dynamic, overwrite data, overwrite partition, expected
-        return Arrays.asList(
-                // nothing happen
-                arguments(
-                        true,
-                        Collections.emptyList(),
-                        Collections.emptyMap(),
-                        Arrays.asList(
-                                "1, 1, A, Hi",
-                                "2, 1, A, Hello",
-                                "3, 1, A, World",
-                                "4, 1, B, To",
-                                "5, 1, B, Apache",
-                                "6, 1, B, Paimon",
-                                "7, 2, A, Test",
-                                "8, 2, B, Case")),
-                // delete all data
-                arguments(
-                        false,
-                        Collections.emptyList(),
-                        Collections.emptyMap(),
-                        Collections.emptyList()),
-                // specify one partition key
-                arguments(
-                        true,
-                        Arrays.asList(
-                                overwriteRow(1, 1, "A", "Where"), overwriteRow(2, 1, "A", "When")),
-                        Collections.singletonMap("pt0", "1"),
-                        Arrays.asList(
-                                "1, 1, A, Where",
-                                "2, 1, A, When",
-                                "4, 1, B, To",
-                                "5, 1, B, Apache",
-                                "6, 1, B, Paimon",
-                                "7, 2, A, Test",
-                                "8, 2, B, Case")),
-                arguments(
-                        false,
-                        Arrays.asList(
-                                overwriteRow(1, 1, "A", "Where"), overwriteRow(2, 1, "A", "When")),
-                        Collections.singletonMap("pt0", "1"),
-                        Arrays.asList(
-                                "1, 1, A, Where",
-                                "2, 1, A, When",
-                                "7, 2, A, Test",
-                                "8, 2, B, Case")),
-                // all dynamic
-                arguments(
-                        true,
-                        Arrays.asList(
-                                overwriteRow(4, 1, "B", "Where"),
-                                overwriteRow(5, 1, "B", "When"),
-                                overwriteRow(10, 2, "A", "Static"),
-                                overwriteRow(11, 2, "A", "Dynamic")),
-                        Collections.emptyMap(),
-                        Arrays.asList(
-                                "1, 1, A, Hi",
-                                "2, 1, A, Hello",
-                                "3, 1, A, World",
-                                "4, 1, B, Where",
-                                "5, 1, B, When",
-                                "10, 2, A, Static",
-                                "11, 2, A, Dynamic",
-                                "8, 2, B, Case")),
-                arguments(
-                        false,
-                        Arrays.asList(
-                                overwriteRow(4, 1, "B", "Where"),
-                                overwriteRow(5, 1, "B", "When"),
-                                overwriteRow(10, 2, "A", "Static"),
-                                overwriteRow(11, 2, "A", "Dynamic")),
-                        Collections.emptyMap(),
-                        Arrays.asList(
-                                "4, 1, B, Where",
-                                "5, 1, B, When",
-                                "10, 2, A, Static",
-                                "11, 2, A, Dynamic")));
-    }
 
     protected List<Split> toSplits(List<DataSplit> dataSplits) {
         return new ArrayList<>(dataSplits);
@@ -1947,7 +1770,7 @@ public abstract class FileStoreTableTestBase {
         assertThat(branchManager.branchExists(BRANCH_NAME)).isTrue();
 
         // Verify branch1 and the main branch have the same data
-        FileStoreTable tableBranch = createFileStoreTable(BRANCH_NAME);
+        FileStoreTable tableBranch = createBranchTable(BRANCH_NAME);
         assertThat(
                         getResult(
                                 tableBranch.newRead(),

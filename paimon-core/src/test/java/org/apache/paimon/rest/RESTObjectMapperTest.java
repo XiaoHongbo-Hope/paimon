@@ -20,13 +20,14 @@ package org.apache.paimon.rest;
 
 import org.apache.paimon.rest.requests.AlterDatabaseRequest;
 import org.apache.paimon.rest.requests.AlterTableRequest;
+import org.apache.paimon.rest.requests.AlterViewRequest;
 import org.apache.paimon.rest.requests.CreateDatabaseRequest;
 import org.apache.paimon.rest.requests.CreateTableRequest;
 import org.apache.paimon.rest.requests.CreateViewRequest;
 import org.apache.paimon.rest.requests.RenameTableRequest;
+import org.apache.paimon.rest.requests.RollbackTableRequest;
 import org.apache.paimon.rest.responses.AlterDatabaseResponse;
 import org.apache.paimon.rest.responses.ConfigResponse;
-import org.apache.paimon.rest.responses.CreateDatabaseResponse;
 import org.apache.paimon.rest.responses.ErrorResponse;
 import org.apache.paimon.rest.responses.GetDatabaseResponse;
 import org.apache.paimon.rest.responses.GetTableResponse;
@@ -36,6 +37,7 @@ import org.apache.paimon.rest.responses.ListDatabasesResponse;
 import org.apache.paimon.rest.responses.ListPartitionsResponse;
 import org.apache.paimon.rest.responses.ListTablesResponse;
 import org.apache.paimon.rest.responses.ListViewsResponse;
+import org.apache.paimon.table.Instant;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.IntType;
@@ -46,7 +48,8 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.apache.paimon.rest.RESTObjectMapper.OBJECT_MAPPER;
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Test for {@link RESTObjectMapper}. */
 public class RESTObjectMapperTest {
@@ -85,17 +88,6 @@ public class RESTObjectMapperTest {
     }
 
     @Test
-    public void createDatabaseResponseParseTest() throws Exception {
-        String name = MockRESTMessage.databaseName();
-        CreateDatabaseResponse response = MockRESTMessage.createDatabaseResponse(name);
-        String responseStr = OBJECT_MAPPER.writeValueAsString(response);
-        CreateDatabaseResponse parseData =
-                OBJECT_MAPPER.readValue(responseStr, CreateDatabaseResponse.class);
-        assertEquals(name, parseData.getName());
-        assertEquals(response.getOptions().size(), parseData.getOptions().size());
-    }
-
-    @Test
     public void getDatabaseResponseParseTest() throws Exception {
         String name = MockRESTMessage.databaseName();
         GetDatabaseResponse response = MockRESTMessage.getDatabaseResponse(name);
@@ -104,7 +96,6 @@ public class RESTObjectMapperTest {
                 OBJECT_MAPPER.readValue(responseStr, GetDatabaseResponse.class);
         assertEquals(name, parseData.getName());
         assertEquals(response.getOptions().size(), parseData.getOptions().size());
-        assertEquals(response.comment().get(), parseData.comment().get());
     }
 
     @Test
@@ -249,5 +240,44 @@ public class RESTObjectMapperTest {
                 OBJECT_MAPPER.readValue(responseStr, GetTableTokenResponse.class);
         assertEquals(response.getToken(), parseData.getToken());
         assertEquals(response.getExpiresAtMillis(), parseData.getExpiresAtMillis());
+    }
+
+    @Test
+    public void rollbackTableRequestParseTest() throws Exception {
+        Long snapshotId = 123L;
+        String tagName = "tagName";
+        RollbackTableRequest rollbackTableRequestBySnapshot =
+                MockRESTMessage.rollbackTableRequestBySnapshot(snapshotId);
+        String rollbackTableRequestBySnapshotStr =
+                OBJECT_MAPPER.writeValueAsString(rollbackTableRequestBySnapshot);
+        Instant.SnapshotInstant rollbackTableRequestParseData =
+                (Instant.SnapshotInstant)
+                        OBJECT_MAPPER
+                                .readValue(
+                                        rollbackTableRequestBySnapshotStr,
+                                        RollbackTableRequest.class)
+                                .getInstant();
+        assertTrue(rollbackTableRequestParseData.getSnapshotId() == snapshotId);
+        RollbackTableRequest rollbackTableRequestByTag =
+                MockRESTMessage.rollbackTableRequestByTag(tagName);
+        String rollbackTableRequestByTagStr =
+                OBJECT_MAPPER.writeValueAsString(rollbackTableRequestByTag);
+        Instant.TagInstant rollbackTableRequestByTagParseData =
+                (Instant.TagInstant)
+                        OBJECT_MAPPER
+                                .readValue(rollbackTableRequestByTagStr, RollbackTableRequest.class)
+                                .getInstant();
+        assertEquals(rollbackTableRequestByTagParseData.getTagName(), tagName);
+    }
+
+    @Test
+    public void alterViewRequestParseTest() throws Exception {
+        AlterViewRequest request = MockRESTMessage.alterViewRequest();
+        String requestStr = OBJECT_MAPPER.writeValueAsString(request);
+        AlterViewRequest parseData = OBJECT_MAPPER.readValue(requestStr, AlterViewRequest.class);
+        assertEquals(parseData.viewChanges().size(), request.viewChanges().size());
+        for (int i = 0; i < request.viewChanges().size(); i++) {
+            assertEquals(parseData.viewChanges().get(i), request.viewChanges().get(i));
+        }
     }
 }

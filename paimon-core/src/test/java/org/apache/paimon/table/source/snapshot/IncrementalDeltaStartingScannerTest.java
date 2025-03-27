@@ -42,8 +42,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Tests for {@link IncrementalStartingScanner}. */
-public class IncrementalStartingScannerTest extends ScannerTestBase {
+/** Tests for {@link IncrementalDeltaStartingScanner}. */
+public class IncrementalDeltaStartingScannerTest extends ScannerTestBase {
 
     @Test
     public void testScan() throws Exception {
@@ -110,25 +110,14 @@ public class IncrementalStartingScannerTest extends ScannerTestBase {
         assertThatNoException()
                 .isThrownBy(
                         () ->
-                                new IncrementalStartingScanner(
-                                                snapshotManager, 0, 4, ScanMode.DELTA)
+                                IncrementalDeltaStartingScanner.betweenSnapshotIds(
+                                                0, 4, snapshotManager, ScanMode.DELTA)
                                         .scan(snapshotReader));
 
-        // Starting snapshotId must less than ending snapshotId.
         assertThatThrownBy(
                         () ->
-                                new IncrementalStartingScanner(
-                                                snapshotManager, 4, 3, ScanMode.DELTA)
-                                        .scan(snapshotReader))
-                .satisfies(
-                        anyCauseMatches(
-                                IllegalArgumentException.class,
-                                "Starting snapshotId 4 must less than ending snapshotId 3."));
-
-        assertThatThrownBy(
-                        () ->
-                                new IncrementalStartingScanner(
-                                                snapshotManager, 1, 5, ScanMode.DELTA)
+                                IncrementalDeltaStartingScanner.betweenSnapshotIds(
+                                                1, 5, snapshotManager, ScanMode.DELTA)
                                         .scan(snapshotReader))
                 .satisfies(
                         anyCauseMatches(
