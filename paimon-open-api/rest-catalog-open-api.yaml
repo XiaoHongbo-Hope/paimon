@@ -89,7 +89,7 @@ paths:
           description: Internal Server Error
   /v1/catalogs/{catalog}:
     parameters:
-      - name: name
+      - name: catalog
         in: path
         description: The name of the catalog.
         required: true
@@ -1698,7 +1698,7 @@ components:
         fields:
           type: array
           items:
-           $ref: '#/components/schemas/DataField'
+            $ref: '#/components/schemas/DataField'
     Identifier:
       type: object
       properties:
