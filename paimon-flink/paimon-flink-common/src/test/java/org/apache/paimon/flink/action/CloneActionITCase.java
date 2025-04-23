@@ -569,21 +569,22 @@ public class CloneActionITCase extends ActionITCaseBase {
         tEnv.executeSql("USE CATALOG sourcecat");
 
         tEnv.executeSql(
-                "CREATE TABLE t (\n"
-                        + "  pt STRING,\n"
-                        + "  k INT,\n"
-                        + "  v INT,\n"
-                        + "  PRIMARY KEY (pt, k) NOT ENFORCED\n"
-                        + ") PARTITIONED BY (pt) WITH (\n"
-                        + "  'changelog-producer' = 'lookup'\n"
-                        + ")");
+                        "CREATE TABLE t (\n"
+                                + "  pt STRING,\n"
+                                + "  k INT,\n"
+                                + "  v INT,\n"
+                                + "  PRIMARY KEY (pt, k) NOT ENFORCED\n"
+                                + ") PARTITIONED BY (pt) WITH (\n"
+                                + "  'changelog-producer' = 'lookup'\n"
+                                + ")")
+                .await();
         tEnv.executeSql(
                         "INSERT INTO t VALUES "
                                 + "('one', 1, 10), "
                                 + "('one', 2, 20), "
                                 + "('two', 1, 100)")
                 .await();
-        tEnv.executeSql("ALTER TABLE t ADD v2 STRING AFTER v");
+        tEnv.executeSql("ALTER TABLE t ADD v2 STRING AFTER v").await();
         tEnv.executeSql(
                         "INSERT INTO t VALUES "
                                 + "('one', 2, 21, 'apple'), "
