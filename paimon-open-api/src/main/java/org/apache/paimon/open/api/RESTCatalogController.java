@@ -18,6 +18,7 @@
 
 package org.apache.paimon.open.api;
 
+import org.apache.paimon.TableType;
 import org.apache.paimon.partition.Partition;
 import org.apache.paimon.rest.requests.AlterDatabaseRequest;
 import org.apache.paimon.rest.requests.AlterTableRequest;
@@ -44,12 +45,16 @@ import org.apache.paimon.rest.responses.ListBranchesResponse;
 import org.apache.paimon.rest.responses.ListDatabasesResponse;
 import org.apache.paimon.rest.responses.ListPartitionsResponse;
 import org.apache.paimon.rest.responses.ListTableDetailsResponse;
+import org.apache.paimon.rest.responses.ListTableSummariesResponse;
 import org.apache.paimon.rest.responses.ListTablesResponse;
 import org.apache.paimon.rest.responses.ListViewDetailsResponse;
+import org.apache.paimon.rest.responses.ListViewSummariesResponse;
 import org.apache.paimon.rest.responses.ListViewsResponse;
+import org.apache.paimon.table.TableSummary;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.view.ViewSchema;
+import org.apache.paimon.view.ViewSummary;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableList;
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
@@ -312,6 +317,35 @@ public class RESTCatalogController {
                         System.currentTimeMillis(),
                         "updated");
         return new ListTableDetailsResponse(ImmutableList.of(singleTable), null);
+    }
+
+    @Operation(
+            summary = "List table summaries",
+            tags = {"table"})
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                content = {
+                    @Content(schema = @Schema(implementation = ListTableSummariesResponse.class))
+                }),
+        @ApiResponse(
+                responseCode = "401",
+                description = "Unauthorized",
+                content = {@Content(schema = @Schema(implementation = ErrorResponse.class))}),
+        @ApiResponse(
+                responseCode = "500",
+                content = {@Content(schema = @Schema(implementation = ErrorResponse.class))})
+    })
+    @GetMapping("/v1/{prefix}/table-summaries")
+    public ListTableSummariesResponse listTableSummaries(
+            @PathVariable String prefix,
+            @RequestParam(required = false) String databaseNamePattern,
+            @RequestParam(required = false) String tableNamePattern,
+            @RequestParam(required = false) Integer maxResults,
+            @RequestParam(required = false) String pageToken) {
+        // paged list table summaries in this catalog with provided maxResults and pageToken
+        TableSummary tableSummary = new TableSummary("db.table", TableType.TABLE);
+        return new ListTableSummariesResponse(Collections.singletonList(tableSummary), null);
     }
 
     @Operation(
@@ -789,6 +823,35 @@ public class RESTCatalogController {
                         System.currentTimeMillis(),
                         "updated");
         return new ListViewDetailsResponse(ImmutableList.of(singleView), null);
+    }
+
+    @Operation(
+            summary = "List view summaries",
+            tags = {"view"})
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                content = {
+                    @Content(schema = @Schema(implementation = ListViewSummariesResponse.class))
+                }),
+        @ApiResponse(
+                responseCode = "401",
+                description = "Unauthorized",
+                content = {@Content(schema = @Schema(implementation = ErrorResponse.class))}),
+        @ApiResponse(
+                responseCode = "500",
+                content = {@Content(schema = @Schema(implementation = ErrorResponse.class))})
+    })
+    @GetMapping("/v1/{prefix}/view-summaries")
+    public ListViewSummariesResponse listViewSummaries(
+            @PathVariable String prefix,
+            @RequestParam(required = false) String databaseNamePattern,
+            @RequestParam(required = false) String viewNamePattern,
+            @RequestParam(required = false) Integer maxResults,
+            @RequestParam(required = false) String pageToken) {
+        // paged list view summaries in this catalog with provided maxResults and pageToken
+        ViewSummary viewSummary = new ViewSummary("db.view");
+        return new ListViewSummariesResponse(Collections.singletonList(viewSummary), null);
     }
 
     @Operation(

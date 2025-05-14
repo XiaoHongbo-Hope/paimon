@@ -67,8 +67,10 @@ import org.apache.paimon.rest.responses.ListBranchesResponse;
 import org.apache.paimon.rest.responses.ListDatabasesResponse;
 import org.apache.paimon.rest.responses.ListPartitionsResponse;
 import org.apache.paimon.rest.responses.ListTableDetailsResponse;
+import org.apache.paimon.rest.responses.ListTableSummariesResponse;
 import org.apache.paimon.rest.responses.ListTablesResponse;
 import org.apache.paimon.rest.responses.ListViewDetailsResponse;
+import org.apache.paimon.rest.responses.ListViewSummariesResponse;
 import org.apache.paimon.rest.responses.ListViewsResponse;
 import org.apache.paimon.rest.responses.PagedResponse;
 import org.apache.paimon.schema.Schema;
@@ -77,6 +79,7 @@ import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.Instant;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.TableSnapshot;
+import org.apache.paimon.table.TableSummary;
 import org.apache.paimon.table.sink.BatchTableCommit;
 import org.apache.paimon.table.system.SystemTableLoader;
 import org.apache.paimon.utils.Pair;
@@ -84,6 +87,7 @@ import org.apache.paimon.view.View;
 import org.apache.paimon.view.ViewChange;
 import org.apache.paimon.view.ViewImpl;
 import org.apache.paimon.view.ViewSchema;
+import org.apache.paimon.view.ViewSummary;
 
 import org.apache.paimon.shade.guava30.com.google.common.collect.ImmutableMap;
 import org.apache.paimon.shade.guava30.com.google.common.collect.Maps;
@@ -128,6 +132,7 @@ public class RESTCatalog implements Catalog {
     public static final String QUERY_PARAMETER_WAREHOUSE_KEY = "warehouse";
 
     public static final String TABLE_NAME_PATTERN = "tableNamePattern";
+    public static final String DATABASE_NAME_PATTERN = "databaseNamePattern";
     public static final String VIEW_NAME_PATTERN = "viewNamePattern";
     public static final String PARTITION_NAME_PATTERN = "partitionNamePattern";
     public static final long TOKEN_EXPIRATION_SAFE_TIME_MILLIS = 3_600_000L;
@@ -325,7 +330,9 @@ public class RESTCatalog implements Catalog {
                     client.get(
                             resourcePaths.tables(databaseName),
                             buildPagedQueryParams(
-                                    maxResults, pageToken, TABLE_NAME_PATTERN, tableNamePattern),
+                                    maxResults,
+                                    pageToken,
+                                    Pair.of(TABLE_NAME_PATTERN, tableNamePattern)),
                             ListTablesResponse.class,
                             restAuthFunction);
             List<String> tables = response.getTables();
@@ -350,7 +357,9 @@ public class RESTCatalog implements Catalog {
                     client.get(
                             resourcePaths.tableDetails(db),
                             buildPagedQueryParams(
-                                    maxResults, pageToken, TABLE_NAME_PATTERN, tableNamePattern),
+                                    maxResults,
+                                    pageToken,
+                                    Pair.of(TABLE_NAME_PATTERN, tableNamePattern)),
                             ListTableDetailsResponse.class,
                             restAuthFunction);
             List<GetTableResponse> tables = response.getTableDetails();
@@ -363,6 +372,30 @@ public class RESTCatalog implements Catalog {
         } catch (NoSuchResourceException e) {
             throw new DatabaseNotExistException(db);
         }
+    }
+
+    @Override
+    public PagedList<TableSummary> listTableSummariesPaged(
+            @Nullable String databaseNamePattern,
+            @Nullable String tableNamePattern,
+            @Nullable Integer maxResults,
+            @Nullable String pageToken) {
+        ListTableSummariesResponse response =
+                client.get(
+                        resourcePaths.tableSummaries(),
+                        buildPagedQueryParams(
+                                maxResults,
+                                pageToken,
+                                Pair.of(DATABASE_NAME_PATTERN, databaseNamePattern),
+                                Pair.of(TABLE_NAME_PATTERN, tableNamePattern)),
+                        ListTableSummariesResponse.class,
+                        restAuthFunction);
+        List<TableSummary> tableSummaries = response.getTableSummaries();
+        if (tableSummaries == null) {
+            return new PagedList<>(emptyList(), null);
+        }
+
+        return new PagedList<>(tableSummaries, response.getNextPageToken());
     }
 
     @Override
@@ -677,8 +710,7 @@ public class RESTCatalog implements Catalog {
                             buildPagedQueryParams(
                                     maxResults,
                                     pageToken,
-                                    PARTITION_NAME_PATTERN,
-                                    partitionNamePattern),
+                                    Pair.of(PARTITION_NAME_PATTERN, partitionNamePattern)),
                             ListPartitionsResponse.class,
                             restAuthFunction);
             List<Partition> partitions = response.getPartitions();
@@ -879,7 +911,9 @@ public class RESTCatalog implements Catalog {
                     client.get(
                             resourcePaths.views(databaseName),
                             buildPagedQueryParams(
-                                    maxResults, pageToken, VIEW_NAME_PATTERN, viewNamePattern),
+                                    maxResults,
+                                    pageToken,
+                                    Pair.of(VIEW_NAME_PATTERN, viewNamePattern)),
                             ListViewsResponse.class,
                             restAuthFunction);
             List<String> views = response.getViews();
@@ -904,7 +938,9 @@ public class RESTCatalog implements Catalog {
                     client.get(
                             resourcePaths.viewDetails(db),
                             buildPagedQueryParams(
-                                    maxResults, pageToken, VIEW_NAME_PATTERN, viewNamePattern),
+                                    maxResults,
+                                    pageToken,
+                                    Pair.of(VIEW_NAME_PATTERN, viewNamePattern)),
                             ListViewDetailsResponse.class,
                             restAuthFunction);
             List<GetViewResponse> views = response.getViewDetails();
@@ -917,6 +953,30 @@ public class RESTCatalog implements Catalog {
         } catch (NoSuchResourceException e) {
             throw new DatabaseNotExistException(db);
         }
+    }
+
+    @Override
+    public PagedList<ViewSummary> listViewSummariesPaged(
+            @Nullable String databaseNamePattern,
+            @Nullable String viewNamePattern,
+            @Nullable Integer maxResults,
+            @Nullable String pageToken) {
+        ListViewSummariesResponse response =
+                client.get(
+                        resourcePaths.viewSummaries(),
+                        buildPagedQueryParams(
+                                maxResults,
+                                pageToken,
+                                Pair.of(DATABASE_NAME_PATTERN, databaseNamePattern),
+                                Pair.of(VIEW_NAME_PATTERN, viewNamePattern)),
+                        ListViewSummariesResponse.class,
+                        restAuthFunction);
+        List<ViewSummary> viewSummaries = response.getViewSummaries();
+        if (viewSummaries == null) {
+            return new PagedList<>(emptyList(), null);
+        }
+
+        return new PagedList<>(viewSummaries, response.getNextPageToken());
     }
 
     private ViewImpl toView(String db, GetViewResponse response) {
@@ -1042,14 +1102,14 @@ public class RESTCatalog implements Catalog {
 
     private Map<String, String> buildPagedQueryParams(
             @Nullable Integer maxResults, @Nullable String pageToken) {
-        return buildPagedQueryParams(maxResults, pageToken, null, null);
+        return buildPagedQueryParams(maxResults, pageToken, null);
     }
 
-    private Map<String, String> buildPagedQueryParams(
+    @SafeVarargs
+    private final Map<String, String> buildPagedQueryParams(
             @Nullable Integer maxResults,
             @Nullable String pageToken,
-            @Nullable String namePatternKey,
-            @Nullable String namePatternValue) {
+            @Nullable Pair<String, String>... namePatternPairs) {
         Map<String, String> queryParams = Maps.newHashMap();
         if (Objects.nonNull(maxResults) && maxResults > 0) {
             queryParams.put(MAX_RESULTS, maxResults.toString());
@@ -1057,8 +1117,15 @@ public class RESTCatalog implements Catalog {
         if (Objects.nonNull(pageToken)) {
             queryParams.put(PAGE_TOKEN, pageToken);
         }
-        if (Objects.nonNull(namePatternValue)) {
-            queryParams.put(namePatternKey, namePatternValue);
+        if (Objects.nonNull(namePatternPairs)) {
+            for (Pair<String, String> namePatternPair : namePatternPairs) {
+                String namePatternKey = namePatternPair.getKey();
+                String namePatternValue = namePatternPair.getValue();
+                if (StringUtils.isNoneBlank(namePatternKey)
+                        && StringUtils.isNoneBlank(namePatternValue)) {
+                    queryParams.put(namePatternKey, namePatternValue);
+                }
+            }
         }
         return queryParams;
     }
