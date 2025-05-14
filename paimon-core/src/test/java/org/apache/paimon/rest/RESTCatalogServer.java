@@ -1848,16 +1848,10 @@ public class RESTCatalogServer {
                 escaped = true;
                 continue;
             }
-            switch (c) {
-                case '%':
-                    regex.append(".*");
-                    break;
-                case '_':
-                    regex.append(".");
-                    break;
-                default:
-                    regex.append(c);
-                    break;
+            if (c == '%') {
+                regex.append(".*");
+            } else {
+                regex.append(c);
             }
         }
         return "^" + regex + "$";

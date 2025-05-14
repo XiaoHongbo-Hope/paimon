@@ -166,9 +166,8 @@ public interface Catalog extends AutoCloseable {
      *     max results.
      * @param pageToken Optional parameter indicating the next page token allows list to be start
      *     from a specific point.
-     * @param tableNamePattern A sql LIKE pattern (% and _) for table names. All tables will be
-     *     returned if not set or empty. Currently, only prefix matching is supported. Note please
-     *     escape the underline if you want to match it exactly.
+     * @param tableNamePattern A sql LIKE pattern (%) for table names. All tables will be returned
+     *     if not set or empty. Currently, only prefix matching is supported.
      * @return a list of the names of tables with provided page size in this database and next page
      *     token, or a list of the names of all tables in this database if the catalog does not
      *     {@link #supportsListObjectsPaged()}.
@@ -193,9 +192,8 @@ public interface Catalog extends AutoCloseable {
      *     max results.
      * @param pageToken Optional parameter indicating the next page token allows list to be start
      *     from a specific point.
-     * @param tableNamePattern A sql LIKE pattern (% and _) for table names. All table details will
-     *     be returned if not set or empty. Currently, only prefix matching is supported. Note
-     *     please escape the underline if you want to match it exactly.
+     * @param tableNamePattern A sql LIKE pattern (%) for table names. All table details will be
+     *     returned if not set or empty. Currently, only prefix matching is supported.
      * @return a list of the table details with provided page size in this database and next page
      *     token, or a list of the details of all tables in this database if the catalog does not
      *     {@link #supportsListObjectsPaged()}.
@@ -213,12 +211,10 @@ public interface Catalog extends AutoCloseable {
      *
      * <p>NOTE: System tables will not be listed.
      *
-     * @param databaseNamePattern A sql LIKE pattern (% and _) for database names. All databases
-     *     will be returned if not set or empty. Currently, only prefix matching is supported. Note
-     *     please escape the underline if you want to match it exactly.
-     * @param tableNamePattern A sql LIKE pattern (% and _) for table names. All table summaries
-     *     will be returned if not set or empty. Currently, only prefix matching is supported. Note
-     *     please escape the underline if you want to match it exactly.
+     * @param databaseNamePattern A sql LIKE pattern (%) for database names. All databases will be
+     *     returned if not set or empty. Currently, only prefix matching is supported.
+     * @param tableNamePattern A sql LIKE pattern (%) for table names. All table summaries will be
+     *     returned if not set or empty. Currently, only prefix matching is supported.
      * @param maxResults Optional parameter indicating the maximum number of results to include in
      *     the result. If maxResults is not specified or set to 0, will return the default number of
      *     max results.
@@ -353,9 +349,8 @@ public interface Catalog extends AutoCloseable {
      *     max results.
      * @param pageToken Optional parameter indicating the next page token allows list to be start
      *     from a specific point.
-     * @param partitionNamePattern A sql LIKE pattern (% and _) for partition names. All partitions
-     *     will be * returned if not set or empty. Currently, only prefix matching is supported.
-     *     Note please * escape the underline if you want to match it exactly.
+     * @param partitionNamePattern A sql LIKE pattern (%) for partition names. All partitions will
+     *     be * returned if not set or empty. Currently, only prefix matching is supported.
      * @return a list of the partitions with provided page size(@param maxResults) in this table and
      *     next page token, or a list of all partitions of the table if the catalog does not {@link
      *     #supportsListObjectsPaged()}.
@@ -429,9 +424,8 @@ public interface Catalog extends AutoCloseable {
      *     max results.
      * @param pageToken Optional parameter indicating the next page token allows list to be start
      *     from a specific point.
-     * @param viewNamePattern A sql LIKE pattern (% and _) for view names. All views will be
-     *     returned if not set or empty. Currently, only prefix matching is supported. Note please
-     *     escape the underline if you want to match it exactly.
+     * @param viewNamePattern A sql LIKE pattern (%) for view names. All views will be returned if
+     *     not set or empty. Currently, only prefix matching is supported.
      * @return a list of the names of views with provided page size in this database and next page
      *     token, or a list of the names of all views in this database if the catalog does not
      *     {@link #supportsListObjectsPaged()}.
@@ -456,9 +450,8 @@ public interface Catalog extends AutoCloseable {
      *     max results.
      * @param pageToken Optional parameter indicating the next page token allows list to be start
      *     from a specific point.
-     * @param viewNamePattern A sql LIKE pattern (% and _) for view names. All view details will be
-     *     returned if not set or empty. Currently, only prefix matching is supported. Note please
-     *     escape the underline if you want to match it exactly.
+     * @param viewNamePattern A sql LIKE pattern (%) for view names. All view details will be
+     *     returned if not set or empty. Currently, only prefix matching is supported.
      * @return a list of the view details with provided page size (@param maxResults) in this
      *     database and next page token, or a list of the details of all views in this database if
      *     the catalog does not {@link #supportsListObjectsPaged()}.
@@ -478,12 +471,12 @@ public interface Catalog extends AutoCloseable {
      *
      * <p>NOTE: System tables will not be listed.
      *
-     * @param databaseNamePattern A sql LIKE pattern (% and _) for database names. All databases
-     *     will be returned if not set or empty. Currently, only prefix matching is supported. Note
-     *     please escape the underline if you want to match it exactly.
-     * @param viewNamePattern A sql LIKE pattern (% and _) for view names. All view summaries will
-     *     be returned if not set or empty. Currently, only prefix matching is supported. Note
-     *     please escape the underline if you want to match it exactly.
+     * @param databaseNamePattern A sql LIKE pattern (%) for database names. All databases will be
+     *     returned if not set or empty. Currently, only prefix matching is supported. Note please
+     *     escape the underline if you want to match it exactly.
+     * @param viewNamePattern A sql LIKE pattern (%) for view names. All view summaries will be
+     *     returned if not set or empty. Currently, only prefix matching is supported. Note please
+     *     escape the underline if you want to match it exactly.
      * @param maxResults Optional parameter indicating the maximum number of results to include in
      *     the result. If maxResults is not specified or set to 0, will return the default number of
      *     max results.
