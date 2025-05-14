@@ -577,7 +577,7 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         Map<String, String> options = new HashMap<>();
         options.put("type", TableType.FORMAT_TABLE.toString());
 
-        Schema FORMAT_TABLE_SCHEMA =
+        Schema formatTableSchema =
                 new Schema(
                         Lists.newArrayList(
                                 new DataField(0, "pk", DataTypes.INT()),
@@ -591,7 +591,7 @@ public abstract class RESTCatalogTest extends CatalogTestBase {
         for (String tableName : tableNames) {
             if (StringUtils.equals(tableName, "format_table")) {
                 catalog.createTable(
-                        Identifier.create(databaseName, tableName), FORMAT_TABLE_SCHEMA, false);
+                        Identifier.create(databaseName, tableName), formatTableSchema, false);
             } else {
                 catalog.createTable(
                         Identifier.create(databaseName, tableName), DEFAULT_TABLE_SCHEMA, false);
