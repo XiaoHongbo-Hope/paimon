@@ -1864,13 +1864,14 @@ public class RESTCatalogServer {
     }
 
     private MockResponse handleInvalidMaxResults(Map<String, String> parameters) {
-        String maxValue = parameters.get(MAX_RESULTS);
-        LOG.error("Invalid maxResults value: {}", maxValue);
+        String maxResults = parameters.get(MAX_RESULTS);
+        LOG.error("Invalid maxResults value: {}", maxResults);
         return mockResponse(
                 new ErrorResponse(
                         ErrorResponse.RESOURCE_TYPE_TABLE,
                         null,
-                        String.format("Invalid input for queryParameter maxResults: %s", maxValue),
+                        String.format(
+                                "Invalid input for queryParameter maxResults: %s", maxResults),
                         400),
                 400);
     }
