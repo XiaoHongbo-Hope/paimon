@@ -1438,6 +1438,220 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertEqual(result.num_rows, 3, "Should have 5 rows")
         self.assertEqual(result.num_columns, 3, "Should have 3 columns")
 
+    def test_blob_read_with_predicate(self):
+        """Test blob read with predicate filtering on non-blob fields."""
+        from pypaimon import Schema
+
+        # Create schema with blob column and other fields for filtering
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('description', pa.string()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true'
+            }
+        )
+        self.catalog.create_table('test_db.blob_predicate_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_predicate_test')
+
+        # Write test data
+        test_data = pa.Table.from_pydict({
+            'id': [1, 2, 3, 4, 5],
+            'name': ['Alice', 'Bob', 'Charlie', 'David', 'Eve'],
+            'description': ['User 1', 'User 2', 'User 3', 'User 4', 'User 5'],
+            'blob_data': [
+                b'blob_data_1',
+                b'blob_data_2',
+                b'blob_data_3',
+                b'blob_data_4',
+                b'blob_data_5'
+            ]
+        }, schema=pa_schema)
+
+        # Write data
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        commit = write_builder.new_commit()
+        commit.commit(commit_messages)
+        writer.close()
+
+        # Test 1: Filter by id field (less than)
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        predicate = predicate_builder.less_than('id', 3)
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should only return rows with id < 3 (id=1, id=2)
+        self.assertEqual(result.num_rows, 2, "Should have 2 rows")
+        self.assertEqual(result.column('id').to_pylist(), [1, 2], "ID column should match")
+        self.assertEqual(result.column('name').to_pylist(), ['Alice', 'Bob'], "Name column should match")
+
+        # Test 2: Filter by id field (between)
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        predicate = predicate_builder.between('id', 2, 4)
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should only return rows with 2 <= id <= 4 (id=2, id=3, id=4)
+        self.assertEqual(result.num_rows, 3, "Should have 3 rows")
+        self.assertEqual(result.column('id').to_pylist(), [2, 3, 4], "ID column should match")
+        self.assertEqual(result.column('name').to_pylist(), ['Bob', 'Charlie', 'David'], "Name column should match")
+
+        # Test 3: Filter by name field (equal)
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        predicate = predicate_builder.equal('name', 'Alice')
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should only return row with name='Alice'
+        self.assertEqual(result.num_rows, 1, "Should have 1 row")
+        self.assertEqual(result.column('id').to_pylist(), [1], "ID column should match")
+        self.assertEqual(result.column('name').to_pylist(), ['Alice'], "Name column should match")
+
+        # Test 4: Filter by name field (is_in)
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        predicate = predicate_builder.is_in('name', ['Alice', 'Charlie', 'Eve'])
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should only return rows with name in ['Alice', 'Charlie', 'Eve']
+        self.assertEqual(result.num_rows, 3, "Should have 3 rows")
+        expected_names = {'Alice', 'Charlie', 'Eve'}
+        self.assertEqual(set(result.column('name').to_pylist()), expected_names, "Name column should match")
+
+        # Test 5: Filter by description field (contains)
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        predicate = predicate_builder.contains('description', 'User 2')
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should only return row with description containing 'User 2'
+        self.assertEqual(result.num_rows, 1, "Should have 1 row")
+        self.assertEqual(result.column('id').to_pylist(), [2], "ID column should match")
+        self.assertEqual(result.column('description').to_pylist(), ['User 2'], "Description column should match")
+
+        # Test 6: Complex predicate (AND)
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        p1 = predicate_builder.greater_than('id', 1)
+        p2 = predicate_builder.less_than('id', 5)
+        predicate = predicate_builder.and_predicates([p1, p2])
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should only return rows with 1 < id < 5 (id=2, id=3, id=4)
+        self.assertEqual(result.num_rows, 3, "Should have 3 rows")
+        self.assertEqual(result.column('id').to_pylist(), [2, 3, 4], "ID column should match")
+
+        # Test 7: Verify blob data is correctly filtered
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        predicate = predicate_builder.equal('id', 3)
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should only return row with id=3
+        self.assertEqual(result.num_rows, 1, "Should have 1 row")
+        blob_data = result.column('blob_data').to_pylist()
+        self.assertEqual(len(blob_data), 1, "Should have 1 blob")
+        self.assertEqual(blob_data[0], b'blob_data_3', "Blob data should match")
+
+    def test_blob_read_with_predicate_on_blob_field(self):
+        """Test blob read with predicate filtering on blob field itself."""
+        from pypaimon import Schema
+
+        # Create schema with blob column
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true'
+            }
+        )
+        self.catalog.create_table('test_db.blob_predicate_blob_field_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_predicate_blob_field_test')
+
+        # Write test data with different blob values
+        test_data = pa.Table.from_pydict({
+            'id': [1, 2, 3, 4],
+            'blob_data': [
+                b'blob_A',
+                b'blob_B',
+                b'blob_A',  # Same as first
+                b'blob_C'
+            ]
+        }, schema=pa_schema)
+
+        # Write data
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        commit = write_builder.new_commit()
+        commit.commit(commit_messages)
+        writer.close()
+
+        # Test filtering by blob field equality
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        predicate = predicate_builder.equal('blob_data', b'blob_A')
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should only return rows with blob_data == b'blob_A' (id=1, id=3)
+        self.assertEqual(result.num_rows, 2, "Should have 2 rows")
+        self.assertEqual(set(result.column('id').to_pylist()), {1, 3}, "ID column should match")
+        blob_data = result.column('blob_data').to_pylist()
+        self.assertEqual(len(blob_data), 2, "Should have 2 blobs")
+        self.assertEqual(set(blob_data), {b'blob_A'}, "All blob data should be blob_A")
+
+        # Test filtering by blob field with is_in
+        read_builder = table.new_read_builder()
+        predicate_builder = read_builder.new_predicate_builder()
+        predicate = predicate_builder.is_in('blob_data', [b'blob_A', b'blob_C'])
+        read_builder = read_builder.with_filter(predicate)
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Should return rows with blob_data in [b'blob_A', b'blob_C'] (id=1, id=3, id=4)
+        self.assertEqual(result.num_rows, 3, "Should have 3 rows")
+        self.assertEqual(set(result.column('id').to_pylist()), {1, 3, 4}, "ID column should match")
+
 
 if __name__ == '__main__':
     unittest.main()
