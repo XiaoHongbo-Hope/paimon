@@ -106,7 +106,7 @@ class RayDataTest(unittest.TestCase):
         table_scan = read_builder.new_scan()
         splits = table_scan.plan().splits()
 
-        ray_dataset = table_read.to_ray(splits)
+        ray_dataset = table_read.to_ray(splits, use_distributed_read=True)
 
         # Verify Ray dataset
         self.assertIsNotNone(ray_dataset, "Ray dataset should not be None")
@@ -162,7 +162,7 @@ class RayDataTest(unittest.TestCase):
         table_scan = read_builder.new_scan()
         splits = table_scan.plan().splits()
 
-        ray_dataset = table_read.to_ray(splits)
+        ray_dataset = table_read.to_ray(splits, use_distributed_read=True)
 
         # Verify filtered results
         self.assertEqual(ray_dataset.count(), 2, "Should have 2 rows after filtering")
@@ -210,7 +210,7 @@ class RayDataTest(unittest.TestCase):
         table_scan = read_builder.new_scan()
         splits = table_scan.plan().splits()
 
-        ray_dataset = table_read.to_ray(splits)
+        ray_dataset = table_read.to_ray(splits, use_distributed_read=True)
 
         # Verify projection
         self.assertEqual(ray_dataset.count(), 3, "Should have 3 rows")
@@ -253,7 +253,7 @@ class RayDataTest(unittest.TestCase):
         table_scan = read_builder.new_scan()
         splits = table_scan.plan().splits()
 
-        ray_dataset = table_read.to_ray(splits)
+        ray_dataset = table_read.to_ray(splits, use_distributed_read=True)
 
         # Apply map operation (double the value)
         def double_value(row):
@@ -300,7 +300,7 @@ class RayDataTest(unittest.TestCase):
         table_scan = read_builder.new_scan()
         splits = table_scan.plan().splits()
 
-        ray_dataset = table_read.to_ray(splits)
+        ray_dataset = table_read.to_ray(splits, use_distributed_read=True)
 
         # Apply filter operation (score >= 80)
         filtered_dataset = ray_dataset.filter(lambda row: row['score'] >= 80)
@@ -310,6 +310,53 @@ class RayDataTest(unittest.TestCase):
         self.assertEqual(len(df), 3, "Should have 3 rows with score >= 80")
         self.assertEqual(set(df['id'].tolist()), {3, 4, 5}, "Should have IDs 3, 4, 5")
         self.assertEqual(set(df['score'].tolist()), {80, 90, 100}, "Should have scores 80, 90, 100")
+
+    def test_ray_data_distributed_vs_simple(self):
+        """Test that both distributed and simple reading modes work correctly."""
+        import ray
+
+        # Create schema
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('value', pa.int64()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(pa_schema)
+        self.catalog.create_table('default.test_ray_modes', schema, False)
+        table = self.catalog.get_table('default.test_ray_modes')
+
+        # Write test data
+        test_data = pa.Table.from_pydict({
+            'id': [1, 2, 3],
+            'value': [10, 20, 30],
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        commit = write_builder.new_commit()
+        commit.commit(commit_messages)
+        writer.close()
+
+        # Read using distributed mode
+        read_builder = table.new_read_builder()
+        table_read = read_builder.new_read()
+        table_scan = read_builder.new_scan()
+        splits = table_scan.plan().splits()
+
+        ray_dataset_distributed = table_read.to_ray(splits, use_distributed_read=True)
+        ray_dataset_simple = table_read.to_ray(splits, use_distributed_read=False)
+
+        # Both should produce the same results
+        self.assertEqual(ray_dataset_distributed.count(), 3, "Distributed mode should have 3 rows")
+        self.assertEqual(ray_dataset_simple.count(), 3, "Simple mode should have 3 rows")
+
+        df_distributed = ray_dataset_distributed.to_pandas()
+        df_simple = ray_dataset_simple.to_pandas()
+
+        self.assertEqual(list(df_distributed['id']), list(df_simple['id']), "IDs should match")
+        self.assertEqual(list(df_distributed['value']), list(df_simple['value']), "Values should match")
 
 
 if __name__ == '__main__':
