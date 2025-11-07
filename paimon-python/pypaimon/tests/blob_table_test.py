@@ -1518,6 +1518,63 @@ class DataBlobWriterTest(unittest.TestCase):
                 [RowKind.INSERT, RowKind.UPDATE_BEFORE, RowKind.UPDATE_AFTER, RowKind.DELETE],
                 f"Row {row_id}: RowKind should be valid")
 
+    def test_blob_as_descriptor_target_file_size_not_rolling(self):
+        """
+        Reproduce issue: target-file-size doesn't work in blob-as-descriptor=true mode.
+        BlobWriter checks pending_data.nbytes (descriptor size ~bytes) instead of actual blob data size.
+        """
+        import random
+        import os
+        from pypaimon import Schema
+        from pypaimon.table.row.blob import BlobDescriptor
+
+        pa_schema = pa.schema([('id', pa.int32()), ('name', pa.string()), ('blob_data', pa.large_binary())])
+        schema = Schema.from_pyarrow_schema(pa_schema, options={
+            'row-tracking.enabled': 'true', 'data-evolution.enabled': 'true',
+            'blob-as-descriptor': 'true', 'target-file-size': '1MB'
+        })
+        self.catalog.create_table('test_db.blob_target_size_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_target_size_test')
+
+        # Create 5 external blob files (2MB each, > target-file-size)
+        num_blobs, blob_size = 5, 2 * 1024 * 1024
+        random.seed(42)
+        descriptors = []
+        for i in range(num_blobs):
+            path = os.path.join(self.temp_dir, f'external_blob_{i}')
+            data = bytes(bytearray([random.randint(0, 255) for _ in range(blob_size)]))
+            with open(path, 'wb') as f:
+                f.write(data)
+            descriptors.append(BlobDescriptor(path, 0, len(data)))
+
+        # Write data
+        test_data = pa.Table.from_pydict({
+            'id': list(range(1, num_blobs + 1)),
+            'name': [f'item_{i}' for i in range(1, num_blobs + 1)],
+            'blob_data': [d.serialize() for d in descriptors]
+        }, schema=pa_schema)
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        write_builder.new_commit().commit(commit_messages)
+        writer.close()
+
+        # Check blob files
+        all_files = [f for msg in commit_messages for f in msg.new_files]
+        blob_files = [f for f in all_files if f.file_name.endswith('.blob')]
+        total_size = sum(f.file_size for f in blob_files)
+
+        # Verify issue: should have multiple files but only 1 created
+        print(f"Blob files: {len(blob_files)}, total size: {total_size / 1024 / 1024:.2f}MB (target: 1MB)")
+        if len(blob_files) == 1 and total_size > 1024 * 1024:
+            print("⚠️ ISSUE REPRODUCED: Only 1 blob file despite exceeding target-file-size")
+
+        # Verify data integrity
+        result = table.new_read_builder().new_read().to_arrow(table.new_read_builder().new_scan().plan().splits())
+        self.assertEqual(result.num_rows, num_blobs)
+        self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
+
 
 if __name__ == '__main__':
     unittest.main()
