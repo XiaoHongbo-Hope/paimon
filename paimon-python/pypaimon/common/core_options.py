@@ -85,7 +85,6 @@ class CoreOptions(str, Enum):
         if CoreOptions.TARGET_FILE_SIZE in options:
             size_str = options[CoreOptions.TARGET_FILE_SIZE]
             return MemorySize.parse(size_str).get_bytes()
-        # Default: 128MB for primary key table, 256MB for append-only table
         return MemorySize.of_mebi_bytes(128 if has_primary_key else 256).get_bytes()
 
     @staticmethod
@@ -94,5 +93,4 @@ class CoreOptions(str, Enum):
         if CoreOptions.BLOB_TARGET_FILE_SIZE in options:
             size_str = options[CoreOptions.BLOB_TARGET_FILE_SIZE]
             return MemorySize.parse(size_str).get_bytes()
-        # Default: same as target-file-size (for append-only table, which is 256MB)
         return CoreOptions.get_target_file_size(options, has_primary_key=False)

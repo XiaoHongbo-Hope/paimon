@@ -159,7 +159,7 @@ class BlobWriter(AppendOnlyDataWriter):
         file_path = self._generate_file_path(file_name)
         
         # Write blob file (normal mode, no rolling)
-        self.file_io.write_blob(file_path, data, self.blob_as_descriptor, append=False)
+        self.file_io.write_blob(file_path, data, self.blob_as_descriptor)
         
         file_size = self.file_io.get_file_size(file_path)
         

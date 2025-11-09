@@ -370,7 +370,7 @@ class FileIO:
         with self.new_output_stream(path) as output_stream:
             fastavro.writer(output_stream, avro_schema, records, **kwargs)
 
-    def write_blob(self, path: Path, data: pyarrow.Table, blob_as_descriptor: bool, append: bool = False, target_size: int = None, **kwargs):
+    def write_blob(self, path: Path, data: pyarrow.Table, blob_as_descriptor: bool, **kwargs):
         """
         Write blob data to file.
         
@@ -378,11 +378,6 @@ class FileIO:
             path: File path
             data: PyArrow table with blob data
             blob_as_descriptor: Whether blob data is stored as descriptor
-            append: If True, append to existing file (only for blob-as-descriptor mode with rolling)
-            target_size: If provided, stop writing when file size exceeds this (returns remaining data)
-        
-        Returns:
-            Tuple of (written_data, remaining_data) if target_size is provided and exceeded, else (data, None)
         """
         try:
             # Validate input constraints
@@ -406,25 +401,9 @@ class FileIO:
             num_rows = data.num_rows
             field_name = fields[0].name
             
-            # Handle append mode for blob-as-descriptor rolling
-            if append and blob_as_descriptor and self.exists(path):
-                # Append mode: read existing file, append new data, rewrite
-                from pypaimon.read.reader.format_blob_reader import FormatBlobReader
-                # Read existing data
-                existing_data = FormatBlobReader(self, str(path), [field_name], fields, None, blob_as_descriptor).read_arrow_batch()
-                if existing_data:
-                    # Merge existing and new data
-                    data = pyarrow.concat_tables([existing_data, data])
-                    records_dict = data.to_pydict()
-                    num_rows = data.num_rows
-            
-            # Track written rows for target_size checking
-            written_rows = []
-            remaining_start_idx = num_rows
-            
             with self.new_output_stream(path) as output_stream:
                 writer = BlobFormatWriter(output_stream)
-                # Write each row, checking size if target_size is provided
+                # Write each row
                 for i in range(num_rows):
                     col_data = records_dict[field_name][i]
                     # Convert to appropriate type based on field type
@@ -447,46 +426,9 @@ class FileIO:
                         row_values = [col_data]
                     # Create GenericRow and write
                     row = GenericRow(row_values, fields, RowKind.INSERT)
-                    
-                    # Check file size BEFORE writing if target_size is provided
-                    if target_size is not None and blob_as_descriptor:
-                        # Estimate size after writing this element
-                        # Current position + magic(4) + blob_data_size + length(8) + CRC(4) + index + header
-                        # For blob-as-descriptor, we need to estimate blob data size from descriptor
-                        if blob_as_descriptor:
-                            # Estimate: each blob element adds ~2MB (from test), but we check actual position
-                            # We'll check after writing to get accurate size
-                            pass
-                    
                     writer.add_element(row)
-                    written_rows.append(i)
-                    
-                    # Check file size AFTER writing if target_size is provided
-                    if target_size is not None and blob_as_descriptor:
-                        # Get current file size (position includes magic + data + length + CRC for all written elements)
-                        # But doesn't include index and header yet
-                        current_size = writer.position
-                        # Estimate final size: add index (compressed lengths) + header (5 bytes)
-                        # Index size: DeltaVarintCompressor compresses lengths, estimate conservatively
-                        # Each length is 8 bytes, compressed is usually smaller, but we use conservative estimate
-                        estimated_index_size = len(writer.lengths) * 4  # conservative estimate (compressed)
-                        estimated_header_size = 5  # 4 bytes index length + 1 byte version
-                        estimated_final_size = current_size + estimated_index_size + estimated_header_size
-                        
-                        if estimated_final_size > target_size:
-                            # Stop writing, return remaining data
-                            remaining_start_idx = i + 1
-                            break
                 
                 writer.close()
-            
-            # Return written and remaining data if target_size was exceeded
-            if target_size is not None and remaining_start_idx < num_rows:
-                written_data = data.slice(0, remaining_start_idx)
-                remaining_data = data.slice(remaining_start_idx)
-                return written_data, remaining_data
-            
-            return data, None
 
         except Exception as e:
             self.delete_quietly(path)
