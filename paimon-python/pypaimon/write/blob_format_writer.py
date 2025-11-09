@@ -69,17 +69,7 @@ class BlobFormatWriter:
             finally:
                 stream.close()
 
-        if self.blob_as_descriptor and hasattr(row, '_original_descriptor_bytes'):
-            descriptor_bytes = row._original_descriptor_bytes
-            # Write descriptor bytes first
-            crc32 = self._write_with_crc(descriptor_bytes, crc32)
-            # Write descriptor length (4 bytes, little endian) at the end
-            descriptor_length = len(descriptor_bytes)
-            length_bytes = struct.pack('<I', descriptor_length)
-            crc32 = self._write_with_crc(length_bytes, crc32)
-
-        # Calculate total length including magic + data + descriptor (if any) + metadata (length + CRC)
-        # Note: descriptor is already included in self.position - previous_pos
+        # Calculate total length including magic + data + metadata (length + CRC)
         bin_length = self.position - previous_pos + self.METADATA_SIZE
         self.lengths.append(bin_length)
 

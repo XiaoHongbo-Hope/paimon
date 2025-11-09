@@ -423,11 +423,6 @@ public class RollingBlobFileWriterTest {
 
     @Test
     public void testSequenceNumberIncrementInBlobAsDescriptorMode() throws IOException {
-        // This test verifies that sequence numbers are correctly incremented for each row
-        // in blob-as-descriptor mode. The bug was that sequence generator was not incremented
-        // when writing rows one-by-one, causing all rows in a file to have identical sequence
-        // numbers (min_seq == max_seq).
-
         // Write multiple rows to trigger one-by-one writing in blob-as-descriptor mode
         int numRows = 10;
         for (int i = 0; i < numRows; i++) {
@@ -495,11 +490,6 @@ public class RollingBlobFileWriterTest {
 
     @Test
     public void testColumnStatsWithMultipleBatches() throws IOException {
-        // This test verifies that column statistics are computed correctly across all batches,
-        // not just the first batch. The bug was that statistics were computed using only
-        // the first batch, which incorrectly handles tables with multiple batches.
-
-        // Create data in multiple batches with min/max values distributed across batches
         // Batch 1: ids 1-5, values 10-14
         List<InternalRow> batch1 =
                 Arrays.asList(
@@ -529,9 +519,6 @@ public class RollingBlobFileWriterTest {
                         GenericRow.of(
                                 15, BinaryString.fromString("o"), new BlobData(testBlobData)));
 
-        // Write batches separately to simulate multiple batches scenario
-        // In real scenarios, this could happen when pending_data is built from multiple
-        // merged RecordBatches via concat_tables
         writer.writeBundle(new TestBundleRecords(batch1));
         writer.writeBundle(new TestBundleRecords(batch2));
         writer.writeBundle(new TestBundleRecords(batch3));
@@ -550,10 +537,6 @@ public class RollingBlobFileWriterTest {
         // Verify statistics are computed across all batches
         for (DataFileMeta fileMeta : normalFiles) {
             if (fileMeta.valueStats() != null) {
-                // Get the first column (id) statistics
-                // Expected: min_id = 1 (from batch1), max_id = 15 (from batch3)
-                // If only batch1 was used, we'd get min=1, max=5 (WRONG)
-                // Note: For blob tables, value stats might be limited, so we check if stats exist
                 org.apache.paimon.stats.SimpleStats valueStats = fileMeta.valueStats();
                 if (valueStats != null && valueStats.minValues().getFieldCount() > 0) {
                     // Verify that min and max are computed across all batches
@@ -586,11 +569,6 @@ public class RollingBlobFileWriterTest {
 
     @Test
     public void testBlobStatsSchemaWithCustomColumnName() throws IOException {
-        // This test verifies that blob stats schema uses the actual blob column name,
-        // not a hardcoded value. The bug was that the blob field name was hardcoded
-        // when creating stats for blob files, but the actual blob column name may differ.
-
-        // Create a schema with blob column using a custom name (not 'blob_data')
         RowType customSchema =
                 RowType.builder()
                         .field("id", DataTypes.INT())
@@ -636,20 +614,9 @@ public class RollingBlobFileWriterTest {
 
         assertThat(blobFiles).as("Should have at least one blob file").isNotEmpty();
 
-        // Verify that the stats schema uses the actual blob column name
-        // In Java, the stats are stored in DataFileMeta.valueStats(), and the field names
-        // should match the actual blob column name from the schema
         for (DataFileMeta blobFile : blobFiles) {
-            // The blob file should have been created with the correct schema
-            // We verify this by checking that the file was created successfully
-            // and that the schema matches (this is implicit in the file creation)
             assertThat(blobFile.fileName()).endsWith(".blob");
             assertThat(blobFile.rowCount()).isGreaterThan(0);
-
-            // Note: In Java, the stats schema is determined by the RowType passed to
-            // RowDataFileWriter, which uses blobType (extracted from writeSchema).
-            // So the field name should automatically match. This test verifies that
-            // the system correctly handles custom blob column names.
         }
 
         // Verify total record count
