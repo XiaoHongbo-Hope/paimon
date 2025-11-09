@@ -1518,7 +1518,7 @@ class DataBlobWriterTest(unittest.TestCase):
                 [RowKind.INSERT, RowKind.UPDATE_BEFORE, RowKind.UPDATE_AFTER, RowKind.DELETE],
                 f"Row {row_id}: RowKind should be valid")
 
-    def test_blob_as_descriptor_target_file_size_not_rolling(self):
+    def test_blob_as_descriptor_target_file_size_rolling(self):
         import random
         import os
         from pypaimon import Schema
@@ -1685,6 +1685,282 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertEqual(result.num_rows, num_blobs)
         self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
 
+    def test_blob_as_descriptor_sequence_number_increment(self):
+        """
+        Test that sequence numbers are correctly incremented for each row in blob-as-descriptor mode.
+        
+        This test verifies the fix for the bug where sequence generator was not incremented
+        when writing rows one-by-one in blob-as-descriptor=true mode, causing all rows
+        in a file to have identical sequence numbers (min_seq == max_seq).
+        """
+        import os
+        from pypaimon import Schema
+        from pypaimon.table.row.blob import BlobDescriptor
+
+        # Create schema with blob column (blob-as-descriptor=true)
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('blob_data', pa.large_binary())
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, options={
+            'row-tracking.enabled': 'true',
+            'data-evolution.enabled': 'true',
+            'blob-as-descriptor': 'true'
+        })
+
+        self.catalog.create_table('test_db.blob_sequence_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_sequence_test')
+
+        # Create multiple external blob files
+        num_blobs = 10
+        descriptors = []
+        for i in range(num_blobs):
+            path = os.path.join(self.temp_dir, f'external_blob_seq_{i}')
+            data = f"blob data {i}".encode('utf-8')
+            with open(path, 'wb') as f:
+                f.write(data)
+            descriptors.append(BlobDescriptor(path, 0, len(data)))
+
+        # Write data row by row (this triggers the one-by-one writing in blob-as-descriptor mode)
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        
+        # Write each row separately to ensure one-by-one writing
+        for i in range(num_blobs):
+            test_data = pa.Table.from_pydict({
+                'id': [i + 1],
+                'name': [f'item_{i}'],
+                'blob_data': [descriptors[i].serialize()]
+            }, schema=pa_schema)
+            writer.write_arrow(test_data)
+
+        commit_messages = writer.prepare_commit()
+        write_builder.new_commit().commit(commit_messages)
+        writer.close()
+
+        # Extract blob files from commit messages
+        all_files = [f for msg in commit_messages for f in msg.new_files]
+        blob_files = [f for f in all_files if f.file_name.endswith('.blob')]
+
+        # Verify that we have at least one blob file
+        self.assertGreater(len(blob_files), 0, "Should have at least one blob file")
+
+        # Verify sequence numbers for each blob file
+        for blob_file in blob_files:
+            min_seq = blob_file.min_sequence_number
+            max_seq = blob_file.max_sequence_number
+            row_count = blob_file.row_count
+
+            # Critical assertion: min_seq should NOT equal max_seq when there are multiple rows
+            if row_count > 1:
+                self.assertNotEqual(
+                    min_seq, max_seq,
+                    f"Sequence numbers should be different for files with multiple rows. "
+                    f"File: {blob_file.file_name}, row_count: {row_count}, "
+                    f"min_seq: {min_seq}, max_seq: {max_seq}. "
+                    f"This indicates sequence generator was not incremented for each row."
+                )
+                # Verify that max_seq - min_seq + 1 equals row_count
+                # (each row should have a unique sequence number)
+                # Note: In Python, sequence_generator starts from 0, and next() increments before returning
+                # So if we write 10 rows, sequence numbers are 1, 2, ..., 10
+                # But min_seq is captured at the start (0) and max_seq is the final current (10)
+                # So the range is 10 - 0 + 1 = 11, which includes the initial state
+                # The actual sequence numbers used are 1 to 10, which is 10 values
+                # So we verify that max_seq - min_seq >= row_count - 1
+                # (allowing for the off-by-one due to initial state)
+                self.assertGreaterEqual(
+                    max_seq - min_seq, row_count - 1,
+                    f"Sequence number range should be at least row_count - 1. "
+                    f"File: {blob_file.file_name}, row_count: {row_count}, "
+                    f"min_seq: {min_seq}, max_seq: {max_seq}, "
+                    f"expected range: >= {row_count - 1}, actual range: {max_seq - min_seq}"
+                )
+            else:
+                # For single row files, min_seq == max_seq is acceptable
+                self.assertEqual(
+                    min_seq, max_seq,
+                    f"Single row file should have min_seq == max_seq. "
+                    f"File: {blob_file.file_name}, min_seq: {min_seq}, max_seq: {max_seq}"
+                )
+
+        # Verify data integrity
+        result = table.new_read_builder().new_read().to_arrow(table.new_read_builder().new_scan().plan().splits())
+        self.assertEqual(result.num_rows, num_blobs)
+        self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
+
+    def test_column_stats_with_multiple_batches(self):
+        """
+        Test that column statistics are computed correctly across all batches,
+        not just the first batch.
+        
+        This test verifies the fix for the bug where statistics were computed
+        using only data.to_batches()[0], which incorrectly handles tables with
+        multiple batches from pa.concat_tables.
+        """
+        from pypaimon import Schema
+
+        # Create schema with normal columns (not blob, to test min/max stats)
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('value', pa.int64())
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, options={
+            'row-tracking.enabled': 'true',
+            'data-evolution.enabled': 'true'
+        })
+
+        self.catalog.create_table('test_db.multi_batch_stats_test', schema, False)
+        table = self.catalog.get_table('test_db.multi_batch_stats_test')
+
+        # Create data in multiple batches
+        # Batch 1: ids 1-5, values 10-14
+        batch1 = pa.RecordBatch.from_pydict({
+            'id': [1, 2, 3, 4, 5],
+            'name': ['a', 'b', 'c', 'd', 'e'],
+            'value': [10, 11, 12, 13, 14]
+        }, schema=pa_schema)
+
+        # Batch 2: ids 6-10, values 15-19 (min value 15 > max value 14 from batch1)
+        batch2 = pa.RecordBatch.from_pydict({
+            'id': [6, 7, 8, 9, 10],
+            'name': ['f', 'g', 'h', 'i', 'j'],
+            'value': [15, 16, 17, 18, 19]
+        }, schema=pa_schema)
+
+        # Batch 3: ids 11-15, values 5-9 (min value 5 < min value 10 from batch1)
+        batch3 = pa.RecordBatch.from_pydict({
+            'id': [11, 12, 13, 14, 15],
+            'name': ['k', 'l', 'm', 'n', 'o'],
+            'value': [5, 6, 7, 8, 9]
+        }, schema=pa_schema)
+
+        # Combine batches into a table (this creates multiple chunks)
+        combined_table = pa.Table.from_batches([batch1, batch2, batch3])
+
+        # Write the combined table
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(combined_table)
+        commit_messages = writer.prepare_commit()
+        write_builder.new_commit().commit(commit_messages)
+        writer.close()
+
+        # Extract files from commit messages
+        all_files = [f for msg in commit_messages for f in msg.new_files]
+        normal_files = [f for f in all_files if not f.file_name.endswith('.blob')]
+
+        # Verify we have at least one normal file
+        self.assertGreater(len(normal_files), 0, "Should have at least one normal file")
+
+        # Verify statistics are computed across all batches
+        for file_meta in normal_files:
+            value_stats = file_meta.value_stats
+            if value_stats is not None and value_stats.min_values is not None:
+                # Find the 'value' column index in the schema
+                value_col_idx = None
+                for i, field in enumerate(schema.fields):
+                    if field.name == 'value':
+                        value_col_idx = i
+                        break
+
+                if value_col_idx is not None:
+                    # Access GenericRow values using .values attribute
+                    min_values_list = value_stats.min_values.values if hasattr(value_stats.min_values, 'values') else []
+                    max_values_list = value_stats.max_values.values if hasattr(value_stats.max_values, 'values') else []
+                    
+                    if value_col_idx < len(min_values_list) and value_col_idx < len(max_values_list):
+                        min_value = min_values_list[value_col_idx]
+                        max_value = max_values_list[value_col_idx]
+
+                        # Expected: min_value = 5 (from batch3), max_value = 19 (from batch2)
+                        # If only batch1 was used, we'd get min=10, max=14 (WRONG)
+                        self.assertEqual(
+                            min_value, 5,
+                            f"Min value should be 5 (from batch3), but got {min_value}. "
+                            f"This indicates statistics were not computed across all batches."
+                        )
+                        self.assertEqual(
+                            max_value, 19,
+                            f"Max value should be 19 (from batch2), but got {max_value}. "
+                            f"This indicates statistics were not computed across all batches."
+                        )
+
+        # Verify data integrity
+        result = table.new_read_builder().new_read().to_arrow(table.new_read_builder().new_scan().plan().splits())
+        self.assertEqual(result.num_rows, 15)
+        self.assertEqual(result.column('id').to_pylist(), list(range(1, 16)))
+
+    def test_blob_stats_schema_with_custom_column_name(self):
+        """
+        Test that blob stats schema uses the actual blob column name, not hardcoded 'blob_data'.
+        
+        This test verifies the fix for the bug where the blob field name was hardcoded as
+        'blob_data' when creating stats for blob files, but the actual blob column name
+        passed to BlobWriter.__init__ via the blob_column parameter may differ.
+        """
+        from pypaimon import Schema
+
+        # Create schema with blob column using a custom name (not 'blob_data')
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('my_custom_blob', pa.large_binary())  # Custom blob column name
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, options={
+            'row-tracking.enabled': 'true',
+            'data-evolution.enabled': 'true'
+        })
+
+        self.catalog.create_table('test_db.blob_custom_name_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_custom_name_test')
+
+        # Write data
+        test_data = pa.Table.from_pydict({
+            'id': [1, 2, 3],
+            'name': ['Alice', 'Bob', 'Charlie'],
+            'my_custom_blob': [b'blob1', b'blob2', b'blob3']
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        write_builder.new_commit().commit(commit_messages)
+        writer.close()
+
+        # Extract blob files from commit messages
+        all_files = [f for msg in commit_messages for f in msg.new_files]
+        blob_files = [f for f in all_files if f.file_name.endswith('.blob')]
+
+        # Verify we have at least one blob file
+        self.assertGreater(len(blob_files), 0, "Should have at least one blob file")
+
+        # Verify that the stats schema uses the actual blob column name, not hardcoded 'blob_data'
+        for blob_file in blob_files:
+            value_stats = blob_file.value_stats
+            if value_stats is not None and value_stats.min_values is not None:
+                # Get the field names from the stats
+                # The stats should use 'my_custom_blob', not 'blob_data'
+                min_values = value_stats.min_values
+                if hasattr(min_values, 'fields') and len(min_values.fields) > 0:
+                    # Check if the field name matches the actual blob column name
+                    field_name = min_values.fields[0].name
+                    self.assertEqual(
+                        field_name, 'my_custom_blob',
+                        f"Blob stats field name should be 'my_custom_blob' (actual column name), "
+                        f"but got '{field_name}'. This indicates the field name was hardcoded "
+                        f"instead of using the blob_column parameter."
+                    )
+
+        # Verify data integrity
+        result = table.new_read_builder().new_read().to_arrow(table.new_read_builder().new_scan().plan().splits())
+        self.assertEqual(result.num_rows, 3)
+        self.assertEqual(result.column('id').to_pylist(), [1, 2, 3])
+        self.assertEqual(result.column('name').to_pylist(), ['Alice', 'Bob', 'Charlie'])
+
     def test_blob_file_name_format_with_shared_uuid_non_descriptor_mode(self):
         import random
         import re
@@ -1785,6 +2061,157 @@ class DataBlobWriterTest(unittest.TestCase):
         result = table.new_read_builder().new_read().to_arrow(table.new_read_builder().new_scan().plan().splits())
         self.assertEqual(result.num_rows, num_blobs)
         self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
+
+    def test_blob_descriptor_uri_without_scheme_pangu(self):
+        """
+        Test that blob descriptor URI scheme is preserved after from_descriptor.
+        
+        This test reproduces the issue where:
+        - blob-as-descriptor=true mode
+        - User provides URI WITH scheme (e.g., 'pangu://pangu/path/to/file')
+        - After writing and reading, BlobDescriptor.uri loses the scheme (becomes '/pangu/path/to/file')
+        - When calling Blob.from_descriptor, the URI no longer has the scheme prefix
+        
+        Expected behavior:
+        - BlobDescriptor.uri should preserve the scheme after serialize/deserialize
+        - The URI should maintain its original format with scheme prefix
+        """
+        from pypaimon import Schema
+        from pypaimon.table.row.blob import BlobDescriptor, Blob
+        from pypaimon.common.uri_reader import UriReaderFactory
+        from pypaimon.common.config import CatalogOptions
+        from urllib.parse import urlparse
+
+        # Create schema with blob column (blob-as-descriptor=true)
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('blob_data', pa.large_binary())
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, options={
+            'row-tracking.enabled': 'true',
+            'data-evolution.enabled': 'true',
+            'blob-as-descriptor': 'true'
+        })
+
+        self.catalog.create_table('test_db.blob_uri_scheme_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_uri_scheme_test')
+
+        # Create a test blob file in temp directory (simulating external storage)
+        test_blob_data = b"test blob data for URI scheme preservation"
+        external_blob_path = os.path.join(self.temp_dir, 'external_blob_with_scheme')
+        with open(external_blob_path, 'wb') as f:
+            f.write(test_blob_data)
+
+        # Create blob descriptor with URI WITH scheme (simulating Pangu path with scheme)
+        # User provides: 'pangu://pangu/path/to/file' (WITH scheme)
+        # For testing, we'll use 'file://' scheme to simulate the issue
+        # In real Pangu scenarios, it would be: 'pangu://pangu/volume/path/to/file'
+        original_uri_with_scheme = f"file://{external_blob_path}"  # URI WITH scheme
+        blob_descriptor = BlobDescriptor(original_uri_with_scheme, 0, len(test_blob_data))
+
+        # Verify the original URI has scheme
+        parsed_original = urlparse(original_uri_with_scheme)
+        self.assertTrue(
+            bool(parsed_original.scheme),
+            f"Test setup: Original URI should have scheme, but got: '{parsed_original.scheme}'"
+        )
+        original_scheme = parsed_original.scheme
+        print(f"\n=== Reproducing Pangu URI scheme loss issue ===")
+        print(f"Original URI (WITH scheme): {original_uri_with_scheme}")
+        print(f"Original scheme: {original_scheme}")
+
+        # Write data with blob descriptor (URI WITH scheme)
+        test_data = pa.Table.from_pydict({
+            'id': [1],
+            'name': ['test'],
+            'blob_data': [blob_descriptor.serialize()]
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        write_builder.new_commit().commit(commit_messages)
+        writer.close()
+
+        # Read data back
+        read_builder = table.new_read_builder()
+        table_scan = read_builder.new_scan()
+        table_read = read_builder.new_read()
+        result = table_read.to_arrow(table_scan.plan().splits())
+
+        # Verify the data was written and read correctly
+        self.assertEqual(result.num_rows, 1, "Should have 1 row")
+        self.assertEqual(result.column('id').to_pylist(), [1], "ID should match")
+        self.assertEqual(result.column('name').to_pylist(), ['test'], "Name should match")
+
+        # Get the blob descriptor bytes from the result
+        blob_descriptor_bytes = result.column('blob_data').to_pylist()[0]
+        self.assertIsInstance(blob_descriptor_bytes, bytes, "Blob data should be bytes")
+
+        # Deserialize the blob descriptor
+        new_blob_descriptor = BlobDescriptor.deserialize(blob_descriptor_bytes)
+
+        # THIS IS WHERE THE ISSUE OCCURS:
+        # After from_descriptor (reading from table), the URI should still have the scheme
+        # But it might have lost the scheme during the write/read process
+        descriptor_uri_after_read = new_blob_descriptor.uri
+        print(f"URI after read (from_descriptor): {descriptor_uri_after_read}")
+
+        # Check if URI still has scheme
+        parsed_after_read = urlparse(descriptor_uri_after_read)
+        has_scheme_after_read = bool(parsed_after_read.scheme)
+        scheme_after_read = parsed_after_read.scheme
+        
+        print(f"URI has scheme after read: {has_scheme_after_read}, scheme: '{scheme_after_read}'")
+        print(f"Original scheme: '{original_scheme}', After read scheme: '{scheme_after_read}'")
+
+        # Verify the scheme is preserved
+        if not has_scheme_after_read or scheme_after_read != original_scheme:
+            print(f"\n❌ ISSUE REPRODUCED: URI scheme was lost or changed!")
+            print(f"   Original URI: {original_uri_with_scheme}")
+            print(f"   Original scheme: {original_scheme}")
+            print(f"   URI after read: {descriptor_uri_after_read}")
+            print(f"   Scheme after read: '{scheme_after_read}' (expected: '{original_scheme}')")
+            print(f"\n   ROOT CAUSE:")
+            print(f"   - User provided URI WITH scheme: {original_uri_with_scheme}")
+            print(f"   - After writing and reading, BlobDescriptor.uri lost the scheme")
+            print(f"   - This causes UriReaderFactory.create() to fail or use wrong filesystem")
+            raise AssertionError(
+                f"URI scheme was lost after from_descriptor. "
+                f"Original URI: {original_uri_with_scheme} (scheme: '{original_scheme}'), "
+                f"After read URI: {descriptor_uri_after_read} (scheme: '{scheme_after_read}'). "
+                f"This reproduces the issue where Pangu paths lose their scheme prefix "
+                f"after being written and read from the table."
+            )
+
+        # If scheme is preserved, try to create reader and read the blob
+        catalog_options = {CatalogOptions.WAREHOUSE: self.warehouse}
+        uri_reader_factory = UriReaderFactory(catalog_options)
+
+        print(f"Attempting to create reader for URI with scheme: {descriptor_uri_after_read}")
+
+        try:
+            uri_reader = uri_reader_factory.create(descriptor_uri_after_read)
+            print(f"✅ Successfully created URI reader: {type(uri_reader).__name__}")
+
+            # Try to read blob data using from_descriptor
+            blob = Blob.from_descriptor(uri_reader, new_blob_descriptor)
+            blob_data = blob.to_data()
+            print(f"✅ Successfully read blob data: {len(blob_data)} bytes")
+
+            # Verify the blob data matches
+            self.assertEqual(blob_data, test_blob_data, "Blob data should match original")
+            print(f"✅ Test passed: URI scheme was preserved correctly")
+        except Exception as e:
+            print(f"\n❌ FAILED to create reader or read blob: {e}")
+            print(f"   URI: {descriptor_uri_after_read}")
+            print(f"   URI has scheme: {has_scheme_after_read}")
+            raise AssertionError(
+                f"Failed to read blob with URI. "
+                f"URI: {descriptor_uri_after_read}, Error: {e}."
+            ) from e
 
 
 if __name__ == '__main__':

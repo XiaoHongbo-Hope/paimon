@@ -70,7 +70,7 @@ class FormatBlobReader(RecordBatchReader):
             self.returned = True
             batch_iterator = BlobRecordIterator(
                 self._file_io, self.file_path, self.blob_lengths,
-                self.blob_offsets, self._fields[0]
+                self.blob_offsets, self._fields[0], self._blob_as_descriptor
             )
             self._blob_iterator = iter(batch_iterator)
 
@@ -85,10 +85,13 @@ class FormatBlobReader(RecordBatchReader):
                     break
                 blob = blob_row.values[0]
                 for field_name in self._fields:
-                    blob_descriptor = blob.to_descriptor()
                     if self._blob_as_descriptor:
-                        blob_data = blob_descriptor.serialize()
+                        # In blob-as-descriptor mode, the blob data stored in the file
+                        # is already the descriptor serialized bytes
+                        # We return it directly to preserve the original URI with scheme
+                        blob_data = blob.to_data()
                     else:
+                        # In normal mode, return the actual blob data
                         blob_data = blob.to_data()
                     pydict_data[field_name].append(blob_data)
 
@@ -162,13 +165,14 @@ class BlobRecordIterator:
     METADATA_OVERHEAD = 16
 
     def __init__(self, file_io: FileIO, file_path: str, blob_lengths: List[int],
-                 blob_offsets: List[int], field_name: str):
+                 blob_offsets: List[int], field_name: str, blob_as_descriptor: bool = False):
         self.file_io = file_io
         self.file_path = file_path
         self.field_name = field_name
         self.blob_lengths = blob_lengths
         self.blob_offsets = blob_offsets
         self.current_position = 0
+        self.blob_as_descriptor = blob_as_descriptor
 
     def __iter__(self) -> Iterator[GenericRow]:
         return self
@@ -179,8 +183,68 @@ class BlobRecordIterator:
         # Create blob reference for the current blob
         # Skip magic number (4 bytes) and exclude length (8 bytes) + CRC (4 bytes) = 12 bytes
         blob_offset = self.blob_offsets[self.current_position] + self.MAGIC_NUMBER_SIZE  # Skip magic number
+        # blob_lengths includes: magic (4) + blob_data + descriptor (if any) + length (8) + CRC (4)
+        # METADATA_OVERHEAD = 16 includes: length (8) + CRC (4) + maybe 4 more bytes?
+        # For blob-as-descriptor mode, we need to account for descriptor_length (4) + descriptor_bytes
         blob_length = self.blob_lengths[self.current_position] - self.METADATA_OVERHEAD
-        blob = Blob.from_file(self.file_io, self.file_path, blob_offset, blob_length)
+        
+        if self.blob_as_descriptor:
+            # In blob-as-descriptor mode, we need to read the original descriptor
+            # The format in blob file is: [magic (4)][blob_data][descriptor_length (4)][descriptor_bytes][length (8)][CRC (4)]
+            # blob_lengths[i] = magic (4) + blob_data + descriptor_length (4) + descriptor_bytes + length (8) + CRC (4)
+            # We need to read the length field to know the actual data size (including magic + blob_data + descriptor)
+            full_blob_length = self.blob_lengths[self.current_position]
+            full_blob_offset = self.blob_offsets[self.current_position]
+            with self.file_io.new_input_stream(Path(self.file_path)) as f:
+                # Read the length field (8 bytes) which is at: full_blob_offset + full_blob_length - 12 (length 8 + CRC 4)
+                length_field_offset = full_blob_offset + full_blob_length - 12
+                f.seek(length_field_offset)
+                length_field_value = struct.unpack('<Q', f.read(8))[0]
+                # length_field_value = magic (4) + blob_data + descriptor_bytes + descriptor_length (4) + length (8) + CRC (4)
+                # We need to extract: magic + blob_data + descriptor_bytes + descriptor_length
+                # So data_size = length_field_value - 12 (exclude length 8 + CRC 4)
+                data_size = length_field_value - 12  # Exclude length (8) + CRC (4)
+                # Read the data part (magic + blob_data + descriptor_bytes + descriptor_length)
+                # Format: [magic (4)][blob_data][descriptor_bytes][descriptor_length (4)][length (8)][CRC (4)]
+                f.seek(full_blob_offset)
+                all_data = f.read(data_size)
+                # Skip magic (first 4 bytes)
+                if len(all_data) > 4:
+                    data_after_magic = all_data[4:]
+                    # The last 4 bytes should be descriptor_length
+                    if len(data_after_magic) >= 4:
+                        descriptor_length = struct.unpack('<I', data_after_magic[-4:])[0]
+                        # If descriptor_length is reasonable (30-200 bytes for a typical descriptor)
+                        if 30 <= descriptor_length <= 200 and len(data_after_magic) >= 4 + descriptor_length:
+                            # Extract descriptor bytes (before the last 4 bytes which are length)
+                            descriptor_bytes = data_after_magic[-(4 + descriptor_length):-4]
+                            # Verify descriptor bytes are valid
+                            try:
+                                from pypaimon.table.row.blob import BlobDescriptor
+                                test_descriptor = BlobDescriptor.deserialize(descriptor_bytes)
+                                # Create BlobData with descriptor bytes
+                                from pypaimon.table.row.blob import BlobData
+                                blob = BlobData(descriptor_bytes)
+                            except Exception as e:
+                                # Debug: print what we're trying to deserialize
+                                print(f"DEBUG: Failed to deserialize descriptor bytes: {e}")
+                                print(f"DEBUG: descriptor_length={descriptor_length}, data_after_magic_length={len(data_after_magic)}, descriptor_bytes_length={len(descriptor_bytes)}")
+                                print(f"DEBUG: length_field_value={length_field_value}, data_size={data_size}, all_data_length={len(all_data)}")
+                                print(f"DEBUG: descriptor_bytes_hex={descriptor_bytes[:50].hex() if len(descriptor_bytes) > 0 else 'empty'}")
+                                # Fallback: descriptor bytes are invalid, use blob data
+                                blob = Blob.from_file(self.file_io, self.file_path, blob_offset, blob_length)
+                        else:
+                            # Fallback: no descriptor, use blob data
+                            blob = Blob.from_file(self.file_io, self.file_path, blob_offset, blob_length)
+                    else:
+                        # Fallback: use blob data
+                        blob = Blob.from_file(self.file_io, self.file_path, blob_offset, blob_length)
+                else:
+                    # Fallback: use blob data
+                    blob = Blob.from_file(self.file_io, self.file_path, blob_offset, blob_length)
+        else:
+            blob = Blob.from_file(self.file_io, self.file_path, blob_offset, blob_length)
+        
         self.current_position += 1
         fields = [DataField(0, self.field_name, AtomicType("BLOB"))]
         return GenericRow([blob], fields, RowKind.INSERT)

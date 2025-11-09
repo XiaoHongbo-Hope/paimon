@@ -95,6 +95,96 @@ public class BlobTableITCase extends CatalogITCaseBase {
                 .containsExactlyInAnyOrder(Row.of(1, "paimon", blobData));
     }
 
+    @Test
+    public void testBlobDescriptorUriSchemePreservation() throws Exception {
+        // This test verifies that blob descriptor URI scheme is preserved after write/read
+        // in blob-as-descriptor=true mode.
+        //
+        // This test reproduces the issue where:
+        // - blob-as-descriptor=true mode
+        // - User provides URI WITH scheme (e.g., 'pangu://pangu/path/to/file' or
+        // 'file:///path/to/file')
+        // - After writing and reading, BlobDescriptor.uri should preserve the scheme
+        //
+        // Expected behavior:
+        // - BlobDescriptor.uri should preserve the scheme after serialize/deserialize
+        // - The URI should maintain its original format with scheme prefix
+
+        // Create a test blob file in temp directory (simulating external storage)
+        byte[] testBlobData = "test blob data for URI scheme preservation".getBytes();
+        String externalBlobPath = warehouse + "/external_blob_with_scheme";
+        FileIO fileIO = new LocalFileIO();
+        try (OutputStream outputStream =
+                fileIO.newOutputStream(new org.apache.paimon.fs.Path(externalBlobPath), true)) {
+            outputStream.write(testBlobData);
+        }
+
+        // Create blob descriptor with URI WITH scheme (simulating Pangu path with scheme)
+        // User provides: 'file:///path/to/file' (WITH scheme)
+        // In real Pangu scenarios, it would be: 'pangu://pangu/volume/path/to/file'
+        String originalUriWithScheme = "file://" + externalBlobPath; // URI WITH scheme
+        BlobDescriptor blobDescriptor =
+                new BlobDescriptor(originalUriWithScheme, 0, testBlobData.length);
+
+        // Verify the original URI has scheme
+        assertThat(originalUriWithScheme)
+                .as("Test setup: Original URI should have scheme")
+                .startsWith("file://");
+
+        // Write data with blob descriptor (URI WITH scheme)
+        batchSql(
+                "INSERT INTO blob_table_descriptor VALUES (1, 'test', X'"
+                        + bytesToHex(blobDescriptor.serialize())
+                        + "')");
+
+        // Read data back
+        List<Row> result = batchSql("SELECT * FROM blob_table_descriptor");
+        assertThat(result).hasSize(1);
+
+        Row row = result.get(0);
+        assertThat(row.getField(0)).isEqualTo(1);
+        assertThat(row.getField(1)).isEqualTo("test");
+
+        // Get the blob descriptor bytes from the result
+        byte[] newDescriptorBytes = (byte[]) row.getField(2);
+        assertThat(newDescriptorBytes).isNotNull();
+
+        // Deserialize the blob descriptor
+        BlobDescriptor newBlobDescriptor = BlobDescriptor.deserialize(newDescriptorBytes);
+
+        // THIS IS WHERE THE ISSUE OCCURS (if it exists):
+        // After from_descriptor (reading from table), the URI should still have the scheme
+        // But it might have lost the scheme during the write/read process
+        String descriptorUriAfterRead = newBlobDescriptor.uri();
+
+        // Check if URI still has scheme
+        boolean hasSchemeAfterRead =
+                descriptorUriAfterRead.startsWith("file://")
+                        || descriptorUriAfterRead.startsWith("pangu://")
+                        || descriptorUriAfterRead.startsWith("http://")
+                        || descriptorUriAfterRead.startsWith("https://");
+
+        // Verify the scheme is preserved
+        assertThat(hasSchemeAfterRead)
+                .as(
+                        "URI scheme should be preserved after write/read. "
+                                + "Original URI: %s, After read URI: %s. "
+                                + "This reproduces the issue where Pangu paths lose their scheme prefix "
+                                + "after being written and read from the table.",
+                        originalUriWithScheme, descriptorUriAfterRead)
+                .isTrue();
+
+        // If scheme is preserved, try to create reader and read the blob
+        Options options = new Options();
+        options.set("warehouse", warehouse.toString());
+        CatalogContext catalogContext = CatalogContext.create(options);
+        UriReaderFactory uriReaderFactory = new UriReaderFactory(catalogContext);
+        Blob blob =
+                Blob.fromDescriptor(
+                        uriReaderFactory.create(newBlobDescriptor.uri()), newBlobDescriptor);
+        assertThat(blob.toData()).isEqualTo(testBlobData);
+    }
+
     private static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
 
     public static String bytesToHex(byte[] bytes) {

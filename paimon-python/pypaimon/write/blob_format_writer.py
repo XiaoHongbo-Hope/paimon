@@ -30,10 +30,11 @@ class BlobFormatWriter:
     BUFFER_SIZE = 4096
     METADATA_SIZE = 12  # 8-byte length + 4-byte CRC
 
-    def __init__(self, output_stream: BinaryIO):
+    def __init__(self, output_stream: BinaryIO, blob_as_descriptor: bool = False):
         self.output_stream = output_stream
         self.lengths: List[int] = []
         self.position = 0
+        self.blob_as_descriptor = blob_as_descriptor
 
     def add_element(self, row) -> None:
         if not hasattr(row, 'values') or len(row.values) != 1:
@@ -68,7 +69,17 @@ class BlobFormatWriter:
             finally:
                 stream.close()
 
-        # Calculate total length including magic + data + metadata (length + CRC)
+        if self.blob_as_descriptor and hasattr(row, '_original_descriptor_bytes'):
+            descriptor_bytes = row._original_descriptor_bytes
+            # Write descriptor bytes first
+            crc32 = self._write_with_crc(descriptor_bytes, crc32)
+            # Write descriptor length (4 bytes, little endian) at the end
+            descriptor_length = len(descriptor_bytes)
+            length_bytes = struct.pack('<I', descriptor_length)
+            crc32 = self._write_with_crc(length_bytes, crc32)
+
+        # Calculate total length including magic + data + descriptor (if any) + metadata (length + CRC)
+        # Note: descriptor is already included in self.position - previous_pos
         bin_length = self.position - previous_pos + self.METADATA_SIZE
         self.lengths.append(bin_length)
 
