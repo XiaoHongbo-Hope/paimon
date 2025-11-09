@@ -27,18 +27,10 @@ from pypaimon.write.writer.blob_file_writer import BlobFileWriter
 
 logger = logging.getLogger(__name__)
 
-# Constant for checking rolling condition periodically (aligned with Java)
 CHECK_ROLLING_RECORD_CNT = 1000
 
 
 class BlobWriter(AppendOnlyDataWriter):
-    """
-    Blob writer that handles rolling based on target file size.
-    Aligned with Java RollingBlobFileWriter implementation.
-    
-    In blob-as-descriptor mode, writes each row and checks file size after each write.
-    When target size is exceeded, automatically closes current file and creates a new one.
-    """
 
     def __init__(self, table, partition: Tuple, bucket: int, max_seq_number: int, blob_column: str):
         super().__init__(table, partition, bucket, max_seq_number, [blob_column])
@@ -57,93 +49,71 @@ class BlobWriter(AppendOnlyDataWriter):
 
         logger.info(f"Initialized BlobWriter with blob file format, blob_target_file_size={self.blob_target_file_size}")
 
-    def write(self, data: pa.RecordBatch):
+    def _check_and_roll_if_needed(self):
         """
-        Write data row by row, checking file size after each write (aligned with Java RollingFileWriterImpl).
+        Override to handle blob-as-descriptor=true mode with file size checking.
+        For blob-as-descriptor=false, use parent class logic (memory size checking).
         """
-        try:
-            processed_data = self._process_data(data)
+        if self.pending_data is None:
+            return
+        
+        if self.blob_as_descriptor:
+            # blob-as-descriptor=true: Write row by row and check actual file size
+            for i in range(self.pending_data.num_rows):
+                row_data = self.pending_data.slice(i, 1)
+                self._write_row_to_file(row_data)
+                self.record_count += 1
+                
+                # Check rolling condition (aligned with Java: check every CHECK_ROLLING_RECORD_CNT records)
+                if self._should_roll():
+                    self._close_current_file()
             
-            if self.pending_data is None:
-                self.pending_data = processed_data
-            else:
-                self.pending_data = self._merge_data(self.pending_data, processed_data)
-            
-            # In blob-as-descriptor mode, write row by row and check size after each write
-            if self.blob_as_descriptor and self.pending_data is not None and self.pending_data.num_rows > 0:
-                # Write each row individually, checking size after each write
-                for i in range(self.pending_data.num_rows):
-                    row_data = self.pending_data.slice(i, 1)
-                    self._write_row(row_data)
-                    self.record_count += 1
-                    
-                    # Check rolling condition (aligned with Java: check every CHECK_ROLLING_RECORD_CNT records)
-                    if self._should_roll_file():
-                        self._close_current_writer()
-                self.pending_data = None
-            else:
-                # Normal mode: use parent class logic
-                self._check_and_roll_if_needed()
-        except Exception as e:
-            logger.warning("Exception occurs when writing data. Cleaning up.", exc_info=e)
-            self.abort()
-            raise e
-
-    def _write_row(self, row_data: pa.Table):
-        """
-        Write a single row to the current blob file (aligned with Java RollingFileWriterImpl.write).
-        Opens a new file if needed.
-        """
+            # All data has been written
+            self.pending_data = None
+        else:
+            # blob-as-descriptor=false: Use parent class logic (memory size checking)
+            super()._check_and_roll_if_needed()
+    
+    def _write_row_to_file(self, row_data: pa.Table):
+        """Write a single row to the current blob file. Opens a new file if needed."""
         if row_data.num_rows == 0:
             return
         
-        # Open current writer if needed (aligned with Java: openCurrentWriter)
         if self.current_writer is None:
-            self._open_current_writer()
+            self._open_current_file()
         
-        # Write the row
         self.current_writer.write_row(row_data)
     
-    def _open_current_writer(self):
-        """Open a new blob file writer (aligned with Java: openCurrentWriter)."""
+    def _open_current_file(self):
+        """Open a new blob file writer."""
         import uuid
         file_name = f"data-{uuid.uuid4()}-0.{self.file_format}"
         file_path = self._generate_file_path(file_name)
         self.current_file_path = file_path
         self.current_writer = BlobFileWriter(self.file_io, file_path, self.blob_as_descriptor)
     
-    def _should_roll_file(self) -> bool:
+    def _should_roll(self) -> bool:
         """
-        Check if current file should be rolled (aligned with Java: rollingFile).
+        Check if current file should be rolled.
         Checks every CHECK_ROLLING_RECORD_CNT records or when reachTargetSize returns true.
         """
         if self.current_writer is None:
             return False
         
-        # Check every CHECK_ROLLING_RECORD_CNT records (aligned with Java)
         force_check = (self.record_count % CHECK_ROLLING_RECORD_CNT == 0)
         return self.current_writer.reach_target_size(force_check, self.blob_target_file_size)
     
-    def _close_current_writer(self):
-        """
-        Close current writer and create metadata (aligned with Java: closeCurrentWriter).
-        """
+    def _close_current_file(self):
+        """Close current writer and create metadata."""
         if self.current_writer is None:
             return
         
-        # Close writer and get file size
         file_size = self.current_writer.close()
         file_name = self.current_file_path.name
-        
-        # Create metadata
-        # Read the written data to get row count (we need to track this)
-        # For now, we'll use the record count from the writer
         row_count = self.current_writer.row_count
         
-        # Create file metadata
         self._add_file_metadata(file_name, self.current_file_path, row_count, file_size)
         
-        # Reset current writer
         self.current_writer = None
         self.current_file_path = None
     
@@ -271,32 +241,20 @@ class BlobWriter(AppendOnlyDataWriter):
     
     def prepare_commit(self):
         """Prepare commit, ensuring all data is written."""
-        # In blob-as-descriptor mode, close current writer if open
+        # Close current file if open (blob-as-descriptor=true mode)
         if self.current_writer is not None:
-            self._close_current_writer()
+            self._close_current_file()
         
-        # In normal mode, ensure pending_data is written
-        if self.pending_data is not None and self.pending_data.num_rows > 0:
-            if not self.blob_as_descriptor:
-                self._write_data_to_file(self.pending_data)
-                self.pending_data = None
-        
-        return self.committed_files.copy()
+        # Call parent to handle pending_data (blob-as-descriptor=false mode)
+        return super().prepare_commit()
     
     def close(self):
-        """Close current writer if open (aligned with Java: close)."""
-        # Close blob-as-descriptor writer if open
+        """Close current writer if open."""
+        # Close current file if open (blob-as-descriptor=true mode)
         if self.current_writer is not None:
-            self._close_current_writer()
+            self._close_current_file()
         
-        # In normal mode, ensure pending_data is written
-        if self.pending_data is not None and self.pending_data.num_rows > 0:
-            if not self.blob_as_descriptor:
-                # Normal mode: write pending data
-                self._write_data_to_file(self.pending_data)
-                self.pending_data = None
-        
-        # Call parent close to handle any remaining logic
+        # Call parent to handle pending_data (blob-as-descriptor=false mode)
         super().close()
     
     def abort(self):

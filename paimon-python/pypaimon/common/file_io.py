@@ -371,14 +371,6 @@ class FileIO:
             fastavro.writer(output_stream, avro_schema, records, **kwargs)
 
     def write_blob(self, path: Path, data: pyarrow.Table, blob_as_descriptor: bool, **kwargs):
-        """
-        Write blob data to file.
-        
-        Args:
-            path: File path
-            data: PyArrow table with blob data
-            blob_as_descriptor: Whether blob data is stored as descriptor
-        """
         try:
             # Validate input constraints
             if data.num_columns != 1:
@@ -400,7 +392,6 @@ class FileIO:
             records_dict = data.to_pydict()
             num_rows = data.num_rows
             field_name = fields[0].name
-            
             with self.new_output_stream(path) as output_stream:
                 writer = BlobFormatWriter(output_stream)
                 # Write each row
@@ -427,7 +418,6 @@ class FileIO:
                     # Create GenericRow and write
                     row = GenericRow(row_values, fields, RowKind.INSERT)
                     writer.add_element(row)
-                
                 writer.close()
 
         except Exception as e:
