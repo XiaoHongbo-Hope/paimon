@@ -17,6 +17,7 @@
 ################################################################################
 
 import logging
+import uuid
 import pyarrow as pa
 from pathlib import Path
 from typing import Optional, Tuple
@@ -38,22 +39,19 @@ class BlobWriter(AppendOnlyDataWriter):
         # Override file format to "blob"
         self.file_format = CoreOptions.FILE_FORMAT_BLOB
 
-        # Use blobTargetFileSize (aligned with Java)
         options = self.table.options
         self.blob_target_file_size = CoreOptions.get_blob_target_file_size(options)
         
-        # Current writer state (aligned with RollingFileWriterImpl)
         self.current_writer: Optional[BlobFileWriter] = None
         self.current_file_path: Optional[Path] = None
         self.record_count = 0
+        
+        self.file_uuid = str(uuid.uuid4())
+        self.file_count = 0
 
         logger.info(f"Initialized BlobWriter with blob file format, blob_target_file_size={self.blob_target_file_size}")
 
     def _check_and_roll_if_needed(self):
-        """
-        Override to handle blob-as-descriptor=true mode with file size checking.
-        For blob-as-descriptor=false, use parent class logic (memory size checking).
-        """
         if self.pending_data is None:
             return
         
@@ -86,8 +84,10 @@ class BlobWriter(AppendOnlyDataWriter):
     
     def _open_current_file(self):
         """Open a new blob file writer."""
-        import uuid
-        file_name = f"data-{uuid.uuid4()}-0.{self.file_format}"
+        # Aligned with Java DataFilePathFactory: use shared UUID + counter
+        # Format: data-{uuid}-{count}.blob (e.g., data-abc123-0.blob, data-abc123-1.blob, ...)
+        file_name = f"data-{self.file_uuid}-{self.file_count}.{self.file_format}"
+        self.file_count += 1  # Increment counter for next file
         file_path = self._generate_file_path(file_name)
         self.current_file_path = file_path
         self.current_writer = BlobFileWriter(self.file_io, file_path, self.blob_as_descriptor)
@@ -124,8 +124,9 @@ class BlobWriter(AppendOnlyDataWriter):
         
         # In normal mode (non-blob-as-descriptor), use parent class logic
         # But we need to handle blob format specifically
-        import uuid
-        file_name = f"data-{uuid.uuid4()}-0.{self.file_format}"
+        # Aligned with Java DataFilePathFactory: use shared UUID + counter
+        file_name = f"data-{self.file_uuid}-{self.file_count}.{self.file_format}"
+        self.file_count += 1  # Increment counter for next file
         file_path = self._generate_file_path(file_name)
         
         # Write blob file (normal mode, no rolling)

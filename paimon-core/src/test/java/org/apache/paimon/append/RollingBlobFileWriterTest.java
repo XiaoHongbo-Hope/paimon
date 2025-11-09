@@ -261,6 +261,88 @@ public class RollingBlobFileWriterTest {
         results.forEach(file -> assertThat(file.schemaId()).isEqualTo(SCHEMA_ID));
     }
 
+    @Test
+    public void testBlobFileNameFormatWithSharedUuid() throws IOException {
+        // Test that blob files from the same writer use shared UUID and incremental counter
+        // This ensures files have sequential names: data-{uuid}-0.blob, data-{uuid}-1.blob, ...
+        long blobTargetFileSize = 2 * 1024 * 1024L; // 2 MB for blob files
+
+        // Create a new writer with small blob target file size to trigger multiple rollings
+        RollingBlobFileWriter fileNameTestWriter =
+                new RollingBlobFileWriter(
+                        LocalFileIO.create(),
+                        SCHEMA_ID,
+                        FileFormat.fromIdentifier("parquet", new Options()),
+                        128 * 1024 * 1024,
+                        blobTargetFileSize,
+                        SCHEMA,
+                        pathFactory, // Use the same pathFactory to ensure shared UUID
+                        new LongCounter(),
+                        COMPRESSION,
+                        new StatsCollectorFactories(new CoreOptions(new Options())),
+                        new FileIndexOptions(),
+                        FileSource.APPEND,
+                        false, // asyncFileWrite
+                        false // statsDenseStore
+                        );
+
+        // Create blob data that will trigger rolling
+        byte[] blobData = new byte[1024 * 1024]; // 1 MB blob data
+        new Random(456).nextBytes(blobData);
+
+        // Write enough rows to trigger multiple blob file rollings
+        for (int i = 0; i < 10; i++) {
+            InternalRow row =
+                    GenericRow.of(i, BinaryString.fromString("test-" + i), new BlobData(blobData));
+            fileNameTestWriter.write(row);
+        }
+
+        fileNameTestWriter.close();
+        List<DataFileMeta> results = fileNameTestWriter.result();
+
+        // Filter blob files
+        List<DataFileMeta> blobFiles =
+                results.stream()
+                        .filter(file -> "blob".equals(file.fileFormat()))
+                        .collect(java.util.stream.Collectors.toList());
+
+        assertThat(blobFiles.size())
+                .as("Should have multiple blob files due to rolling")
+                .isGreaterThan(1);
+
+        // Extract UUID and counter from file names
+        // Format: data-{uuid}-{count}.blob
+        String firstFileName = blobFiles.get(0).fileName();
+        assertThat(firstFileName)
+                .as("File name should match expected format: data-{uuid}-{count}.blob")
+                .matches(
+                        "data-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}-\\d+\\.blob");
+
+        // Extract UUID from first file name
+        String uuid = firstFileName.substring(5, firstFileName.lastIndexOf('-'));
+        int firstCounter =
+                Integer.parseInt(
+                        firstFileName.substring(
+                                firstFileName.lastIndexOf('-') + 1,
+                                firstFileName.lastIndexOf('.')));
+
+        // Verify all blob files use the same UUID and have sequential counters
+        for (int i = 0; i < blobFiles.size(); i++) {
+            String fileName = blobFiles.get(i).fileName();
+            String fileUuid = fileName.substring(5, fileName.lastIndexOf('-'));
+            int counter =
+                    Integer.parseInt(
+                            fileName.substring(
+                                    fileName.lastIndexOf('-') + 1, fileName.lastIndexOf('.')));
+
+            assertThat(fileUuid).as("All blob files should use the same UUID").isEqualTo(uuid);
+
+            assertThat(counter)
+                    .as("File counter should be sequential starting from first counter")
+                    .isEqualTo(firstCounter + i);
+        }
+    }
+
     /** Simple implementation of BundleRecords for testing. */
     private static class TestBundleRecords implements BundleRecords {
         private final List<InternalRow> rows;

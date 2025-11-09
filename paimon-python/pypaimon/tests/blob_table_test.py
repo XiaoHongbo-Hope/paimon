@@ -1575,6 +1575,117 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertEqual(result.num_rows, num_blobs)
         self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
 
+    def test_blob_file_name_format_with_shared_uuid(self):
+        """
+        Test that blob files from the same writer use shared UUID and incremental counter.
+        This ensures files have sequential names: data-{uuid}-0.blob, data-{uuid}-1.blob, ...
+        This test verifies the fix for the bug where each file used a new UUID instead of sharing one.
+        """
+        import random
+        import re
+        from pypaimon import Schema
+        from pypaimon.table.row.blob import BlobDescriptor
+
+        # Create schema with blob column
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('blob_data', pa.large_binary())
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, options={
+            'row-tracking.enabled': 'true',
+            'data-evolution.enabled': 'true',
+            'blob-as-descriptor': 'true',
+            'blob.target-file-size': '1MB'  # Small target size to trigger multiple rollings
+        })
+
+        self.catalog.create_table('test_db.blob_file_name_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_file_name_test')
+
+        # Create multiple external blob files (2MB each, > target-file-size)
+        # This will trigger multiple blob file rollings
+        num_blobs, blob_size = 5, 2 * 1024 * 1024
+        random.seed(789)
+        descriptors = []
+        for i in range(num_blobs):
+            path = os.path.join(self.temp_dir, f'external_blob_{i}')
+            data = bytes(bytearray([random.randint(0, 255) for _ in range(blob_size)]))
+            with open(path, 'wb') as f:
+                f.write(data)
+            descriptors.append(BlobDescriptor(path, 0, len(data)))
+
+        # Write data
+        test_data = pa.Table.from_pydict({
+            'id': list(range(1, num_blobs + 1)),
+            'name': [f'item_{i}' for i in range(1, num_blobs + 1)],
+            'blob_data': [d.serialize() for d in descriptors]
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        write_builder.new_commit().commit(commit_messages)
+        writer.close()
+
+        # Extract blob files from commit messages
+        all_files = [f for msg in commit_messages for f in msg.new_files]
+        blob_files = [f for f in all_files if f.file_name.endswith('.blob')]
+
+        # Should have multiple blob files due to rolling
+        self.assertGreater(len(blob_files), 1, "Should have multiple blob files due to rolling")
+
+        # Verify file name format: data-{uuid}-{count}.blob
+        file_name_pattern = re.compile(r'^data-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}-(\d+)\.blob$')
+        
+        first_file_name = blob_files[0].file_name
+        self.assertTrue(
+            file_name_pattern.match(first_file_name),
+            f"File name should match expected format: data-{{uuid}}-{{count}}.blob, got: {first_file_name}"
+        )
+
+        # Extract UUID and counter from first file name
+        # Format: data-{uuid}-{count}.blob
+        first_match = file_name_pattern.match(first_file_name)
+        first_counter = int(first_match.group(1))
+        
+        # Extract UUID (everything between "data-" and last "-")
+        uuid_start = len("data-")
+        uuid_end = first_file_name.rfind('-', uuid_start)
+        shared_uuid = first_file_name[uuid_start:uuid_end]
+
+        # Verify all blob files use the same UUID and have sequential counters
+        for i, blob_file in enumerate(blob_files):
+            file_name = blob_file.file_name
+            match = file_name_pattern.match(file_name)
+            
+            self.assertIsNotNone(
+                match,
+                f"File name should match expected format: data-{{uuid}}-{{count}}.blob, got: {file_name}"
+            )
+            
+            counter = int(match.group(1))
+            
+            # Extract UUID from this file
+            file_uuid = file_name[uuid_start:file_name.rfind('-', uuid_start)]
+            
+            self.assertEqual(
+                file_uuid,
+                shared_uuid,
+                f"All blob files should use the same UUID. Expected: {shared_uuid}, got: {file_uuid} in {file_name}"
+            )
+            
+            self.assertEqual(
+                counter,
+                first_counter + i,
+                f"File counter should be sequential. Expected: {first_counter + i}, got: {counter} in {file_name}"
+            )
+
+        # Verify data integrity
+        result = table.new_read_builder().new_read().to_arrow(table.new_read_builder().new_scan().plan().splits())
+        self.assertEqual(result.num_rows, num_blobs)
+        self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
+
 
 if __name__ == '__main__':
     unittest.main()
