@@ -63,8 +63,8 @@ class BlobWriter(AppendOnlyDataWriter):
                 self.record_count += 1
                 
                 # Check rolling condition (aligned with Java: check every CHECK_ROLLING_RECORD_CNT records)
-                if self._should_roll():
-                    self._close_current_file()
+                if self.rolling_file(False):
+                    self.close_current_writer()
             
             # All data has been written
             self.pending_data = None
@@ -78,32 +78,27 @@ class BlobWriter(AppendOnlyDataWriter):
             return
         
         if self.current_writer is None:
-            self._open_current_file()
+            self.open_current_writer()
         
         self.current_writer.write_row(row_data)
     
-    def _open_current_file(self):
-        """Open a new blob file writer."""
-        # Aligned with Java DataFilePathFactory: use shared UUID + counter
-        # Format: data-{uuid}-{count}.blob (e.g., data-abc123-0.blob, data-abc123-1.blob, ...)
+    def open_current_writer(self):
+        """Open a new blob file writer. Aligned with Java openCurrentWriter()."""
         file_name = f"data-{self.file_uuid}-{self.file_count}.{self.file_format}"
         self.file_count += 1  # Increment counter for next file
         file_path = self._generate_file_path(file_name)
         self.current_file_path = file_path
         self.current_writer = BlobFileWriter(self.file_io, file_path, self.blob_as_descriptor)
     
-    def _should_roll(self) -> bool:
-        """
-        Check if current file should be rolled.
-        Checks every CHECK_ROLLING_RECORD_CNT records or when reachTargetSize returns true.
-        """
+    def rolling_file(self, force_check: bool = False) -> bool:
+        """Check if current file should be rolled. Aligned with Java rollingFile(boolean forceCheck)."""
         if self.current_writer is None:
             return False
         
-        force_check = (self.record_count % CHECK_ROLLING_RECORD_CNT == 0)
-        return self.current_writer.reach_target_size(force_check, self.blob_target_file_size)
+        should_check = force_check or (self.record_count % CHECK_ROLLING_RECORD_CNT == 0)
+        return self.current_writer.reach_target_size(should_check, self.blob_target_file_size)
     
-    def _close_current_file(self):
+    def close_current_writer(self):
         """Close current writer and create metadata."""
         if self.current_writer is None:
             return
@@ -118,68 +113,25 @@ class BlobWriter(AppendOnlyDataWriter):
         self.current_file_path = None
     
     def _write_data_to_file(self, data):
-        """Override for normal mode (non-blob-as-descriptor)."""
+        """
+        Override for blob format in normal mode (blob-as-descriptor=false).
+        Only difference from parent: use shared UUID + counter for file naming (aligned with Java).
+        """
         if data.num_rows == 0:
             return
         
-        # In normal mode (non-blob-as-descriptor), use parent class logic
-        # But we need to handle blob format specifically
         # Aligned with Java DataFilePathFactory: use shared UUID + counter
         file_name = f"data-{self.file_uuid}-{self.file_count}.{self.file_format}"
-        self.file_count += 1  # Increment counter for next file
+        self.file_count += 1
         file_path = self._generate_file_path(file_name)
         
-        # Write blob file (normal mode, no rolling)
+        # Write blob file (parent class already supports blob format)
         self.file_io.write_blob(file_path, data, self.blob_as_descriptor)
         
         file_size = self.file_io.get_file_size(file_path)
         
-        # Create metadata using parent class logic (but adapted for blob)
-        from datetime import datetime
-        from pypaimon.manifest.schema.data_file_meta import DataFileMeta
-        from pypaimon.manifest.schema.simple_stats import SimpleStats
-        from pypaimon.table.row.generic_row import GenericRow
-        from pypaimon.schema.data_types import PyarrowFieldParser
-        
-        # Get column stats
-        data_fields = PyarrowFieldParser.to_paimon_schema(data.schema)
-        column_stats = {
-            field.name: self._get_column_stats(data.to_batches()[0], field.name)
-            for field in data_fields
-        }
-        min_value_stats = [column_stats[field.name]['min_values'] for field in data_fields]
-        max_value_stats = [column_stats[field.name]['max_values'] for field in data_fields]
-        value_null_counts = [column_stats[field.name]['null_counts'] for field in data_fields]
-        
-        min_seq = self.sequence_generator.start
-        max_seq = self.sequence_generator.current
-        self.sequence_generator.start = self.sequence_generator.current
-        
-        self.committed_files.append(DataFileMeta(
-            file_name=file_name,
-            file_size=file_size,
-            row_count=data.num_rows,
-            min_key=GenericRow([], []),
-            max_key=GenericRow([], []),
-            key_stats=SimpleStats(GenericRow([], []), GenericRow([], []), []),
-            value_stats=SimpleStats(
-                GenericRow(min_value_stats, data_fields),
-                GenericRow(max_value_stats, data_fields),
-                value_null_counts),
-            min_sequence_number=min_seq,
-            max_sequence_number=max_seq,
-            schema_id=self.table.table_schema.id,
-            level=0,
-            extra_files=[],
-            creation_time=datetime.now(),
-            delete_row_count=0,
-            file_source="APPEND",
-            value_stats_cols=None,
-            external_path=None,
-            first_row_id=None,
-            write_cols=self.write_cols,
-            file_path=str(file_path),
-        ))
+        # Reuse _add_file_metadata for consistency (blob table is append-only, no primary keys)
+        self._add_file_metadata(file_name, file_path, data, file_size)
 
     def _add_file_metadata(self, file_name: str, file_path: Path, data_or_row_count, file_size: int):
         """Add file metadata to committed_files."""
@@ -244,7 +196,7 @@ class BlobWriter(AppendOnlyDataWriter):
         """Prepare commit, ensuring all data is written."""
         # Close current file if open (blob-as-descriptor=true mode)
         if self.current_writer is not None:
-            self._close_current_file()
+            self.close_current_writer()
         
         # Call parent to handle pending_data (blob-as-descriptor=false mode)
         return super().prepare_commit()
@@ -253,7 +205,7 @@ class BlobWriter(AppendOnlyDataWriter):
         """Close current writer if open."""
         # Close current file if open (blob-as-descriptor=true mode)
         if self.current_writer is not None:
-            self._close_current_file()
+            self.close_current_writer()
         
         # Call parent to handle pending_data (blob-as-descriptor=false mode)
         super().close()
