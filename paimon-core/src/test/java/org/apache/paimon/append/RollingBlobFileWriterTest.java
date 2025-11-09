@@ -81,7 +81,8 @@ public class RollingBlobFileWriterTest {
                 new DataFilePathFactory(
                         new Path(tempDir + "/bucket-0"),
                         "parquet",
-                        "data",
+                        "data-", // dataFilePrefix should include the hyphen to match expected
+                        // format: data-{uuid}-{count}
                         "changelog",
                         false,
                         null,
@@ -192,7 +193,8 @@ public class RollingBlobFileWriterTest {
                         new DataFilePathFactory(
                                 new Path(tempDir + "/blob-size-test"),
                                 "parquet",
-                                "data",
+                                "data-", // dataFilePrefix should include the hyphen to match
+                                // expected format: data-{uuid}-{count}
                                 "changelog",
                                 false,
                                 null,
@@ -263,11 +265,8 @@ public class RollingBlobFileWriterTest {
 
     @Test
     public void testBlobFileNameFormatWithSharedUuid() throws IOException {
-        // Test that blob files from the same writer use shared UUID and incremental counter
-        // This ensures files have sequential names: data-{uuid}-0.blob, data-{uuid}-1.blob, ...
         long blobTargetFileSize = 2 * 1024 * 1024L; // 2 MB for blob files
 
-        // Create a new writer with small blob target file size to trigger multiple rollings
         RollingBlobFileWriter fileNameTestWriter =
                 new RollingBlobFileWriter(
                         LocalFileIO.create(),
@@ -345,13 +344,8 @@ public class RollingBlobFileWriterTest {
 
     @Test
     public void testBlobFileNameFormatWithSharedUuidNonDescriptorMode() throws IOException {
-        // Test that blob files in non-blob-as-descriptor mode use shared UUID and incremental
-        // counter
-        // This ensures files have sequential names: data-{uuid}-0.blob, data-{uuid}-1.blob, ...
         long blobTargetFileSize = 2 * 1024 * 1024L; // 2 MB for blob files
 
-        // Create a new writer with small blob target file size to trigger multiple rollings
-        // Note: In non-descriptor mode, blob data is stored directly in blob files
         RollingBlobFileWriter fileNameTestWriter =
                 new RollingBlobFileWriter(
                         LocalFileIO.create(),
