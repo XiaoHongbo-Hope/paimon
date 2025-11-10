@@ -21,9 +21,15 @@ package org.apache.paimon.flink;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.BlobDescriptor;
+import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.format.FormatWriter;
+import org.apache.paimon.format.FormatWriterFactory;
+import org.apache.paimon.format.blob.BlobFileFormat;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.UriReaderFactory;
 
 import org.apache.flink.types.Row;
@@ -104,9 +110,29 @@ public class BlobTableITCase extends CatalogITCaseBase {
         byte[] blobData = new byte[1024];
         RANDOM.nextBytes(blobData);
 
-        // Create BlobDescriptor with OSS scheme (simulating real OSS/Pangu scenario)
-        // The URI should have the scheme preserved after read
-        String uriWithScheme = "oss://chengli-bj-dlf/path/to/external_blob_scheme_test.bin";
+        // Create OSS FileIO and write blob data to OSS path using blob writer
+        Options options = new Options();
+        options.set("warehouse", warehouse.toString());
+        CatalogContext catalogContext = CatalogContext.create(options);
+        FileIO fileIO = catalogContext.fileIO();
+
+        // Create OSS path for external blob storage
+        String uriWithScheme = "oss://chengli-hz-dlf/path/to/external_blob_scheme_test.bin";
+        org.apache.paimon.fs.Path ossPath = new org.apache.paimon.fs.Path(uriWithScheme);
+
+        // Write blob data to OSS using blob writer (BlobFileFormat)
+        BlobFileFormat blobFileFormat = new BlobFileFormat();
+        RowType rowType = RowType.of(DataTypes.BLOB());
+        FormatWriterFactory writerFactory = blobFileFormat.createWriterFactory(rowType);
+
+        try (org.apache.paimon.fs.PositionOutputStream out =
+                fileIO.newOutputStream(ossPath, true)) {
+            FormatWriter formatWriter = writerFactory.create(out, null);
+            formatWriter.addElement(GenericRow.of(Blob.fromData(blobData)));
+            formatWriter.close();
+        }
+
+        // Create BlobDescriptor pointing to the OSS path
         BlobDescriptor originalDescriptor = new BlobDescriptor(uriWithScheme, 0, blobData.length);
 
         // Write the descriptor to the table
