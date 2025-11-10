@@ -114,11 +114,11 @@ public class BlobTableITCase extends CatalogITCaseBase {
         Options options = new Options();
         options.set("warehouse", warehouse.toString());
         CatalogContext catalogContext = CatalogContext.create(options);
-        FileIO fileIO = catalogContext.fileIO();
 
         // Create OSS path for external blob storage
         String uriWithScheme = "oss://chengli-hz-dlf/path/to/external_blob_scheme_test.bin";
         org.apache.paimon.fs.Path ossPath = new org.apache.paimon.fs.Path(uriWithScheme);
+        FileIO fileIO = FileIO.get(ossPath, catalogContext);
 
         // Write blob data to OSS using blob writer (BlobFileFormat)
         BlobFileFormat blobFileFormat = new BlobFileFormat();
