@@ -169,7 +169,7 @@ class DataWriter(ABC):
         data_fields = self.table.fields if self.table.is_primary_key_table \
             else PyarrowFieldParser.to_paimon_schema(data.schema)
         column_stats = {
-            field.name: self._get_column_stats(data.to_batches()[0], field.name)
+            field.name: self._get_column_stats(data, field.name)
             for field in data_fields
         }
         all_fields = data_fields
@@ -255,10 +255,7 @@ class DataWriter(ABC):
 
     @staticmethod
     def _get_column_stats(record_batch: pa.RecordBatch, column_name: str) -> Dict:
-        import pyarrow.compute as pc
-        
         column_array = record_batch.column(column_name)
-        
         if column_array.null_count == len(column_array):
             return {
                 "min_values": None,
