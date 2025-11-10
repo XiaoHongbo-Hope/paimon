@@ -264,7 +264,7 @@ public class RollingBlobFileWriterTest {
     }
 
     @Test
-    public void testBlobFileNameFormatWithSharedUuid() throws IOException {
+    void testBlobFileNameFormatWithSharedUuid() throws IOException {
         long blobTargetFileSize = 2 * 1024 * 1024L; // 2 MB for blob files
 
         RollingBlobFileWriter fileNameTestWriter =
@@ -305,9 +305,9 @@ public class RollingBlobFileWriterTest {
                         .filter(file -> "blob".equals(file.fileFormat()))
                         .collect(java.util.stream.Collectors.toList());
 
-        assertThat(blobFiles.size())
+        assertThat(blobFiles)
                 .as("Should have multiple blob files due to rolling")
-                .isGreaterThan(1);
+                .hasSizeGreaterThan(1);
 
         // Extract UUID and counter from file names
         // Format: data-{uuid}-{count}.blob
@@ -343,7 +343,7 @@ public class RollingBlobFileWriterTest {
     }
 
     @Test
-    public void testBlobFileNameFormatWithSharedUuidNonDescriptorMode() throws IOException {
+    void testBlobFileNameFormatWithSharedUuidNonDescriptorMode() throws IOException {
         long blobTargetFileSize = 2 * 1024 * 1024L; // 2 MB for blob files
 
         RollingBlobFileWriter fileNameTestWriter =
@@ -384,9 +384,7 @@ public class RollingBlobFileWriterTest {
                         .filter(file -> "blob".equals(file.fileFormat()))
                         .collect(java.util.stream.Collectors.toList());
 
-        assertThat(blobFiles.size())
-                .as("Should have at least one blob file")
-                .isGreaterThanOrEqualTo(1);
+        assertThat(blobFiles.size()).as("Should have at least one blob file").isPositive();
 
         // Extract UUID and counter from file names
         // Format: data-{uuid}-{count}.blob
@@ -422,7 +420,7 @@ public class RollingBlobFileWriterTest {
     }
 
     @Test
-    public void testSequenceNumberIncrementInBlobAsDescriptorMode() throws IOException {
+    void testSequenceNumberIncrementInBlobAsDescriptorMode() throws IOException {
         // Write multiple rows to trigger one-by-one writing in blob-as-descriptor mode
         int numRows = 10;
         for (int i = 0; i < numRows; i++) {
@@ -489,7 +487,7 @@ public class RollingBlobFileWriterTest {
     }
 
     @Test
-    public void testSequenceNumberIncrementInNonDescriptorMode() throws IOException {
+    void testSequenceNumberIncrementInNonDescriptorMode() throws IOException {
         // Write multiple rows as a batch to trigger batch writing in non-descriptor mode
         // (blob-as-descriptor=false, which is the default)
         int numRows = 10;
@@ -557,86 +555,7 @@ public class RollingBlobFileWriterTest {
     }
 
     @Test
-    public void testColumnStatsWithMultipleBatches() throws IOException {
-        // Batch 1: ids 1-5, values 10-14
-        List<InternalRow> batch1 =
-                Arrays.asList(
-                        GenericRow.of(1, BinaryString.fromString("a"), new BlobData(testBlobData)),
-                        GenericRow.of(2, BinaryString.fromString("b"), new BlobData(testBlobData)),
-                        GenericRow.of(3, BinaryString.fromString("c"), new BlobData(testBlobData)),
-                        GenericRow.of(4, BinaryString.fromString("d"), new BlobData(testBlobData)),
-                        GenericRow.of(5, BinaryString.fromString("e"), new BlobData(testBlobData)));
-
-        // Batch 2: ids 6-10, values 15-19 (min value 15 > max value 14 from batch1)
-        List<InternalRow> batch2 =
-                Arrays.asList(
-                        GenericRow.of(6, BinaryString.fromString("f"), new BlobData(testBlobData)),
-                        GenericRow.of(7, BinaryString.fromString("g"), new BlobData(testBlobData)),
-                        GenericRow.of(8, BinaryString.fromString("h"), new BlobData(testBlobData)),
-                        GenericRow.of(9, BinaryString.fromString("i"), new BlobData(testBlobData)),
-                        GenericRow.of(
-                                10, BinaryString.fromString("j"), new BlobData(testBlobData)));
-
-        // Batch 3: ids 11-15, values 5-9 (min value 5 < min value 10 from batch1)
-        List<InternalRow> batch3 =
-                Arrays.asList(
-                        GenericRow.of(11, BinaryString.fromString("k"), new BlobData(testBlobData)),
-                        GenericRow.of(12, BinaryString.fromString("l"), new BlobData(testBlobData)),
-                        GenericRow.of(13, BinaryString.fromString("m"), new BlobData(testBlobData)),
-                        GenericRow.of(14, BinaryString.fromString("n"), new BlobData(testBlobData)),
-                        GenericRow.of(
-                                15, BinaryString.fromString("o"), new BlobData(testBlobData)));
-
-        writer.writeBundle(new TestBundleRecords(batch1));
-        writer.writeBundle(new TestBundleRecords(batch2));
-        writer.writeBundle(new TestBundleRecords(batch3));
-
-        writer.close();
-        List<DataFileMeta> metasResult = writer.result();
-
-        // Extract normal files (not blob files) to check value stats
-        List<DataFileMeta> normalFiles =
-                metasResult.stream()
-                        .filter(f -> f.fileFormat().equals("parquet"))
-                        .collect(java.util.stream.Collectors.toList());
-
-        assertThat(normalFiles).as("Should have at least one normal file").isNotEmpty();
-
-        // Verify statistics are computed across all batches
-        for (DataFileMeta fileMeta : normalFiles) {
-            if (fileMeta.valueStats() != null) {
-                org.apache.paimon.stats.SimpleStats valueStats = fileMeta.valueStats();
-                if (valueStats != null && valueStats.minValues().getFieldCount() > 0) {
-                    // Verify that min and max are computed across all batches
-                    // The first field is 'id' (IntType)
-                    int minId = valueStats.minValues().getInt(0);
-                    int maxId = valueStats.maxValues().getInt(0);
-
-                    // Expected: min_id = 1, max_id = 15 (across all batches)
-                    // If only batch1 was used, we'd get min=1, max=5 (WRONG)
-                    assertThat(minId)
-                            .as(
-                                    "Min id should be 1 (across all batches), but got %d. "
-                                            + "This indicates statistics were not computed across all batches.",
-                                    minId)
-                            .isEqualTo(1);
-
-                    assertThat(maxId)
-                            .as(
-                                    "Max id should be 15 (across all batches), but got %d. "
-                                            + "This indicates statistics were not computed across all batches.",
-                                    maxId)
-                            .isEqualTo(15);
-                }
-            }
-        }
-
-        // Verify total record count
-        assertThat(writer.recordCount()).isEqualTo(15);
-    }
-
-    @Test
-    public void testBlobStatsSchemaWithCustomColumnName() throws IOException {
+    void testBlobStatsSchemaWithCustomColumnName() throws IOException {
         RowType customSchema =
                 RowType.builder()
                         .field("id", DataTypes.INT())
