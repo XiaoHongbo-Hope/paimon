@@ -65,7 +65,6 @@ class BlobWriter(AppendOnlyDataWriter):
                 self._write_row_to_file(row_data)
                 self.record_count += 1
                 
-                # Check rolling condition (aligned with Java: check every CHECK_ROLLING_RECORD_CNT records)
                 if self.rolling_file(False):
                     self.close_current_writer()
             
@@ -84,12 +83,10 @@ class BlobWriter(AppendOnlyDataWriter):
             self.open_current_writer()
         
         self.current_writer.write_row(row_data)
-        # Increment sequence generator for each row (aligned with Java RowDataFileWriter.write())
         # This ensures each row has a unique sequence number for data versioning and consistency
         self.sequence_generator.next()
     
     def open_current_writer(self):
-        """Open a new blob file writer. Aligned with Java openCurrentWriter()."""
         file_name = f"data-{self.file_uuid}-{self.file_count}.{self.file_format}"
         self.file_count += 1  # Increment counter for next file
         file_path = self._generate_file_path(file_name)
@@ -97,7 +94,6 @@ class BlobWriter(AppendOnlyDataWriter):
         self.current_writer = BlobFileWriter(self.file_io, file_path, self.blob_as_descriptor)
     
     def rolling_file(self, force_check: bool = False) -> bool:
-        """Check if current file should be rolled. Aligned with Java rollingFile(boolean forceCheck)."""
         if self.current_writer is None:
             return False
         
@@ -121,18 +117,15 @@ class BlobWriter(AppendOnlyDataWriter):
     def _write_data_to_file(self, data):
         """
         Override for blob format in normal mode (blob-as-descriptor=false).
-        Only difference from parent: use shared UUID + counter for file naming (aligned with Java).
+        Only difference from parent: use shared UUID + counter for file naming.
         """
         if data.num_rows == 0:
             return
         
-        # Increment sequence generator for each row (aligned with Java RowDataFileWriter.write())
         # This ensures each row gets a unique sequence number, matching the behavior expected
-        # by the Java tests where max_seq - min_seq + 1 should equal row_count.
         for _ in range(data.num_rows):
             self.sequence_generator.next()
         
-        # Aligned with Java DataFilePathFactory: use shared UUID + counter
         file_name = f"data-{self.file_uuid}-{self.file_count}.{self.file_format}"
         self.file_count += 1
         file_path = self._generate_file_path(file_name)
@@ -178,7 +171,6 @@ class BlobWriter(AppendOnlyDataWriter):
             max_value_stats = [None]
             value_null_counts = [0]
 
-        # Aligned with Java RowDataFileWriter.result():
         # min_seq = seqNumCounter.getValue() - super.recordCount()
         # max_seq = seqNumCounter.getValue() - 1
         # This ensures max_seq - min_seq + 1 == row_count
@@ -231,7 +223,6 @@ class BlobWriter(AppendOnlyDataWriter):
         super().close()
     
     def abort(self):
-        """Abort current writer if open (aligned with Java: abort)."""
         if self.current_writer is not None:
             try:
                 self.current_writer.abort()

@@ -159,20 +159,17 @@ class DataWriter(ABC):
 
         # min key & max key
         selected_table = data.select(self.trimmed_primary_keys)
-        if selected_table.num_rows > 0:
-            first_row = selected_table.slice(0, 1)
-            min_key = [col.to_pylist()[0] for col in first_row.columns]
-            last_row = selected_table.slice(selected_table.num_rows - 1, 1)
-            max_key = [col.to_pylist()[0] for col in last_row.columns]
-        else:
-            min_key = []
-            max_key = []
+        key_columns_batch = selected_table.to_batches()[0]
+        min_key_row_batch = key_columns_batch.slice(0, 1)
+        max_key_row_batch = key_columns_batch.slice(key_columns_batch.num_rows - 1, 1)
+        min_key = [col.to_pylist()[0] for col in min_key_row_batch.columns]
+        max_key = [col.to_pylist()[0] for col in max_key_row_batch.columns]
 
         # key stats & value stats
         data_fields = self.table.fields if self.table.is_primary_key_table \
             else PyarrowFieldParser.to_paimon_schema(data.schema)
         column_stats = {
-            field.name: self._get_column_stats(data, field.name)
+            field.name: self._get_column_stats(data.to_batches()[0], field.name)
             for field in data_fields
         }
         all_fields = data_fields
@@ -186,10 +183,8 @@ class DataWriter(ABC):
         if not all(count == 0 for count in key_null_counts):
             raise RuntimeError("Primary key should not be null")
 
-        # max_seq = seqNumCounter.getValue() - 1
-        # This ensures max_seq - min_seq + 1 == row_count
-        min_seq = self.sequence_generator.current - data.num_rows
-        max_seq = self.sequence_generator.current - 1
+        min_seq = self.sequence_generator.start
+        max_seq = self.sequence_generator.current
         self.sequence_generator.start = self.sequence_generator.current
         self.committed_files.append(DataFileMeta(
             file_name=file_name,
@@ -259,17 +254,10 @@ class DataWriter(ABC):
         return best_split
 
     @staticmethod
-    def _get_column_stats(data_or_batch, column_name: str) -> Dict:
-        """
-        Compute column statistics for a column in a Table or RecordBatch.
-        """
+    def _get_column_stats(record_batch: pa.RecordBatch, column_name: str) -> Dict:
         import pyarrow.compute as pc
         
-        # Handle both Table and RecordBatch
-        if isinstance(data_or_batch, pa.Table):
-            column_array = data_or_batch.column(column_name)
-        else:
-            column_array = data_or_batch.column(column_name)
+        column_array = record_batch.column(column_name)
         
         if column_array.null_count == len(column_array):
             return {
