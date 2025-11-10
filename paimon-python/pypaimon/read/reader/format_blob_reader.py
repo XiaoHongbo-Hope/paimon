@@ -70,7 +70,7 @@ class FormatBlobReader(RecordBatchReader):
             self.returned = True
             batch_iterator = BlobRecordIterator(
                 self._file_io, self.file_path, self.blob_lengths,
-                self.blob_offsets, self._fields[0], self._blob_as_descriptor
+                self.blob_offsets, self._fields[0]
             )
             self._blob_iterator = iter(batch_iterator)
 
@@ -85,19 +85,10 @@ class FormatBlobReader(RecordBatchReader):
                     break
                 blob = blob_row.values[0]
                 for field_name in self._fields:
+                    blob_descriptor = blob.to_descriptor()
                     if self._blob_as_descriptor:
-                        # In blob-as-descriptor mode, return a descriptor pointing to the blob file location
-                        # The blob is created from Blob.from_file, which creates a BlobRef with a descriptor
-                        # pointing to the blob file. We return the serialized descriptor bytes.
-                        from pypaimon.table.row.blob import BlobDescriptor
-                        if hasattr(blob, 'to_descriptor'):
-                            descriptor = blob.to_descriptor()
-                            blob_data = descriptor.serialize()
-                        else:
-                            # Fallback: return blob data
-                            blob_data = blob.to_data()
+                        blob_data = blob_descriptor.serialize()
                     else:
-                        # In normal mode, return the actual blob data
                         blob_data = blob.to_data()
                     pydict_data[field_name].append(blob_data)
 
@@ -168,17 +159,16 @@ class FormatBlobReader(RecordBatchReader):
 
 class BlobRecordIterator:
     MAGIC_NUMBER_SIZE = 4
-    METADATA_OVERHEAD = 12  # length (8) + CRC (4)
+    METADATA_OVERHEAD = 16
 
     def __init__(self, file_io: FileIO, file_path: str, blob_lengths: List[int],
-                 blob_offsets: List[int], field_name: str, blob_as_descriptor: bool = False):
+                 blob_offsets: List[int], field_name: str):
         self.file_io = file_io
         self.file_path = file_path
         self.field_name = field_name
         self.blob_lengths = blob_lengths
         self.blob_offsets = blob_offsets
         self.current_position = 0
-        self.blob_as_descriptor = blob_as_descriptor
 
     def __iter__(self) -> Iterator[GenericRow]:
         return self
@@ -187,14 +177,10 @@ class BlobRecordIterator:
         if self.current_position >= len(self.blob_lengths):
             raise StopIteration
         # Create blob reference for the current blob
-        # blob_lengths includes: magic (4) + blob_data + length (8) + CRC (4)
         # Skip magic number (4 bytes) and exclude length (8 bytes) + CRC (4 bytes) = 12 bytes
-        # Total to exclude: magic (4) + length (8) + CRC (4) = 16 bytes
         blob_offset = self.blob_offsets[self.current_position] + self.MAGIC_NUMBER_SIZE  # Skip magic number
-        blob_length = self.blob_lengths[self.current_position] - self.MAGIC_NUMBER_SIZE - self.METADATA_OVERHEAD
-        
+        blob_length = self.blob_lengths[self.current_position] - self.METADATA_OVERHEAD
         blob = Blob.from_file(self.file_io, self.file_path, blob_offset, blob_length)
-        
         self.current_position += 1
         fields = [DataField(0, self.field_name, AtomicType("BLOB"))]
         return GenericRow([blob], fields, RowKind.INSERT)
