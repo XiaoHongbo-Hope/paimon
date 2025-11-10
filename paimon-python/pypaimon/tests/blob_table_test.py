@@ -1575,11 +1575,6 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
 
     def test_blob_file_name_format_with_shared_uuid(self):
-        """
-        Test that blob files from the same writer use shared UUID and incremental counter.
-        This ensures files have sequential names: data-{uuid}-0.blob, data-{uuid}-1.blob, ...
-        This test verifies the fix for the bug where each file used a new UUID instead of sharing one.
-        """
         import random
         import re
         from pypaimon import Schema
@@ -1643,8 +1638,6 @@ class DataBlobWriterTest(unittest.TestCase):
             f"File name should match expected format: data-{{uuid}}-{{count}}.blob, got: {first_file_name}"
         )
 
-        # Extract UUID and counter from first file name
-        # Format: data-{uuid}-{count}.blob
         first_match = file_name_pattern.match(first_file_name)
         first_counter = int(first_match.group(1))
         
@@ -1686,13 +1679,6 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
 
     def test_blob_as_descriptor_sequence_number_increment(self):
-        """
-        Test that sequence numbers are correctly incremented for each row in blob-as-descriptor mode.
-        
-        This test verifies the fix for the bug where sequence generator was not incremented
-        when writing rows one-by-one in blob-as-descriptor=true mode, causing all rows
-        in a file to have identical sequence numbers (min_seq == max_seq).
-        """
         import os
         from pypaimon import Schema
         from pypaimon.table.row.blob import BlobDescriptor
@@ -1761,10 +1747,6 @@ class DataBlobWriterTest(unittest.TestCase):
                     f"min_seq: {min_seq}, max_seq: {max_seq}. "
                     f"This indicates sequence generator was not incremented for each row."
                 )
-                # Verify that max_seq - min_seq + 1 equals row_count
-                # (each row should have a unique sequence number)
-                # Aligned with Java: min_seq = counter - row_count, max_seq = counter - 1
-                # This ensures max_seq - min_seq + 1 == row_count
                 self.assertEqual(
                     max_seq - min_seq + 1, row_count,
                     f"Sequence number range should match row count. "
@@ -1786,13 +1768,6 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
 
     def test_blob_non_descriptor_sequence_number_increment(self):
-        """
-        Test that sequence numbers are correctly incremented for each row in non-descriptor mode.
-        
-        This test verifies the fix for the bug where sequence generator was not incremented
-        when writing batches in blob-as-descriptor=false mode, causing all rows in a file
-        to have identical sequence numbers (min_seq == max_seq).
-        """
         from pypaimon import Schema
 
         # Create schema with blob column (blob-as-descriptor=false, normal mode)
@@ -1849,10 +1824,6 @@ class DataBlobWriterTest(unittest.TestCase):
                     f"min_seq: {min_seq}, max_seq: {max_seq}. "
                     f"This indicates sequence generator was not incremented for each row in batch."
                 )
-                # Verify that max_seq - min_seq + 1 equals row_count
-                # (each row should have a unique sequence number)
-                # Aligned with Java: min_seq = counter - row_count, max_seq = counter - 1
-                # This ensures max_seq - min_seq + 1 == row_count
                 self.assertEqual(
                     max_seq - min_seq + 1, row_count,
                     f"Sequence number range should match row count. "
