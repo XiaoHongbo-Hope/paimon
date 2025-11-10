@@ -2057,7 +2057,6 @@ class DataBlobWriterTest(unittest.TestCase):
         # The key test: verify that blob.target-file-size is used instead of target-file-size
         # If target-file-size (default 256MB for append-only) was used, we'd have 1 file
         # If blob.target-file-size (1MB) is used, we should have multiple files
-        total_size = sum(f.file_size for f in blob_files)
         total_data_size = num_blobs * blob_size
 
         # Verify that the rolling logic used blob_target_file_size (1MB) not target_file_size (256MB)
