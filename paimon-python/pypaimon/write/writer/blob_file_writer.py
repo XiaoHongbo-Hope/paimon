@@ -18,7 +18,6 @@
 
 import pyarrow as pa
 from pathlib import Path
-from typing import Optional
 
 from pypaimon.write.blob_format_writer import BlobFormatWriter
 from pypaimon.table.row.generic_row import GenericRow, RowKind
@@ -40,17 +39,17 @@ class BlobFileWriter:
         self.writer = BlobFormatWriter(self.output_stream)
         self.row_count = 0
         self.closed = False
-    
+
     def write_row(self, row_data: pa.Table):
         """Write a single row to the blob file."""
         if row_data.num_rows != 1:
             raise ValueError(f"Expected 1 row, got {row_data.num_rows}")
-        
+
         # Convert PyArrow row to GenericRow
         records_dict = row_data.to_pydict()
         field_name = row_data.schema[0].name
         col_data = records_dict[field_name][0]
-        
+
         # Convert to Blob
         if self.blob_as_descriptor:
             # In blob-as-descriptor mode, we need to read external file data
@@ -75,29 +74,29 @@ class BlobFileWriter:
             if isinstance(col_data, str):
                 col_data = col_data.encode('utf-8')
             blob_data = BlobData(col_data)
-        
+
         # Create GenericRow
         fields = [DataField(0, field_name, PyarrowFieldParser.to_paimon_type(row_data.schema[0].type, False))]
         row = GenericRow([blob_data], fields, RowKind.INSERT)
-        
+
         # Write to blob format writer
         self.writer.add_element(row)
         self.row_count += 1
-    
+
     def reach_target_size(self, suggested_check: bool, target_size: int) -> bool:
         return self.writer.reach_target_size(suggested_check, target_size)
-    
+
     def close(self) -> int:
         if self.closed:
             return self.file_io.get_file_size(self.file_path)
-        
+
         self.writer.close()
         self.closed = True
-        
+
         # Get actual file size
         file_size = self.file_io.get_file_size(self.file_path)
         return file_size
-    
+
     def abort(self):
         """Abort the writer and delete the file."""
         if not self.closed:
@@ -107,7 +106,6 @@ class BlobFileWriter:
             except Exception:
                 pass
             self.closed = True
-        
+
         # Delete the file
         self.file_io.delete_quietly(self.file_path)
-

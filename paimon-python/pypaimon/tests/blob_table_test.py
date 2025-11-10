@@ -1630,8 +1630,11 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertGreater(len(blob_files), 1, "Should have multiple blob files due to rolling")
 
         # Verify file name format: data-{uuid}-{count}.blob
-        file_name_pattern = re.compile(r'^data-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}-(\d+)\.blob$')
-        
+        file_name_pattern = re.compile(
+            r'^data-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-'
+            r'[a-f0-9]{12}-(\d+)\.blob$'
+        )
+
         first_file_name = blob_files[0].file_name
         self.assertTrue(
             file_name_pattern.match(first_file_name),
@@ -1640,7 +1643,7 @@ class DataBlobWriterTest(unittest.TestCase):
 
         first_match = file_name_pattern.match(first_file_name)
         first_counter = int(first_match.group(1))
-        
+
         # Extract UUID (everything between "data-" and last "-")
         uuid_start = len("data-")
         uuid_end = first_file_name.rfind('-', uuid_start)
@@ -1650,23 +1653,23 @@ class DataBlobWriterTest(unittest.TestCase):
         for i, blob_file in enumerate(blob_files):
             file_name = blob_file.file_name
             match = file_name_pattern.match(file_name)
-            
+
             self.assertIsNotNone(
                 match,
                 f"File name should match expected format: data-{{uuid}}-{{count}}.blob, got: {file_name}"
             )
-            
+
             counter = int(match.group(1))
-            
+
             # Extract UUID from this file
             file_uuid = file_name[uuid_start:file_name.rfind('-', uuid_start)]
-            
+
             self.assertEqual(
                 file_uuid,
                 shared_uuid,
                 f"All blob files should use the same UUID. Expected: {shared_uuid}, got: {file_uuid} in {file_name}"
             )
-            
+
             self.assertEqual(
                 counter,
                 first_counter + i,
@@ -1711,7 +1714,7 @@ class DataBlobWriterTest(unittest.TestCase):
         # Write data row by row (this triggers the one-by-one writing in blob-as-descriptor mode)
         write_builder = table.new_batch_write_builder()
         writer = write_builder.new_write()
-        
+
         # Write each row separately to ensure one-by-one writing
         for i in range(num_blobs):
             test_data = pa.Table.from_pydict({
@@ -1933,14 +1936,14 @@ class DataBlobWriterTest(unittest.TestCase):
         # Write data in batches to trigger multiple file rollings
         write_builder = table.new_batch_write_builder()
         writer = write_builder.new_write()
-        
+
         # Write data that will trigger rolling
         test_data = pa.Table.from_pydict({
             'id': list(range(1, num_blobs + 1)),
             'name': [f'item_{i}' for i in range(1, num_blobs + 1)],
             'blob_data': blob_data_list
         }, schema=pa_schema)
-        
+
         writer.write_arrow(test_data)
         commit_messages = writer.prepare_commit()
         write_builder.new_commit().commit(commit_messages)
@@ -1954,8 +1957,11 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertGreaterEqual(len(blob_files), 1, "Should have at least one blob file")
 
         # Verify file name format: data-{uuid}-{count}.blob
-        file_name_pattern = re.compile(r'^data-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}-(\d+)\.blob$')
-        
+        file_name_pattern = re.compile(
+            r'^data-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-'
+            r'[a-f0-9]{12}-(\d+)\.blob$'
+        )
+
         first_file_name = blob_files[0].file_name
         self.assertTrue(
             file_name_pattern.match(first_file_name),
@@ -1965,7 +1971,7 @@ class DataBlobWriterTest(unittest.TestCase):
         # Extract UUID and counter from first file name
         first_match = file_name_pattern.match(first_file_name)
         first_counter = int(first_match.group(1))
-        
+
         # Extract UUID (everything between "data-" and last "-")
         uuid_start = len("data-")
         uuid_end = first_file_name.rfind('-', uuid_start)
@@ -1975,23 +1981,23 @@ class DataBlobWriterTest(unittest.TestCase):
         for i, blob_file in enumerate(blob_files):
             file_name = blob_file.file_name
             match = file_name_pattern.match(file_name)
-            
+
             self.assertIsNotNone(
                 match,
                 f"File name should match expected format: data-{{uuid}}-{{count}}.blob, got: {file_name}"
             )
-            
+
             counter = int(match.group(1))
-            
+
             # Extract UUID from this file
             file_uuid = file_name[uuid_start:file_name.rfind('-', uuid_start)]
-            
+
             self.assertEqual(
                 file_uuid,
                 shared_uuid,
                 f"All blob files should use the same UUID. Expected: {shared_uuid}, got: {file_uuid} in {file_name}"
             )
-            
+
             self.assertEqual(
                 counter,
                 first_counter + i,
