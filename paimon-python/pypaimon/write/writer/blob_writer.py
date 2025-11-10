@@ -71,8 +71,17 @@ class BlobWriter(AppendOnlyDataWriter):
             # All data has been written
             self.pending_data = None
         else:
-            # blob-as-descriptor=false: Use parent class logic (memory size checking)
-            super()._check_and_roll_if_needed()
+            # blob-as-descriptor=false: Use blob_target_file_size instead of target_file_size
+            current_size = self.pending_data.nbytes
+            if current_size > self.blob_target_file_size:
+                split_row = self._find_optimal_split_point(self.pending_data, self.blob_target_file_size)
+                if split_row > 0:
+                    data_to_write = self.pending_data.slice(0, split_row)
+                    remaining_data = self.pending_data.slice(split_row)
+
+                    self._write_data_to_file(data_to_write)
+                    self.pending_data = remaining_data
+                    self._check_and_roll_if_needed()
 
     def _write_row_to_file(self, row_data: pa.Table):
         """Write a single row to the current blob file. Opens a new file if needed."""

@@ -2009,5 +2009,75 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertEqual(result.num_rows, num_blobs)
         self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
 
+    def test_blob_non_descriptor_target_file_size_rolling(self):
+        """Test that blob.target-file-size is respected in non-descriptor mode."""
+        from pypaimon import Schema
+
+        # Create schema with blob column (non-descriptor mode)
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        # Test with blob.target-file-size set to a small value
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true',
+                'blob.target-file-size': '1MB'  # Set blob-specific target file size
+            }
+        )
+
+        self.catalog.create_table('test_db.blob_non_descriptor_rolling', schema, False)
+        table = self.catalog.get_table('test_db.blob_non_descriptor_rolling')
+
+        # Write multiple blobs that together exceed the target size
+        # Each blob is 0.6MB, so 3 blobs = 1.8MB > 1MB target
+        num_blobs = 3
+        blob_size = int(0.6 * 1024 * 1024)  # 0.6MB per blob
+
+        test_data = pa.Table.from_pydict({
+            'id': list(range(1, num_blobs + 1)),
+            'blob_data': [b'x' * blob_size for _ in range(num_blobs)]
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        commit = write_builder.new_commit()
+        commit.commit(commit_messages)
+        writer.close()
+
+        # Extract blob files from commit messages
+        all_files = [f for msg in commit_messages for f in msg.new_files]
+        blob_files = [f for f in all_files if f.file_name.endswith('.blob')]
+
+        # The key test: verify that blob.target-file-size is used instead of target-file-size
+        # If target-file-size (default 256MB for append-only) was used, we'd have 1 file
+        # If blob.target-file-size (1MB) is used, we should have multiple files
+        total_size = sum(f.file_size for f in blob_files)
+        total_data_size = num_blobs * blob_size
+
+        # Verify that the rolling logic used blob_target_file_size (1MB) not target_file_size (256MB)
+        # If target_file_size was used, all data would fit in one file
+        # If blob_target_file_size was used, data should be split
+        if total_data_size > 1024 * 1024:  # Total > 1MB
+            self.assertGreater(
+                len(blob_files), 1,
+                f"Should have multiple blob files when using blob.target-file-size (1MB). "
+                f"Total data size: {total_data_size / 1024 / 1024:.2f}MB, "
+                f"got {len(blob_files)} file(s). "
+                f"This indicates blob.target-file-size was ignored and target-file-size was used instead."
+            )
+
+        # Verify data integrity
+        result = table.new_read_builder().new_read().to_arrow(
+            table.new_read_builder().new_scan().plan().splits()
+        )
+        self.assertEqual(result.num_rows, num_blobs)
+        self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
+
 if __name__ == '__main__':
     unittest.main()
