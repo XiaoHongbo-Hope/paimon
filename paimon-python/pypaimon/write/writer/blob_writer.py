@@ -245,20 +245,16 @@ class BlobWriter(AppendOnlyDataWriter):
     def _get_column_stats(data_or_batch, column_name: str):
         """
         Compute column statistics for a column in a Table or RecordBatch.
-        Handles both single batch and multiple batches correctly.
         """
         import pyarrow.compute as pc
         
         # Handle both Table and RecordBatch
         if isinstance(data_or_batch, pa.Table):
-            # For Table, get the column from the table (works across all batches)
             column_array = data_or_batch.column(column_name)
         else:
-            # For RecordBatch, get the column directly
             column_array = data_or_batch.column(column_name)
         
         # For blob data, don't generate min/max values
-        # But we still need correct null_counts across all batches
         return {
             "min_values": None,
             "max_values": None,

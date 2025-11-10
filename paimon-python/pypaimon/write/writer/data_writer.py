@@ -158,15 +158,10 @@ class DataWriter(ABC):
             raise ValueError(f"Unsupported file format: {self.file_format}")
 
         # min key & max key
-        # Handle multiple batches correctly by working with the full table
         selected_table = data.select(self.trimmed_primary_keys)
-        # Get min and max keys across all batches, not just the first one
-        # For sorted data, min is first row and max is last row across all batches
         if selected_table.num_rows > 0:
-            # Get first row (min key) - works across all batches
             first_row = selected_table.slice(0, 1)
             min_key = [col.to_pylist()[0] for col in first_row.columns]
-            # Get last row (max key) - works across all batches
             last_row = selected_table.slice(selected_table.num_rows - 1, 1)
             max_key = [col.to_pylist()[0] for col in last_row.columns]
         else:
@@ -191,8 +186,6 @@ class DataWriter(ABC):
         if not all(count == 0 for count in key_null_counts):
             raise RuntimeError("Primary key should not be null")
 
-        # Aligned with Java RowDataFileWriter.result():
-        # min_seq = seqNumCounter.getValue() - super.recordCount()
         # max_seq = seqNumCounter.getValue() - 1
         # This ensures max_seq - min_seq + 1 == row_count
         min_seq = self.sequence_generator.current - data.num_rows
@@ -269,18 +262,13 @@ class DataWriter(ABC):
     def _get_column_stats(data_or_batch, column_name: str) -> Dict:
         """
         Compute column statistics for a column in a Table or RecordBatch.
-        Handles both single batch and multiple batches correctly.
-        When data has multiple batches (e.g., from pa.concat_tables), this ensures
-        statistics are computed across all batches, not just the first one.
         """
         import pyarrow.compute as pc
         
         # Handle both Table and RecordBatch
         if isinstance(data_or_batch, pa.Table):
-            # For Table, get the column from the table (works across all batches)
             column_array = data_or_batch.column(column_name)
         else:
-            # For RecordBatch, get the column directly
             column_array = data_or_batch.column(column_name)
         
         if column_array.null_count == len(column_array):
