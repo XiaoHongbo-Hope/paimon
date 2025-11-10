@@ -1763,19 +1763,14 @@ class DataBlobWriterTest(unittest.TestCase):
                 )
                 # Verify that max_seq - min_seq + 1 equals row_count
                 # (each row should have a unique sequence number)
-                # Note: In Python, sequence_generator starts from 0, and next() increments before returning
-                # So if we write 10 rows, sequence numbers are 1, 2, ..., 10
-                # But min_seq is captured at the start (0) and max_seq is the final current (10)
-                # So the range is 10 - 0 + 1 = 11, which includes the initial state
-                # The actual sequence numbers used are 1 to 10, which is 10 values
-                # So we verify that max_seq - min_seq >= row_count - 1
-                # (allowing for the off-by-one due to initial state)
-                self.assertGreaterEqual(
-                    max_seq - min_seq, row_count - 1,
-                    f"Sequence number range should be at least row_count - 1. "
+                # Aligned with Java: min_seq = counter - row_count, max_seq = counter - 1
+                # This ensures max_seq - min_seq + 1 == row_count
+                self.assertEqual(
+                    max_seq - min_seq + 1, row_count,
+                    f"Sequence number range should match row count. "
                     f"File: {blob_file.file_name}, row_count: {row_count}, "
                     f"min_seq: {min_seq}, max_seq: {max_seq}, "
-                    f"expected range: >= {row_count - 1}, actual range: {max_seq - min_seq}"
+                    f"expected range: {row_count}, actual range: {max_seq - min_seq + 1}"
                 )
             else:
                 # For single row files, min_seq == max_seq is acceptable
@@ -1789,6 +1784,91 @@ class DataBlobWriterTest(unittest.TestCase):
         result = table.new_read_builder().new_read().to_arrow(table.new_read_builder().new_scan().plan().splits())
         self.assertEqual(result.num_rows, num_blobs)
         self.assertEqual(result.column('id').to_pylist(), list(range(1, num_blobs + 1)))
+
+    def test_blob_non_descriptor_sequence_number_increment(self):
+        """
+        Test that sequence numbers are correctly incremented for each row in non-descriptor mode.
+        
+        This test verifies the fix for the bug where sequence generator was not incremented
+        when writing batches in blob-as-descriptor=false mode, causing all rows in a file
+        to have identical sequence numbers (min_seq == max_seq).
+        """
+        from pypaimon import Schema
+
+        # Create schema with blob column (blob-as-descriptor=false, normal mode)
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('blob_data', pa.large_binary())
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, options={
+            'row-tracking.enabled': 'true',
+            'data-evolution.enabled': 'true',
+            'blob-as-descriptor': 'false'  # Normal mode, not descriptor mode
+        })
+
+        self.catalog.create_table('test_db.blob_sequence_non_desc_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_sequence_non_desc_test')
+
+        # Create test data with multiple rows in a batch
+        num_rows = 10
+        test_data = pa.Table.from_pydict({
+            'id': list(range(1, num_rows + 1)),
+            'name': [f'item_{i}' for i in range(num_rows)],
+            'blob_data': [f'blob data {i}'.encode('utf-8') for i in range(num_rows)]
+        }, schema=pa_schema)
+
+        # Write data as a batch (this triggers batch writing in non-descriptor mode)
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+
+        commit_messages = writer.prepare_commit()
+        write_builder.new_commit().commit(commit_messages)
+        writer.close()
+
+        # Extract blob files from commit messages
+        all_files = [f for msg in commit_messages for f in msg.new_files]
+        blob_files = [f for f in all_files if f.file_name.endswith('.blob')]
+
+        # Verify that we have at least one blob file
+        self.assertGreater(len(blob_files), 0, "Should have at least one blob file")
+
+        # Verify sequence numbers for each blob file
+        for blob_file in blob_files:
+            min_seq = blob_file.min_sequence_number
+            max_seq = blob_file.max_sequence_number
+            row_count = blob_file.row_count
+
+            # Critical assertion: min_seq should NOT equal max_seq when there are multiple rows
+            if row_count > 1:
+                self.assertNotEqual(
+                    min_seq, max_seq,
+                    f"Sequence numbers should be different for files with multiple rows. "
+                    f"File: {blob_file.file_name}, row_count: {row_count}, "
+                    f"min_seq: {min_seq}, max_seq: {max_seq}. "
+                    f"This indicates sequence generator was not incremented for each row in batch."
+                )
+                # Verify that max_seq - min_seq + 1 equals row_count
+                # (each row should have a unique sequence number)
+                # Aligned with Java: min_seq = counter - row_count, max_seq = counter - 1
+                # This ensures max_seq - min_seq + 1 == row_count
+                self.assertEqual(
+                    max_seq - min_seq + 1, row_count,
+                    f"Sequence number range should match row count. "
+                    f"File: {blob_file.file_name}, row_count: {row_count}, "
+                    f"min_seq: {min_seq}, max_seq: {max_seq}, "
+                    f"expected range: {row_count}, actual range: {max_seq - min_seq + 1}"
+                )
+            else:
+                # For single row files, min_seq == max_seq is acceptable
+                self.assertEqual(
+                    min_seq, max_seq,
+                    f"Single row file should have min_seq == max_seq. "
+                    f"File: {blob_file.file_name}, min_seq: {min_seq}, max_seq: {max_seq}"
+                )
+
+        print("✅ Non-descriptor mode sequence number increment test passed")
 
     def test_column_stats_with_multiple_batches(self):
         """

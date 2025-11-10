@@ -489,6 +489,74 @@ public class RollingBlobFileWriterTest {
     }
 
     @Test
+    public void testSequenceNumberIncrementInNonDescriptorMode() throws IOException {
+        // Write multiple rows as a batch to trigger batch writing in non-descriptor mode
+        // (blob-as-descriptor=false, which is the default)
+        int numRows = 10;
+        for (int i = 0; i < numRows; i++) {
+            InternalRow row =
+                    GenericRow.of(
+                            i, BinaryString.fromString("test" + i), new BlobData(testBlobData));
+            writer.write(row);
+        }
+
+        writer.close();
+        List<DataFileMeta> metasResult = writer.result();
+
+        // Extract blob files (skip the first normal file)
+        List<DataFileMeta> blobFiles =
+                metasResult.stream()
+                        .filter(f -> f.fileFormat().equals("blob"))
+                        .collect(java.util.stream.Collectors.toList());
+
+        assertThat(blobFiles).as("Should have at least one blob file").isNotEmpty();
+
+        // Verify sequence numbers for each blob file
+        for (DataFileMeta blobFile : blobFiles) {
+            long minSeq = blobFile.minSequenceNumber();
+            long maxSeq = blobFile.maxSequenceNumber();
+            long rowCount = blobFile.rowCount();
+
+            // Critical assertion: min_seq should NOT equal max_seq when there are multiple rows
+            if (rowCount > 1) {
+                assertThat(minSeq)
+                        .as(
+                                "Sequence numbers should be different for files with multiple rows. "
+                                        + "File: %s, row_count: %d, min_seq: %d, max_seq: %d. "
+                                        + "This indicates sequence generator was not incremented for each row in batch.",
+                                blobFile.fileName(), rowCount, minSeq, maxSeq)
+                        .isNotEqualTo(maxSeq);
+
+                // Verify that max_seq - min_seq + 1 equals row_count
+                // (each row should have a unique sequence number)
+                assertThat(maxSeq - minSeq + 1)
+                        .as(
+                                "Sequence number range should match row count. "
+                                        + "File: %s, row_count: %d, min_seq: %d, max_seq: %d, "
+                                        + "expected range: %d, actual range: %d",
+                                blobFile.fileName(),
+                                rowCount,
+                                minSeq,
+                                maxSeq,
+                                rowCount,
+                                maxSeq - minSeq + 1)
+                        .isEqualTo(rowCount);
+            } else {
+                // For single row files, min_seq == max_seq is acceptable
+                assertThat(minSeq)
+                        .as(
+                                "Single row file should have min_seq == max_seq. "
+                                        + "File: %s, min_seq: %d, max_seq: %d",
+                                blobFile.fileName(), minSeq, maxSeq)
+                        .isEqualTo(maxSeq);
+            }
+        }
+
+        // Verify total record count
+        assertThat(writer.recordCount()).isEqualTo(numRows);
+    }
+
+    @Test
     public void testColumnStatsWithMultipleBatches() throws IOException {
         // Batch 1: ids 1-5, values 10-14
         List<InternalRow> batch1 =

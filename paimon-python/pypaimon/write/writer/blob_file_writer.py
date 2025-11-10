@@ -28,10 +28,10 @@ from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 
 class BlobFileWriter:
     """
-    Single blob file writer (aligned with Java RowDataFileWriter + BlobFormatWriter).
+    Single blob file writer
     Writes rows one by one and tracks file size.
     """
-    
+
     def __init__(self, file_io, file_path: Path, blob_as_descriptor: bool):
         self.file_io = file_io
         self.file_path = file_path
@@ -85,15 +85,9 @@ class BlobFileWriter:
         self.row_count += 1
     
     def reach_target_size(self, suggested_check: bool, target_size: int) -> bool:
-        """
-        Check if file has reached target size (aligned with Java BlobFormatWriter.reachTargetSize).
-        """
         return self.writer.reach_target_size(suggested_check, target_size)
     
     def close(self) -> int:
-        """
-        Close the writer and return file size (aligned with Java SingleFileWriter.close).
-        """
         if self.closed:
             return self.file_io.get_file_size(self.file_path)
         

@@ -126,6 +126,12 @@ class BlobWriter(AppendOnlyDataWriter):
         if data.num_rows == 0:
             return
         
+        # Increment sequence generator for each row (aligned with Java RowDataFileWriter.write())
+        # This ensures each row gets a unique sequence number, matching the behavior expected
+        # by the Java tests where max_seq - min_seq + 1 should equal row_count.
+        for _ in range(data.num_rows):
+            self.sequence_generator.next()
+        
         # Aligned with Java DataFilePathFactory: use shared UUID + counter
         file_name = f"data-{self.file_uuid}-{self.file_count}.{self.file_format}"
         self.file_count += 1
@@ -172,8 +178,12 @@ class BlobWriter(AppendOnlyDataWriter):
             max_value_stats = [None]
             value_null_counts = [0]
 
-        min_seq = self.sequence_generator.start
-        max_seq = self.sequence_generator.current
+        # Aligned with Java RowDataFileWriter.result():
+        # min_seq = seqNumCounter.getValue() - super.recordCount()
+        # max_seq = seqNumCounter.getValue() - 1
+        # This ensures max_seq - min_seq + 1 == row_count
+        min_seq = self.sequence_generator.current - row_count
+        max_seq = self.sequence_generator.current - 1
         self.sequence_generator.start = self.sequence_generator.current
         
         self.committed_files.append(DataFileMeta(

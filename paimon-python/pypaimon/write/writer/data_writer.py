@@ -191,8 +191,12 @@ class DataWriter(ABC):
         if not all(count == 0 for count in key_null_counts):
             raise RuntimeError("Primary key should not be null")
 
-        min_seq = self.sequence_generator.start
-        max_seq = self.sequence_generator.current
+        # Aligned with Java RowDataFileWriter.result():
+        # min_seq = seqNumCounter.getValue() - super.recordCount()
+        # max_seq = seqNumCounter.getValue() - 1
+        # This ensures max_seq - min_seq + 1 == row_count
+        min_seq = self.sequence_generator.current - data.num_rows
+        max_seq = self.sequence_generator.current - 1
         self.sequence_generator.start = self.sequence_generator.current
         self.committed_files.append(DataFileMeta(
             file_name=file_name,
