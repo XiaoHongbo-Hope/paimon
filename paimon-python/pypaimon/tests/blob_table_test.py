@@ -1518,6 +1518,108 @@ class DataBlobWriterTest(unittest.TestCase):
                 [RowKind.INSERT, RowKind.UPDATE_BEFORE, RowKind.UPDATE_AFTER, RowKind.DELETE],
                 f"Row {row_id}: RowKind should be valid")
 
+    def test_blob_descriptor_uri_scheme_preservation(self):
+        """
+        Test that URI scheme is preserved when reading blob descriptors in blob-as-descriptor=true mode.
+        This reproduces the issue where OSS/Pangu URIs lose their scheme after from_descriptor.
+        """
+        from pypaimon import Schema
+        from pypaimon.table.row.blob import BlobDescriptor
+        import tempfile
+        import os
+
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true',
+                'blob-as-descriptor': 'true',
+                # Set a large target-file-size to avoid rolling
+                'target-file-size': '100MB'
+            }
+        )
+
+        self.catalog.create_table('test_db.blob_uri_scheme_test', schema, False)
+        table = self.catalog.get_table('test_db.blob_uri_scheme_test')
+
+        # Create external blob file (simulating OSS/Pangu storage)
+        external_blob_dir = os.path.join(self.temp_dir, 'external_blobs')
+        os.makedirs(external_blob_dir, exist_ok=True)
+        external_blob_path = os.path.join(external_blob_dir, 'external_blob_1.bin')
+        blob_content = b'This is external blob data for URI scheme test'
+        with open(external_blob_path, 'wb') as f:
+            f.write(blob_content)
+
+        # Create BlobDescriptor with OSS scheme (simulating Pangu/OSS)
+        # Use oss:// scheme to simulate the user's scenario
+        external_uri_with_scheme = f"oss://bucket/path/to/external_blob_1.bin"
+        # For local testing, we'll use file:// scheme but the test should work the same way
+        # The key is that the URI should have a scheme
+        external_uri_with_scheme = f"file://{external_blob_path}"
+
+        blob_descriptor = BlobDescriptor(external_uri_with_scheme, 0, len(blob_content))
+        descriptor_bytes = blob_descriptor.serialize()
+
+        # Write the descriptor bytes to the table
+        test_data = pa.Table.from_pydict({
+            'id': [1],
+            'blob_data': [descriptor_bytes]
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(test_data)
+        commit_messages = writer.prepare_commit()
+        commit = write_builder.new_commit()
+        commit.commit(commit_messages)
+        writer.close()
+
+        # Read back the data
+        read_builder = table.new_read_builder()
+        scan = read_builder.new_scan()
+        splits = scan.plan().splits()
+        read = read_builder.new_read()
+        result = read.to_arrow(splits)
+
+        self.assertEqual(result.num_rows, 1, "Should have 1 row")
+        self.assertEqual(result.num_columns, 2, "Should have 2 columns")
+
+        # Get the blob descriptor bytes from the result
+        read_descriptor_bytes = result.column('blob_data')[0].as_py()
+        self.assertIsInstance(read_descriptor_bytes, bytes, "Should return descriptor bytes in blob-as-descriptor mode")
+
+        # Deserialize the descriptor
+        read_descriptor = BlobDescriptor.deserialize(read_descriptor_bytes)
+
+        # Check that the URI scheme is preserved
+        self.assertEqual(
+            read_descriptor.uri,
+            external_uri_with_scheme,
+            f"URI scheme should be preserved. Expected: {external_uri_with_scheme}, Got: {read_descriptor.uri}"
+        )
+
+        # Verify the URI has a scheme
+        from urllib.parse import urlparse
+        parsed_uri = urlparse(read_descriptor.uri)
+        self.assertIsNotNone(
+            parsed_uri.scheme,
+            f"URI should have a scheme. Got URI: {read_descriptor.uri}"
+        )
+        self.assertEqual(
+            parsed_uri.scheme,
+            'file',  # For local testing, should be 'file'
+            f"URI scheme should be 'file'. Got: {parsed_uri.scheme}"
+        )
+
+        # Verify other descriptor fields are preserved
+        self.assertEqual(read_descriptor.offset, 0, "Offset should be preserved")
+        self.assertEqual(read_descriptor.length, len(blob_content), "Length should be preserved")
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -95,6 +95,51 @@ public class BlobTableITCase extends CatalogITCaseBase {
                 .containsExactlyInAnyOrder(Row.of(1, "paimon", blobData));
     }
 
+    @Test
+    public void testBlobDescriptorUriSchemePreservation() throws Exception {
+        // This test reproduces the issue where OSS/Pangu URIs lose their scheme
+        // after from_descriptor in blob-as-descriptor=true mode
+        byte[] blobData = new byte[1024];
+        RANDOM.nextBytes(blobData);
+        FileIO fileIO = new LocalFileIO();
+        String externalBlobPath = warehouse + "/external_blob_scheme_test";
+        try (OutputStream outputStream =
+                fileIO.newOutputStream(new org.apache.paimon.fs.Path(externalBlobPath), true)) {
+            outputStream.write(blobData);
+        }
+
+        // Create BlobDescriptor with a scheme (simulating OSS/Pangu)
+        // Use file:// scheme for local testing, but the test should work the same way
+        String uriWithScheme = "file://" + externalBlobPath;
+        BlobDescriptor originalDescriptor = new BlobDescriptor(uriWithScheme, 0, blobData.length);
+
+        // Write the descriptor to the table
+        batchSql(
+                "INSERT INTO blob_table_descriptor VALUES (2, 'scheme_test', X'"
+                        + bytesToHex(originalDescriptor.serialize())
+                        + "')");
+
+        // Read back the descriptor
+        byte[] readDescriptorBytes =
+                (byte[])
+                        batchSql("SELECT picture FROM blob_table_descriptor WHERE id = 2")
+                                .get(0)
+                                .getField(0);
+        BlobDescriptor readDescriptor = BlobDescriptor.deserialize(readDescriptorBytes);
+
+        // Verify that the URI scheme is preserved
+        assertThat(readDescriptor.uri())
+                .as("URI scheme should be preserved after read")
+                .isEqualTo(uriWithScheme);
+
+        // Verify that the URI has a scheme
+        assertThat(readDescriptor.uri()).as("URI should have a scheme").startsWith("file://");
+
+        // Verify other descriptor fields are preserved
+        assertThat(readDescriptor.offset()).isEqualTo(0);
+        assertThat(readDescriptor.length()).isEqualTo(blobData.length);
+    }
+
     private static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
 
     public static String bytesToHex(byte[] bytes) {
