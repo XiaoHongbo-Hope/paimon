@@ -372,7 +372,7 @@ class FullStartingScanner(StartingScanner):
 
             for data_file in file_group:
                 data_file.set_file_path(self.table.table_path, file_entries[0].partition,
-                                        file_entries[0].bucket)
+                                        file_entries[0].bucket, self.table.file_io)
                 file_paths.append(data_file.file_path)
                 total_file_size += data_file.file_size
                 total_record_count += data_file.row_count

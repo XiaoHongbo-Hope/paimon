@@ -53,13 +53,19 @@ class DataFileMeta:
     # not a schema field, just for internal usage
     file_path: str = None
 
-    def set_file_path(self, table_path: Path, partition: GenericRow, bucket: int):
+    def set_file_path(self, table_path: Path, partition: GenericRow, bucket: int, file_io=None):
         path_builder = table_path
         partition_dict = partition.to_dict()
         for field_name, field_value in partition_dict.items():
             path_builder = path_builder / (field_name + "=" + str(field_value))
         path_builder = path_builder / ("bucket-" + str(bucket)) / self.file_name
-        self.file_path = str(path_builder)
+        path_str = str(path_builder)
+
+        if file_io is not None and hasattr(file_io, '_scheme') and file_io._scheme:
+            if not path_str.startswith(f"{file_io._scheme}://"):
+                path_str = f"{file_io._scheme}://{path_str}"
+
+        self.file_path = path_str
 
     def copy_without_stats(self) -> 'DataFileMeta':
         """Create a new DataFileMeta without value statistics."""

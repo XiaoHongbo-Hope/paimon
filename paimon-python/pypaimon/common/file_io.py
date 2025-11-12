@@ -40,6 +40,7 @@ class FileIO:
         self.logger = logging.getLogger(__name__)
         scheme, netloc, _ = self.parse_location(path)
         self.uri_reader_factory = UriReaderFactory(catalog_options)
+        self._scheme = scheme  # Store scheme for later use
         if scheme in {"oss"}:
             self.filesystem = self._initialize_oss_fs(path)
         elif scheme in {"s3", "s3a", "s3n"}:
@@ -151,21 +152,25 @@ class FileIO:
         return LocalFileSystem()
 
     def new_input_stream(self, path: Path):
-        return self.filesystem.open_input_file(str(path))
+        path_str = self.to_filesystem_path(path)
+        return self.filesystem.open_input_file(path_str)
 
     def new_output_stream(self, path: Path):
+        path_str = self.to_filesystem_path(path)
         parent_dir = path.parent
         if str(parent_dir) and not self.exists(parent_dir):
             self.mkdirs(parent_dir)
 
-        return self.filesystem.open_output_stream(str(path))
+        return self.filesystem.open_output_stream(path_str)
 
     def get_file_status(self, path: Path):
-        file_infos = self.filesystem.get_file_info([str(path)])
+        path_str = self.to_filesystem_path(path)
+        file_infos = self.filesystem.get_file_info([path_str])
         return file_infos[0]
 
     def list_status(self, path: Path):
-        selector = pyarrow.fs.FileSelector(str(path), recursive=False, allow_not_found=True)
+        path_str = self.to_filesystem_path(path)
+        selector = pyarrow.fs.FileSelector(path_str, recursive=False, allow_not_found=True)
         return self.filesystem.get_file_info(selector)
 
     def list_directories(self, path: Path):
@@ -174,21 +179,24 @@ class FileIO:
 
     def exists(self, path: Path) -> bool:
         try:
-            file_info = self.filesystem.get_file_info([str(path)])[0]
-            return file_info.type != pyarrow.fs.FileType.NotFound
-        except Exception:
+            path_str = self.to_filesystem_path(path)
+            file_info = self.filesystem.get_file_info([path_str])[0]
+            result = file_info.type != pyarrow.fs.FileType.NotFound
+            return result
+        except Exception as e:
             return False
 
     def delete(self, path: Path, recursive: bool = False) -> bool:
         try:
-            file_info = self.filesystem.get_file_info([str(path)])[0]
+            path_str = self.to_filesystem_path(path)
+            file_info = self.filesystem.get_file_info([path_str])[0]
             if file_info.type == pyarrow.fs.FileType.Directory:
                 if recursive:
-                    self.filesystem.delete_dir_contents(str(path))
+                    self.filesystem.delete_dir_contents(path_str)
                 else:
-                    self.filesystem.delete_dir(str(path))
+                    self.filesystem.delete_dir(path_str)
             else:
-                self.filesystem.delete_file(str(path))
+                self.filesystem.delete_file(path_str)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to delete {path}: {e}")
@@ -196,7 +204,8 @@ class FileIO:
 
     def mkdirs(self, path: Path) -> bool:
         try:
-            self.filesystem.create_dir(str(path), recursive=True)
+            path_str = self.to_filesystem_path(path)
+            self.filesystem.create_dir(path_str, recursive=True)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to create directory {path}: {e}")
@@ -208,7 +217,9 @@ class FileIO:
             if str(dst_parent) and not self.exists(dst_parent):
                 self.mkdirs(dst_parent)
 
-            self.filesystem.move(str(src), str(dst))
+            src_str = self.to_filesystem_path(src)
+            dst_str = self.to_filesystem_path(dst)
+            self.filesystem.move(src_str, dst_str)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to rename {src} to {dst}: {e}")
@@ -282,7 +293,9 @@ class FileIO:
         if not overwrite and self.exists(target_path):
             raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
 
-        self.filesystem.copy_file(str(source_path), str(target_path))
+        source_str = self.to_filesystem_path(source_path)
+        target_str = self.to_filesystem_path(target_path)
+        self.filesystem.copy_file(source_str, target_str)
 
     def copy_files(self, source_directory: Path, target_directory: Path, overwrite: bool = False):
         file_infos = self.list_status(source_directory)
@@ -423,3 +436,34 @@ class FileIO:
         except Exception as e:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write blob file {path}: {e}") from e
+
+    def to_filesystem_path(self, path) -> str:
+        from pathlib import Path as PathType
+        from pyarrow.fs import S3FileSystem
+        
+        # Convert Path to string if needed
+        if isinstance(path, PathType):
+            path_str = str(path)
+        elif isinstance(path, str):
+            path_str = path
+        else:
+            raise TypeError(f"Expected Path or str, got {type(path)}")
+        
+        parsed = urlparse(path_str)
+        if isinstance(self.filesystem, S3FileSystem):
+            if parsed.scheme:
+                if parsed.netloc:
+                    return parsed.netloc + parsed.path
+                else:
+                    return parsed.path.lstrip('/')
+            return path_str
+        
+        if parsed.scheme:
+            if parsed.scheme == 'file':
+                return parsed.path
+            elif parsed.netloc:
+                return parsed.path
+            else:
+                return parsed.path
+        
+        return path_str
