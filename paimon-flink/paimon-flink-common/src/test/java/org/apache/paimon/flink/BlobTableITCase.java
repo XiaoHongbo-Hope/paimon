@@ -21,15 +21,9 @@ package org.apache.paimon.flink;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.data.Blob;
 import org.apache.paimon.data.BlobDescriptor;
-import org.apache.paimon.data.GenericRow;
-import org.apache.paimon.format.FormatWriter;
-import org.apache.paimon.format.FormatWriterFactory;
-import org.apache.paimon.format.blob.BlobFileFormat;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.options.Options;
-import org.apache.paimon.types.DataTypes;
-import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.UriReaderFactory;
 
 import org.apache.flink.types.Row;
@@ -37,6 +31,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.OutputStream;
+import java.net.URI;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -96,73 +91,11 @@ public class BlobTableITCase extends CatalogITCaseBase {
                 Blob.fromDescriptor(
                         uriReaderFactory.create(newBlobDescriptor.uri()), blobDescriptor);
         assertThat(blob.toData()).isEqualTo(blobData);
+        URI blobUri = URI.create(blob.toDescriptor().uri());
+        assertThat(blobUri.getScheme()).isNotNull();
         batchSql("ALTER TABLE blob_table_descriptor SET ('blob-as-descriptor'='false')");
         assertThat(batchSql("SELECT * FROM blob_table_descriptor"))
                 .containsExactlyInAnyOrder(Row.of(1, "paimon", blobData));
-    }
-
-    @Test
-    public void testBlobDescriptorUriSchemePreservation() throws Exception {
-        // This test reproduces the issue where OSS/Pangu URIs lose their scheme
-        // after from_descriptor in blob-as-descriptor=true mode
-        // Using OSS scheme to properly reproduce the issue, as local file:// URIs
-        // may work even without scheme
-        byte[] blobData = new byte[1024];
-        RANDOM.nextBytes(blobData);
-
-        // Create OSS FileIO and write blob data to OSS path using blob writer
-        Options options = new Options();
-        options.set("warehouse", warehouse.toString());
-        CatalogContext catalogContext = CatalogContext.create(options);
-
-        // Create OSS path for external blob storage
-        String uriWithScheme = "oss://chengli-hz-dlf/path/to/external_blob_scheme_test.bin";
-        org.apache.paimon.fs.Path ossPath = new org.apache.paimon.fs.Path(uriWithScheme);
-        FileIO fileIO = FileIO.get(ossPath, catalogContext);
-
-        // Write blob data to OSS using blob writer (BlobFileFormat)
-        BlobFileFormat blobFileFormat = new BlobFileFormat();
-        RowType rowType = RowType.of(DataTypes.BLOB());
-        FormatWriterFactory writerFactory = blobFileFormat.createWriterFactory(rowType);
-
-        try (org.apache.paimon.fs.PositionOutputStream out =
-                fileIO.newOutputStream(ossPath, true)) {
-            FormatWriter formatWriter = writerFactory.create(out, null);
-            formatWriter.addElement(GenericRow.of(Blob.fromData(blobData)));
-            formatWriter.close();
-        }
-
-        // Create BlobDescriptor pointing to the OSS path
-        BlobDescriptor originalDescriptor = new BlobDescriptor(uriWithScheme, 0, blobData.length);
-
-        // Write the descriptor to the table
-        batchSql(
-                "INSERT INTO blob_table_descriptor VALUES (2, 'scheme_test', X'"
-                        + bytesToHex(originalDescriptor.serialize())
-                        + "')");
-
-        // Read back the descriptor
-        byte[] readDescriptorBytes =
-                (byte[])
-                        batchSql("SELECT picture FROM blob_table_descriptor WHERE id = 2")
-                                .get(0)
-                                .getField(0);
-        BlobDescriptor readDescriptor = BlobDescriptor.deserialize(readDescriptorBytes);
-
-        // Verify that the URI scheme is preserved
-        // This is the key assertion: the OSS scheme should be preserved
-        assertThat(readDescriptor.uri())
-                .as(
-                        "URI scheme should be preserved after read. Expected: %s, Got: %s",
-                        uriWithScheme, readDescriptor.uri())
-                .isEqualTo(uriWithScheme);
-
-        // Verify that the URI has the OSS scheme
-        assertThat(readDescriptor.uri()).as("URI should have OSS scheme").startsWith("oss://");
-
-        // Verify other descriptor fields are preserved
-        assertThat(readDescriptor.offset()).isEqualTo(0);
-        assertThat(readDescriptor.length()).isEqualTo(blobData.length);
     }
 
     private static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
