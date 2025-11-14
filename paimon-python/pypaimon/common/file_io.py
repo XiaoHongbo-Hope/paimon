@@ -22,12 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import splitport, urlparse
 
-try:
-    from urlpath import URL
-    URLPATH_AVAILABLE = True
-except ImportError:
-    URLPATH_AVAILABLE = False
-    URL = None
+from urlpath import URL
 
 import pyarrow
 from packaging.version import parse
@@ -164,7 +159,7 @@ class FileIO:
     def new_output_stream(self, path: Union[Path, 'URL', str]):
         path_str = self.to_filesystem_path(path)
         # Get parent directory
-        if URLPATH_AVAILABLE and isinstance(path, URL):
+        if isinstance(path, URL):
             parent_dir = path.parent
         elif isinstance(path, Path):
             parent_dir = path.parent
@@ -229,7 +224,7 @@ class FileIO:
     def rename(self, src: Union[Path, 'URL', str], dst: Union[Path, 'URL', str]) -> bool:
         try:
             # Get parent directory
-            if URLPATH_AVAILABLE and isinstance(dst, URL):
+            if isinstance(dst, URL):
                 dst_parent = dst.parent
             elif isinstance(dst, Path):
                 dst_parent = dst.parent
@@ -295,7 +290,7 @@ class FileIO:
 
     def try_to_write_atomic(self, path: Union[Path, 'URL', str], content: str) -> bool:
         # Create temp path
-        if URLPATH_AVAILABLE and isinstance(path, URL):
+        if isinstance(path, URL):
             temp_path = URL(str(path) + ".tmp")
         elif isinstance(path, Path):
             temp_path = path.with_suffix(path.suffix + ".tmp") if path.suffix else Path(str(path) + ".tmp")
@@ -333,7 +328,7 @@ class FileIO:
                 # file_info.path is already a string from filesystem
                 source_file = file_info.path
                 # Build target path
-                if URLPATH_AVAILABLE and isinstance(target_directory, URL):
+                if isinstance(target_directory, URL):
                     target_file = target_directory / Path(source_file).name
                 elif isinstance(target_directory, Path):
                     target_file = target_directory / Path(source_file).name
@@ -482,7 +477,7 @@ class FileIO:
         from pyarrow.fs import S3FileSystem
 
         # Handle urlpath.URL
-        if URLPATH_AVAILABLE and isinstance(path, URL):
+        if isinstance(path, URL):
             parsed = urlparse(str(path))
             if isinstance(self.filesystem, S3FileSystem):
                 if parsed.scheme:

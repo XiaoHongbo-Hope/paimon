@@ -19,12 +19,7 @@
 from pathlib import Path
 from typing import Optional, Union
 
-try:
-    from urlpath import URL
-    URLPATH_AVAILABLE = True
-except ImportError:
-    URLPATH_AVAILABLE = False
-    URL = None
+from urlpath import URL
 
 from pypaimon.catalog.catalog_environment import CatalogEnvironment
 from pypaimon.common.core_options import CoreOptions
