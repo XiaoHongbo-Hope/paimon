@@ -17,6 +17,7 @@
 ################################################################################
 
 from enum import Enum
+from typing import List, Optional
 
 from pypaimon.common.memory_size import MemorySize
 
@@ -58,6 +59,10 @@ class CoreOptions(str, Enum):
     COMMIT_USER_PREFIX = "commit.user-prefix"
     ROW_TRACKING_ENABLED = "row-tracking.enabled"
     DATA_EVOLUTION_ENABLED = "data-evolution.enabled"
+    # External paths options
+    DATA_FILE_EXTERNAL_PATHS = "data-file.external-paths"
+    DATA_FILE_EXTERNAL_PATHS_STRATEGY = "data-file.external-paths.strategy"
+    DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS = "data-file.external-paths.specific-fs"
 
     @staticmethod
     def get_blob_as_descriptor(options: dict) -> bool:
@@ -94,3 +99,21 @@ class CoreOptions(str, Enum):
             size_str = options[CoreOptions.BLOB_TARGET_FILE_SIZE]
             return MemorySize.parse(size_str).get_bytes()
         return CoreOptions.get_target_file_size(options, has_primary_key=False)
+
+    @staticmethod
+    def get_external_paths(options: dict) -> Optional[List[str]]:
+        """Get external paths from options, returns None if not configured."""
+        external_paths_str = options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS)
+        if not external_paths_str:
+            return None
+        return [path.strip() for path in external_paths_str.split(",") if path.strip()]
+
+    @staticmethod
+    def get_external_path_strategy(options: dict) -> str:
+        """Get external path strategy from options, default to 'none'."""
+        return options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY, "none").lower()
+
+    @staticmethod
+    def get_external_path_specific_fs(options: dict) -> Optional[str]:
+        """Get specific filesystem for external paths, returns None if not configured."""
+        return options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS)

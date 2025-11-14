@@ -17,7 +17,9 @@
 ################################################################################
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+
+from urlpath import URL
 
 from pypaimon.catalog.catalog_environment import CatalogEnvironment
 from pypaimon.common.core_options import CoreOptions
@@ -130,3 +132,33 @@ class FileStoreTable(Table):
     def add_options(self, options: dict):
         for key, value in options.items():
             self.options[key] = value
+
+    def _create_external_paths(self) -> List[URL]:
+        """
+        Create list of external paths based on table options.
+        This method corresponds to AbstractFileStore.createExternalPaths() in Java.
+
+        Returns:
+            List of URL objects for external paths, or empty list if not configured
+        """
+        from pypaimon.common.external_path_provider import (
+            ExternalPathStrategy,
+            create_external_paths,
+        )
+
+        external_paths_str = CoreOptions.get_external_paths(self.options)
+        if not external_paths_str:
+            return []
+
+        # Convert List[str] to comma-separated string for create_external_paths
+        external_paths_str_joined = ",".join(external_paths_str)
+
+        strategy = CoreOptions.get_external_path_strategy(self.options)
+        if strategy == ExternalPathStrategy.NONE:
+            return []
+
+        specific_fs = CoreOptions.get_external_path_specific_fs(self.options)
+
+        # Create external paths list using the existing function
+        external_paths = create_external_paths(external_paths_str_joined, strategy, specific_fs)
+        return external_paths if external_paths else []

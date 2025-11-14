@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from pypaimon.common.core_options import CoreOptions
+from pypaimon.common.external_path_provider import create_external_path_provider, ExternalPathProvider
 from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.simple_stats import SimpleStats
 from pypaimon.schema.data_types import PyarrowFieldParser
@@ -59,6 +60,18 @@ class DataWriter(ABC):
         self.committed_files: List[DataFileMeta] = []
         self.write_cols = write_cols
         self.blob_as_descriptor = CoreOptions.get_blob_as_descriptor(options)
+
+        # Create external path provider if configured
+        # Get external paths from table (corresponds to AbstractFileStore.createExternalPaths() in Java)
+        external_paths = self.table._create_external_paths()
+        self.external_path_provider: Optional[ExternalPathProvider] = create_external_path_provider(
+            external_paths,
+            self.partition,
+            self.bucket,
+            self.table.partition_keys
+        )
+        # Store the last generated external URL to preserve scheme in metadata
+        self._last_external_url: Optional['URL'] = None
 
     def write(self, data: pa.RecordBatch):
         try:
@@ -146,6 +159,16 @@ class DataWriter(ABC):
             return
         file_name = f"data-{uuid.uuid4()}-0.{self.file_format}"
         file_path = self._generate_file_path(file_name)
+
+        # Determine if this is an external path
+        # For external paths, preserve the original URL string (with scheme) for metadata
+        is_external_path = self.external_path_provider is not None
+        if is_external_path:
+            # Use the stored URL from _generate_file_path to preserve scheme
+            external_path_str = str(self._last_external_url) if self._last_external_url else None
+        else:
+            external_path_str = None
+
         if self.file_format == CoreOptions.FILE_FORMAT_PARQUET:
             self.file_io.write_parquet(file_path, data, compression=self.compression)
         elif self.file_format == CoreOptions.FILE_FORMAT_ORC:
@@ -212,7 +235,7 @@ class DataWriter(ABC):
             delete_row_count=0,
             file_source=0,
             value_stats_cols=None,  # None means all columns in the data have statistics
-            external_path=None,
+            external_path=external_path_str,  # Set external path if using external paths
             first_row_id=None,
             write_cols=self.write_cols,
             # None means all columns in the table have been written
@@ -220,6 +243,17 @@ class DataWriter(ABC):
         ))
 
     def _generate_file_path(self, file_name: str) -> Path:
+        # If external path provider is configured, use it
+        if self.external_path_provider:
+            from urlpath import URL
+            external_path_url = self.external_path_provider.get_next_external_data_path(file_name)
+            # Store the URL to preserve scheme in metadata
+            self._last_external_url = external_path_url
+            # Convert URL to Path for compatibility (URL preserves scheme in string representation)
+            # For FileIO operations, we'll use the URL string directly
+            return Path(str(external_path_url))
+
+        # Default: use table path
         path_builder = self.table.table_path
 
         for i, field_name in enumerate(self.table.partition_keys):

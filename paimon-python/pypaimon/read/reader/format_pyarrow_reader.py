@@ -33,7 +33,10 @@ class FormatPyArrowReader(RecordBatchReader):
 
     def __init__(self, file_io: FileIO, file_format: str, file_path: str, read_fields: List[str],
                  push_down_predicate: Any, batch_size: int = 4096):
-        self.dataset = ds.dataset(file_path, format=file_format, filesystem=file_io.filesystem)
+        # Normalize path for PyArrow filesystem (remove scheme for LocalFileSystem)
+        from pathlib import Path
+        normalized_path = file_io._normalize_path_for_filesystem(Path(file_path))
+        self.dataset = ds.dataset(normalized_path, format=file_format, filesystem=file_io.filesystem)
         self.reader = self.dataset.scanner(
             columns=read_fields,
             filter=push_down_predicate,

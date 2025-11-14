@@ -118,7 +118,11 @@ class BlobWriter(AppendOnlyDataWriter):
         file_name = self.current_file_path.name
         row_count = self.current_writer.row_count
 
-        self._add_file_metadata(file_name, self.current_file_path, row_count, file_size)
+        # Determine if this is an external path
+        is_external_path = self.external_path_provider is not None
+        external_path_str = str(self.current_file_path) if is_external_path else None
+
+        self._add_file_metadata(file_name, self.current_file_path, row_count, file_size, external_path_str)
 
         self.current_writer = None
         self.current_file_path = None
@@ -144,10 +148,13 @@ class BlobWriter(AppendOnlyDataWriter):
 
         file_size = self.file_io.get_file_size(file_path)
 
-        # Reuse _add_file_metadata for consistency (blob table is append-only, no primary keys)
-        self._add_file_metadata(file_name, file_path, data, file_size)
+        is_external_path = self.external_path_provider is not None
+        external_path_str = str(file_path) if is_external_path else None
 
-    def _add_file_metadata(self, file_name: str, file_path: Path, data_or_row_count, file_size: int):
+        # Reuse _add_file_metadata for consistency (blob table is append-only, no primary keys)
+        self._add_file_metadata(file_name, file_path, data, file_size, external_path_str)
+
+    def _add_file_metadata(self, file_name: str, file_path: Path, data_or_row_count, file_size: int, external_path: Optional[str] = None):
         """Add file metadata to committed_files."""
         from datetime import datetime
         from pypaimon.manifest.schema.data_file_meta import DataFileMeta
@@ -201,7 +208,7 @@ class BlobWriter(AppendOnlyDataWriter):
             delete_row_count=0,
             file_source=0,  # FileSource.APPEND = 0
             value_stats_cols=None,
-            external_path=None,
+            external_path=external_path,
             first_row_id=None,
             write_cols=self.write_cols,
             file_path=str(file_path),

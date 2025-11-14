@@ -150,22 +150,42 @@ class FileIO:
 
         return LocalFileSystem()
 
+    def _normalize_path_for_filesystem(self, path: Path) -> str:
+        """
+        Normalize path for PyArrow filesystem operations.
+        Removes scheme from file:// URIs for LocalFileSystem.
+        """
+        path_str = str(path)
+        parsed = urlparse(path_str)
+        
+        # For LocalFileSystem, remove file:// scheme
+        from pyarrow.fs import LocalFileSystem
+        if isinstance(self.filesystem, LocalFileSystem) and parsed.scheme == 'file':
+            return parsed.path
+        
+        # For other filesystems, return as-is (they handle their own path formats)
+        return path_str
+
     def new_input_stream(self, path: Path):
-        return self.filesystem.open_input_file(str(path))
+        normalized_path = self._normalize_path_for_filesystem(path)
+        return self.filesystem.open_input_file(normalized_path)
 
     def new_output_stream(self, path: Path):
-        parent_dir = path.parent
-        if str(parent_dir) and not self.exists(parent_dir):
-            self.mkdirs(parent_dir)
+        normalized_path = self._normalize_path_for_filesystem(path)
+        parent_dir = Path(normalized_path).parent
+        if str(parent_dir) and not self.exists(Path(normalized_path).parent):
+            self.mkdirs(Path(normalized_path).parent)
 
-        return self.filesystem.open_output_stream(str(path))
+        return self.filesystem.open_output_stream(normalized_path)
 
     def get_file_status(self, path: Path):
-        file_infos = self.filesystem.get_file_info([str(path)])
+        normalized_path = self._normalize_path_for_filesystem(path)
+        file_infos = self.filesystem.get_file_info([normalized_path])
         return file_infos[0]
 
     def list_status(self, path: Path):
-        selector = pyarrow.fs.FileSelector(str(path), recursive=False, allow_not_found=True)
+        normalized_path = self._normalize_path_for_filesystem(path)
+        selector = pyarrow.fs.FileSelector(normalized_path, recursive=False, allow_not_found=True)
         return self.filesystem.get_file_info(selector)
 
     def list_directories(self, path: Path):
@@ -174,21 +194,23 @@ class FileIO:
 
     def exists(self, path: Path) -> bool:
         try:
-            file_info = self.filesystem.get_file_info([str(path)])[0]
+            normalized_path = self._normalize_path_for_filesystem(path)
+            file_info = self.filesystem.get_file_info([normalized_path])[0]
             return file_info.type != pyarrow.fs.FileType.NotFound
         except Exception:
             return False
 
     def delete(self, path: Path, recursive: bool = False) -> bool:
         try:
-            file_info = self.filesystem.get_file_info([str(path)])[0]
+            normalized_path = self._normalize_path_for_filesystem(path)
+            file_info = self.filesystem.get_file_info([normalized_path])[0]
             if file_info.type == pyarrow.fs.FileType.Directory:
                 if recursive:
-                    self.filesystem.delete_dir_contents(str(path))
+                    self.filesystem.delete_dir_contents(normalized_path)
                 else:
-                    self.filesystem.delete_dir(str(path))
+                    self.filesystem.delete_dir(normalized_path)
             else:
-                self.filesystem.delete_file(str(path))
+                self.filesystem.delete_file(normalized_path)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to delete {path}: {e}")
@@ -196,7 +218,8 @@ class FileIO:
 
     def mkdirs(self, path: Path) -> bool:
         try:
-            self.filesystem.create_dir(str(path), recursive=True)
+            normalized_path = self._normalize_path_for_filesystem(path)
+            self.filesystem.create_dir(normalized_path, recursive=True)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to create directory {path}: {e}")
@@ -204,11 +227,13 @@ class FileIO:
 
     def rename(self, src: Path, dst: Path) -> bool:
         try:
-            dst_parent = dst.parent
-            if str(dst_parent) and not self.exists(dst_parent):
-                self.mkdirs(dst_parent)
+            normalized_src = self._normalize_path_for_filesystem(src)
+            normalized_dst = self._normalize_path_for_filesystem(dst)
+            dst_parent = Path(normalized_dst).parent
+            if str(dst_parent) and not self.exists(Path(normalized_dst).parent):
+                self.mkdirs(Path(normalized_dst).parent)
 
-            self.filesystem.move(str(src), str(dst))
+            self.filesystem.move(normalized_src, normalized_dst)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to rename {src} to {dst}: {e}")
@@ -282,7 +307,9 @@ class FileIO:
         if not overwrite and self.exists(target_path):
             raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
 
-        self.filesystem.copy_file(str(source_path), str(target_path))
+        normalized_source = self._normalize_path_for_filesystem(source_path)
+        normalized_target = self._normalize_path_for_filesystem(target_path)
+        self.filesystem.copy_file(normalized_source, normalized_target)
 
     def copy_files(self, source_directory: Path, target_directory: Path, overwrite: bool = False):
         file_infos = self.list_status(source_directory)
