@@ -24,12 +24,10 @@ from pathlib import Path
 import pyarrow as pa
 
 from pypaimon import CatalogFactory, Schema
-from pypaimon.common.core_options import CoreOptions
+from pypaimon.common.core_options import CoreOptions, ExternalPathStrategy
 from pypaimon.common.external_path_provider import (
     ExternalPathProvider,
-    ExternalPathStrategy,
     create_external_path_provider,
-    create_external_paths,
 )
 from urlpath import URL
 
@@ -113,14 +111,41 @@ class ExternalPathProviderTest(unittest.TestCase):
 
 
 class ExternalPathsConfigTest(unittest.TestCase):
-    """Test external paths configuration parsing."""
+    """Test external paths configuration parsing through FileStoreTable._create_external_paths()."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up test environment."""
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.warehouse = os.path.join(cls.temp_dir, "warehouse")
+        cls.catalog = CatalogFactory.create({
+            "warehouse": cls.warehouse
+        })
+        cls.catalog.create_database("test_db", False)
+
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up test environment."""
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def _create_table_with_options(self, options: dict) -> 'FileStoreTable':
+        """Helper method to create a table with specific options."""
+        pa_schema = pa.schema([
+            ("id", pa.int32()),
+            ("name", pa.string()),
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, options=options)
+        self.catalog.create_table("test_db.config_test", schema, True)
+        return self.catalog.get_table("test_db.config_test")
 
     def test_create_external_paths_round_robin(self):
         """Test creating external paths with round-robin strategy."""
-        external_paths_str = "oss://bucket1/path1,oss://bucket2/path2,oss://bucket3/path3"
-        strategy = ExternalPathStrategy.ROUND_ROBIN
-
-        paths = create_external_paths(external_paths_str, strategy, None)
+        options = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1,oss://bucket2/path2,oss://bucket3/path3",
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
+        }
+        table = self._create_table_with_options(options)
+        paths = table._create_external_paths()
 
         self.assertEqual(len(paths), 3)
         self.assertEqual(str(paths[0]), "oss://bucket1/path1")
@@ -129,11 +154,13 @@ class ExternalPathsConfigTest(unittest.TestCase):
 
     def test_create_external_paths_specific_fs(self):
         """Test creating external paths with specific-fs strategy."""
-        external_paths_str = "oss://bucket1/path1,s3://bucket2/path2,oss://bucket3/path3"
-        strategy = ExternalPathStrategy.SPECIFIC_FS
-        specific_fs = "oss"
-
-        paths = create_external_paths(external_paths_str, strategy, specific_fs)
+        options = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1,s3://bucket2/path2,oss://bucket3/path3",
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.SPECIFIC_FS,
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS: "oss",
+        }
+        table = self._create_table_with_options(options)
+        paths = table._create_external_paths()
 
         # Should only include OSS paths
         self.assertEqual(len(paths), 2)
@@ -143,46 +170,77 @@ class ExternalPathsConfigTest(unittest.TestCase):
 
     def test_create_external_paths_none_strategy(self):
         """Test creating external paths with none strategy."""
-        external_paths_str = "oss://bucket1/path1"
-        strategy = ExternalPathStrategy.NONE
+        options = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1",
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.NONE,
+        }
+        table = self._create_table_with_options(options)
+        paths = table._create_external_paths()
 
-        paths = create_external_paths(external_paths_str, strategy, None)
-
-        self.assertIsNone(paths)
+        self.assertEqual(len(paths), 0)
 
     def test_create_external_paths_empty_string(self):
         """Test creating external paths with empty string."""
-        paths = create_external_paths("", ExternalPathStrategy.ROUND_ROBIN, None)
-        self.assertIsNone(paths)
+        options = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "",
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
+        }
+        table = self._create_table_with_options(options)
+        paths = table._create_external_paths()
+        self.assertEqual(len(paths), 0)
 
-        paths = create_external_paths(None, ExternalPathStrategy.ROUND_ROBIN, None)
-        self.assertIsNone(paths)
+        # Test with no external paths option
+        options2 = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
+        }
+        table2 = self._create_table_with_options(options2)
+        paths2 = table2._create_external_paths()
+        self.assertEqual(len(paths2), 0)
 
     def test_create_external_paths_invalid_scheme(self):
         """Test creating external paths with invalid scheme."""
-        external_paths_str = "/invalid/path"  # No scheme
+        options = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "/invalid/path",  # No scheme
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
+        }
+        table = self._create_table_with_options(options)
 
         with self.assertRaises(ValueError) as context:
-            create_external_paths(external_paths_str, ExternalPathStrategy.ROUND_ROBIN, None)
+            table._create_external_paths()
 
         self.assertIn("scheme", str(context.exception))
 
     def test_create_external_path_provider(self):
         """Test creating ExternalPathProvider from external paths list."""
-        external_paths_str = "oss://bucket1/path1,oss://bucket2/path2"
-        strategy = ExternalPathStrategy.ROUND_ROBIN
+        # Create a table with external paths
+        options = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1,oss://bucket2/path2",
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
+        }
+        temp_dir = tempfile.mkdtemp()
+        warehouse = os.path.join(temp_dir, "warehouse")
+        catalog = CatalogFactory.create({"warehouse": warehouse})
+        catalog.create_database("test_db", False)
+        pa_schema = pa.schema([("id", pa.int32()), ("name", pa.string())])
+        schema = Schema.from_pyarrow_schema(pa_schema, options=options)
+        catalog.create_table("test_db.provider_test", schema, False)
+        table = catalog.get_table("test_db.provider_test")
+
+        # Get external paths from table
+        external_paths = table._create_external_paths()
+        self.assertIsNotNone(external_paths)
+        self.assertEqual(len(external_paths), 2)
+
+        # Create provider from external paths
         partition = ("value1",)
         bucket = 0
         partition_keys = ["dt"]
-
-        # Create external paths list first
-        external_paths = create_external_paths(external_paths_str, strategy, None)
-        self.assertIsNotNone(external_paths)
-
-        # Create provider from external paths
         provider = create_external_path_provider(
             external_paths, partition, bucket, partition_keys
         )
+
+        # Clean up
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
         self.assertIsNotNone(provider)
         path = provider.get_next_external_data_path("file.parquet")

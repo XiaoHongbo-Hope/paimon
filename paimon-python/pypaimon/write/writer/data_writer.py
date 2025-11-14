@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from pypaimon.common.core_options import CoreOptions
-from pypaimon.common.external_path_provider import create_external_path_provider, ExternalPathProvider
+from pypaimon.common.external_path_provider import ExternalPathProvider
 from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.simple_stats import SimpleStats
 from pypaimon.schema.data_types import PyarrowFieldParser
@@ -61,14 +61,11 @@ class DataWriter(ABC):
         self.write_cols = write_cols
         self.blob_as_descriptor = CoreOptions.get_blob_as_descriptor(options)
 
+        # Get path factory from table (corresponds to AbstractFileStore.pathFactory() in Java)
+        self.path_factory = self.table.path_factory()
         # Create external path provider if configured
-        # Get external paths from table (corresponds to AbstractFileStore.createExternalPaths() in Java)
-        external_paths = self.table._create_external_paths()
-        self.external_path_provider: Optional[ExternalPathProvider] = create_external_path_provider(
-            external_paths,
-            self.partition,
-            self.bucket,
-            self.table.partition_keys
+        self.external_path_provider: Optional[ExternalPathProvider] = self.path_factory.create_external_path_provider(
+            self.partition, self.bucket
         )
         # Store the last generated external URL to preserve scheme in metadata
         self._last_external_url: Optional['URL'] = None
@@ -243,6 +240,10 @@ class DataWriter(ABC):
         ))
 
     def _generate_file_path(self, file_name: str) -> Path:
+        """
+        Generate file path for a data file.
+        Uses external path provider if configured, otherwise uses table path.
+        """
         # If external path provider is configured, use it
         if self.external_path_provider:
             from urlpath import URL
@@ -253,18 +254,9 @@ class DataWriter(ABC):
             # For FileIO operations, we'll use the URL string directly
             return Path(str(external_path_url))
 
-        # Default: use table path
-        path_builder = self.table.table_path
-
-        for i, field_name in enumerate(self.table.partition_keys):
-            path_builder = path_builder / (field_name + "=" + str(self.partition[i]))
-        if self.bucket == BucketMode.POSTPONE_BUCKET.value:
-            bucket_name = "postpone"
-        else:
-            bucket_name = str(self.bucket)
-        path_builder = path_builder / ("bucket-" + bucket_name) / file_name
-
-        return path_builder
+        # Default: use path factory to generate bucket path
+        bucket_path = self.path_factory.bucket_path(self.partition, self.bucket)
+        return Path(str(bucket_path / file_name))
 
     @staticmethod
     def _find_optimal_split_point(data: pa.RecordBatch, target_size: int) -> int:

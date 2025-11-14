@@ -117,3 +117,13 @@ class CoreOptions(str, Enum):
     def get_external_path_specific_fs(options: dict) -> Optional[str]:
         """Get specific filesystem for external paths, returns None if not configured."""
         return options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS)
+
+
+class ExternalPathStrategy(str, Enum):
+    """
+    Strategy for selecting external paths.
+    This enum corresponds to CoreOptions.ExternalPathStrategy in Java.
+    """
+    NONE = "none"
+    ROUND_ROBIN = "round-robin"
+    SPECIFIC_FS = "specific-fs"

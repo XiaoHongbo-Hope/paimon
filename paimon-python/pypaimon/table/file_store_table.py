@@ -73,6 +73,51 @@ class FileStoreTable(Table):
         from pypaimon.snapshot.snapshot_manager import SnapshotManager
         return SnapshotManager(self)
 
+    def path_factory(self) -> 'FileStorePathFactory':
+        """
+        Get the path factory for this table.
+        This method corresponds to AbstractFileStore.pathFactory() in Java.
+
+        Returns:
+            FileStorePathFactory instance
+        """
+        from pypaimon.utils.file_store_path_factory import FileStorePathFactory
+        from urlpath import URL
+
+        # Get external paths
+        external_paths = self._create_external_paths()
+
+        # Get format identifier
+        file_format = self.options.get(CoreOptions.FILE_FORMAT, CoreOptions.FILE_FORMAT_PARQUET)
+        format_identifier = file_format
+
+        # Get file prefixes (defaults from Java CoreOptions)
+        data_file_prefix = self.options.get("data-file.prefix", "data")
+        changelog_file_prefix = self.options.get("changelog-file.prefix", "changelog")
+
+        # Get compression settings (defaults from Java CoreOptions)
+        file_suffix_include_compression = self.options.get("file.suffix-include-compression", False)
+        file_compression = self.options.get(CoreOptions.FILE_COMPRESSION, "zstd")
+
+        # Get data file path directory
+        data_file_path_directory = self.options.get("data-file.path.directory")
+
+        # Get index file in data file dir setting
+        index_file_in_data_file_dir = self.options.get("index.file-in-data-file-dir", False)
+
+        return FileStorePathFactory(
+            root=URL(str(self.table_path)),
+            partition_keys=self.partition_keys,
+            format_identifier=format_identifier,
+            data_file_prefix=data_file_prefix,
+            changelog_file_prefix=changelog_file_prefix,
+            file_suffix_include_compression=file_suffix_include_compression,
+            file_compression=file_compression,
+            data_file_path_directory=data_file_path_directory,
+            external_paths=external_paths,
+            index_file_in_data_file_dir=index_file_in_data_file_dir,
+        )
+
     def new_snapshot_commit(self):
         """Create a new SnapshotCommit instance using the catalog environment."""
         return self.catalog_environment.snapshot_commit(self.snapshot_manager())
@@ -141,17 +186,13 @@ class FileStoreTable(Table):
         Returns:
             List of URL objects for external paths, or empty list if not configured
         """
-        from pypaimon.common.external_path_provider import (
-            ExternalPathStrategy,
-            create_external_paths,
-        )
+        from urllib.parse import urlparse
+        from urlpath import URL
+        from pypaimon.common.core_options import ExternalPathStrategy
 
         external_paths_str = CoreOptions.get_external_paths(self.options)
         if not external_paths_str:
             return []
-
-        # Convert List[str] to comma-separated string for create_external_paths
-        external_paths_str_joined = ",".join(external_paths_str)
 
         strategy = CoreOptions.get_external_path_strategy(self.options)
         if strategy == ExternalPathStrategy.NONE:
@@ -159,6 +200,39 @@ class FileStoreTable(Table):
 
         specific_fs = CoreOptions.get_external_path_specific_fs(self.options)
 
-        # Create external paths list using the existing function
-        external_paths = create_external_paths(external_paths_str_joined, strategy, specific_fs)
-        return external_paths if external_paths else []
+        # Join paths back to comma-separated string for processing
+        external_paths_str_joined = ",".join(external_paths_str)
+
+        if not external_paths_str_joined or not external_paths_str_joined.strip():
+            return []
+
+        paths = []
+        for path_string in external_paths_str_joined.split(","):
+            path_string = path_string.strip()
+            if not path_string:
+                continue
+
+            # Parse and validate path
+            parsed = urlparse(path_string)
+            scheme = parsed.scheme
+            if not scheme:
+                raise ValueError(
+                    f"External path must have a scheme (e.g., oss://, s3://, file://): {path_string}"
+                )
+
+            # Filter by specific filesystem if strategy is specific-fs
+            if strategy == ExternalPathStrategy.SPECIFIC_FS:
+                if not specific_fs:
+                    raise ValueError(
+                        f"data-file.external-paths.specific-fs must be set when "
+                        f"strategy is {ExternalPathStrategy.SPECIFIC_FS}"
+                    )
+                if scheme.lower() != specific_fs.lower():
+                    continue  # Skip paths that don't match the specific filesystem
+
+            paths.append(URL(path_string))
+
+        if not paths:
+            raise ValueError("No valid external paths found after filtering")
+
+        return paths

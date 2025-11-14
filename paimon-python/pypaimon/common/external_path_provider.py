@@ -21,21 +21,8 @@ from urllib.parse import urlparse
 
 from urlpath import URL
 
-
-class ExternalPathStrategy:
-    """Strategy for selecting external paths."""
-    NONE = "none"
-    ROUND_ROBIN = "round-robin"
-    SPECIFIC_FS = "specific-fs"
-
-
 class ExternalPathProvider:
     def __init__(self, external_table_paths: List[URL], relative_bucket_path: URL):
-        """
-        Args:
-            external_table_paths: List of external table paths (base paths with scheme)
-            relative_bucket_path: Relative path from table root to bucket directory
-        """
         self.external_table_paths = external_table_paths
         self.relative_bucket_path = relative_bucket_path
         # Start from a random position for load balancing
@@ -59,55 +46,6 @@ class ExternalPathProvider:
             full_path = external_base / file_name
 
         return full_path
-
-
-def create_external_paths(
-    external_paths_str: Optional[str],
-    strategy: str,
-    specific_fs: Optional[str]
-) -> Optional[List[URL]]:
-    """
-    Create list of external paths based on configuration.
-
-    Args:
-        external_paths_str: Comma-separated external paths string
-        strategy: Strategy for selecting paths (none, round-robin, specific-fs)
-        specific_fs: Specific filesystem scheme when strategy is specific-fs
-
-    Returns:
-        List of URL objects for external paths, or None if not configured
-    """
-    if not external_paths_str or not external_paths_str.strip() or strategy == ExternalPathStrategy.NONE:
-        return None
-
-    paths = []
-    for path_string in external_paths_str.split(","):
-        path_string = path_string.strip()
-        if not path_string:
-            continue
-
-        # Parse and validate path
-        parsed = urlparse(path_string)
-        scheme = parsed.scheme
-        if not scheme:
-            raise ValueError(f"External path must have a scheme (e.g., oss://, s3://, file://): {path_string}")
-
-        # Filter by specific filesystem if strategy is specific-fs
-        if strategy == ExternalPathStrategy.SPECIFIC_FS:
-            if not specific_fs:
-                raise ValueError(
-                    f"data-file.external-paths.specific-fs must be set when "
-                    f"strategy is {ExternalPathStrategy.SPECIFIC_FS}"
-                )
-            if scheme.lower() != specific_fs.lower():
-                continue  # Skip paths that don't match the specific filesystem
-
-        paths.append(URL(path_string))
-
-    if not paths:
-        raise ValueError("No valid external paths found after filtering")
-
-    return paths
 
 
 def create_external_path_provider(
