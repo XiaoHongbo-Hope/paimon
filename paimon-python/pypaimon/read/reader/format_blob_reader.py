@@ -25,6 +25,7 @@ from pyarrow import RecordBatch
 
 from pypaimon.common.delta_varint_compressor import DeltaVarintCompressor
 from pypaimon.common.file_io import FileIO
+from urlpath import URL
 from pypaimon.read.reader.iface.record_batch_reader import RecordBatchReader
 from pypaimon.schema.data_types import DataField, PyarrowFieldParser, AtomicType
 from pypaimon.table.row.blob import Blob
@@ -41,9 +42,9 @@ class FormatBlobReader(RecordBatchReader):
         self._push_down_predicate = push_down_predicate
         self._blob_as_descriptor = blob_as_descriptor
 
-        # Get file size - file_path is already a string (may contain scheme)
-        # FileIO.get_file_size can handle str, Path, or URL
-        self._file_size = file_io.get_file_size(file_path)
+        # Get file size - convert string to URL for FileIO
+        file_path_url = URL(file_path) if isinstance(file_path, str) else file_path
+        self._file_size = file_io.get_file_size(file_path_url)
 
         # Initialize the low-level blob format reader
         self.file_path = file_path
@@ -125,9 +126,9 @@ class FormatBlobReader(RecordBatchReader):
         self._blob_iterator = None
 
     def _read_index(self) -> None:
-        # file_path is already a string (may contain scheme like "oss://bucket/path")
-        # FileIO.new_input_stream can handle str, Path, or URL
-        with self._file_io.new_input_stream(self.file_path) as f:
+        # Convert string to URL for FileIO
+        file_path_url = URL(self.file_path) if isinstance(self.file_path, str) else self.file_path
+        with self._file_io.new_input_stream(file_path_url) as f:
             # Seek to header: last 5 bytes
             f.seek(self._file_size - 5)
             header = f.read(5)

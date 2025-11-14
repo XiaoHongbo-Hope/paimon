@@ -55,33 +55,11 @@ class DataFileMeta:
     # not a schema field, just for internal usage
     file_path: str = None
 
-    def set_file_path(self, table_path: Union[Path, 'URL', str], partition: GenericRow, bucket: int, file_io=None):
+    def set_file_path(self, table_path: URL, partition: GenericRow, bucket: int, file_io=None):
         """
         Set file path, preserving URI scheme using URL.
         """
-        # Convert to URL
-        if isinstance(table_path, URL):
-            path_builder = table_path
-        elif isinstance(table_path, str):
-            # Create URL from string (preserves scheme if present)
-            path_builder = URL(table_path)
-        else:
-            # Path object - try to reconstruct with scheme from warehouse if available
-            path_str = str(table_path)
-            if file_io and hasattr(file_io, 'properties'):
-                warehouse = file_io.properties.get('warehouse', '')
-                if warehouse and '://' in warehouse:
-                    from urllib.parse import urlparse
-                    parsed = urlparse(warehouse)
-                    if parsed.scheme:
-                        # Reconstruct with scheme from warehouse
-                        path_builder = URL(f"{parsed.scheme}://{path_str}")
-                    else:
-                        path_builder = URL(path_str)
-                else:
-                    path_builder = URL(path_str)
-            else:
-                path_builder = URL(path_str)
+        path_builder = table_path
         
         # Build full path with partition and bucket
         partition_dict = partition.to_dict()

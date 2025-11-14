@@ -18,8 +18,7 @@
 import logging
 import os
 import subprocess
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from urllib.parse import splitport, urlparse
 
 from urlpath import URL
@@ -152,42 +151,35 @@ class FileIO:
 
         return LocalFileSystem()
 
-    def new_input_stream(self, path: Union[Path, 'URL', str]):
+    def new_input_stream(self, path: URL):
         path_str = self.to_filesystem_path(path)
         return self.filesystem.open_input_file(path_str)
 
-    def new_output_stream(self, path: Union[Path, 'URL', str]):
+    def new_output_stream(self, path: URL):
         path_str = self.to_filesystem_path(path)
         # Get parent directory
-        if isinstance(path, URL):
-            parent_dir = path.parent
-        elif isinstance(path, Path):
-            parent_dir = path.parent
-        else:
-            # For string, try to get parent
-            from pathlib import Path as PathType
-            parent_dir = PathType(path).parent
+        parent_dir = path.parent
         
         if str(parent_dir) and not self.exists(parent_dir):
             self.mkdirs(parent_dir)
 
         return self.filesystem.open_output_stream(path_str)
 
-    def get_file_status(self, path: Union[Path, 'URL', str]):
+    def get_file_status(self, path: URL):
         path_str = self.to_filesystem_path(path)
         file_infos = self.filesystem.get_file_info([path_str])
         return file_infos[0]
 
-    def list_status(self, path: Union[Path, 'URL', str]):
+    def list_status(self, path: URL):
         path_str = self.to_filesystem_path(path)
         selector = pyarrow.fs.FileSelector(path_str, recursive=False, allow_not_found=True)
         return self.filesystem.get_file_info(selector)
 
-    def list_directories(self, path: Union[Path, 'URL', str]):
+    def list_directories(self, path: URL):
         file_infos = self.list_status(path)
         return [info for info in file_infos if info.type == pyarrow.fs.FileType.Directory]
 
-    def exists(self, path: Union[Path, 'URL', str]) -> bool:
+    def exists(self, path: URL) -> bool:
         try:
             path_str = self.to_filesystem_path(path)
             file_info = self.filesystem.get_file_info([path_str])[0]
@@ -196,7 +188,7 @@ class FileIO:
         except Exception:
             return False
 
-    def delete(self, path: Union[Path, 'URL', str], recursive: bool = False) -> bool:
+    def delete(self, path: URL, recursive: bool = False) -> bool:
         try:
             path_str = self.to_filesystem_path(path)
             file_info = self.filesystem.get_file_info([path_str])[0]
@@ -212,7 +204,7 @@ class FileIO:
             self.logger.warning(f"Failed to delete {path}: {e}")
             return False
 
-    def mkdirs(self, path: Union[Path, 'URL', str]) -> bool:
+    def mkdirs(self, path: URL) -> bool:
         try:
             path_str = self.to_filesystem_path(path)
             self.filesystem.create_dir(path_str, recursive=True)
@@ -221,16 +213,10 @@ class FileIO:
             self.logger.warning(f"Failed to create directory {path}: {e}")
             return False
 
-    def rename(self, src: Union[Path, 'URL', str], dst: Union[Path, 'URL', str]) -> bool:
+    def rename(self, src: URL, dst: URL) -> bool:
         try:
             # Get parent directory
-            if isinstance(dst, URL):
-                dst_parent = dst.parent
-            elif isinstance(dst, Path):
-                dst_parent = dst.parent
-            else:
-                from pathlib import Path as PathType
-                dst_parent = PathType(dst).parent
+            dst_parent = dst.parent
             
             if str(dst_parent) and not self.exists(dst_parent):
                 self.mkdirs(dst_parent)
@@ -243,7 +229,7 @@ class FileIO:
             self.logger.warning(f"Failed to rename {src} to {dst}: {e}")
             return False
 
-    def delete_quietly(self, path: Union[Path, 'URL', str]):
+    def delete_quietly(self, path: URL):
         if self.logger.isEnabledFor(logging.DEBUG):
             self.logger.debug(f"Ready to delete {path}")
 
@@ -253,11 +239,11 @@ class FileIO:
         except Exception:
             self.logger.warning(f"Exception occurs when deleting file {path}", exc_info=True)
 
-    def delete_files_quietly(self, files: List[Union[Path, 'URL', str]]):
+    def delete_files_quietly(self, files: List[URL]):
         for file_path in files:
             self.delete_quietly(file_path)
 
-    def delete_directory_quietly(self, directory: Union[Path, 'URL', str]):
+    def delete_directory_quietly(self, directory: URL):
         if self.logger.isEnabledFor(logging.DEBUG):
             self.logger.debug(f"Ready to delete {directory}")
 
@@ -267,35 +253,30 @@ class FileIO:
         except Exception:
             self.logger.warning(f"Exception occurs when deleting directory {directory}", exc_info=True)
 
-    def get_file_size(self, path: Union[Path, 'URL', str]) -> int:
+    def get_file_size(self, path: URL) -> int:
         file_info = self.get_file_status(path)
         if file_info.size is None:
             raise ValueError(f"File size not available for {path}")
         return file_info.size
 
-    def is_dir(self, path: Union[Path, 'URL', str]) -> bool:
+    def is_dir(self, path: URL) -> bool:
         file_info = self.get_file_status(path)
         return file_info.type == pyarrow.fs.FileType.Directory
 
-    def check_or_mkdirs(self, path: Union[Path, 'URL', str]):
+    def check_or_mkdirs(self, path: URL):
         if self.exists(path):
             if not self.is_dir(path):
                 raise ValueError(f"The path '{path}' should be a directory.")
         else:
             self.mkdirs(path)
 
-    def read_file_utf8(self, path: Union[Path, 'URL', str]) -> str:
+    def read_file_utf8(self, path: URL) -> str:
         with self.new_input_stream(path) as input_stream:
             return input_stream.read().decode('utf-8')
 
-    def try_to_write_atomic(self, path: Union[Path, 'URL', str], content: str) -> bool:
+    def try_to_write_atomic(self, path: URL, content: str) -> bool:
         # Create temp path
-        if isinstance(path, URL):
-            temp_path = URL(str(path) + ".tmp")
-        elif isinstance(path, Path):
-            temp_path = path.with_suffix(path.suffix + ".tmp") if path.suffix else Path(str(path) + ".tmp")
-        else:
-            temp_path = str(path) + ".tmp"
+        temp_path = URL(str(path) + ".tmp")
         success = False
         try:
             self.write_file(temp_path, content, False)
@@ -305,15 +286,15 @@ class FileIO:
                 self.delete_quietly(temp_path)
             return success
 
-    def write_file(self, path: Union[Path, 'URL', str], content: str, overwrite: bool = False):
+    def write_file(self, path: URL, content: str, overwrite: bool = False):
         with self.new_output_stream(path) as output_stream:
             output_stream.write(content.encode('utf-8'))
 
-    def overwrite_file_utf8(self, path: Union[Path, 'URL', str], content: str):
+    def overwrite_file_utf8(self, path: URL, content: str):
         with self.new_output_stream(path) as output_stream:
             output_stream.write(content.encode('utf-8'))
 
-    def copy_file(self, source_path: Union[Path, 'URL', str], target_path: Union[Path, 'URL', str], overwrite: bool = False):
+    def copy_file(self, source_path: URL, target_path: URL, overwrite: bool = False):
         if not overwrite and self.exists(target_path):
             raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
 
@@ -321,22 +302,18 @@ class FileIO:
         target_str = self.to_filesystem_path(target_path)
         self.filesystem.copy_file(source_str, target_str)
 
-    def copy_files(self, source_directory: Union[Path, 'URL', str], target_directory: Union[Path, 'URL', str], overwrite: bool = False):
+    def copy_files(self, source_directory: URL, target_directory: URL, overwrite: bool = False):
         file_infos = self.list_status(source_directory)
         for file_info in file_infos:
             if file_info.type == pyarrow.fs.FileType.File:
-                # file_info.path is already a string from filesystem
-                source_file = file_info.path
+                # file_info.path is already a string from filesystem (without scheme)
+                # Reconstruct source_file URL by joining with source_directory
+                source_file = source_directory / file_info.path.split('/')[-1]
                 # Build target path
-                if isinstance(target_directory, URL):
-                    target_file = target_directory / Path(source_file).name
-                elif isinstance(target_directory, Path):
-                    target_file = target_directory / Path(source_file).name
-                else:
-                    target_file = str(target_directory) + "/" + Path(source_file).name
+                target_file = target_directory / file_info.path.split('/')[-1]
                 self.copy_file(source_file, target_file, overwrite)
 
-    def read_overwritten_file_utf8(self, path: Union[Path, 'URL', str]) -> Optional[str]:
+    def read_overwritten_file_utf8(self, path: URL) -> Optional[str]:
         retry_number = 0
         exception = None
         while retry_number < 5:
@@ -363,7 +340,7 @@ class FileIO:
 
         return None
 
-    def write_parquet(self, path: Union[Path, 'URL', str], data: pyarrow.Table, compression: str = 'snappy', **kwargs):
+    def write_parquet(self, path: URL, data: pyarrow.Table, compression: str = 'snappy', **kwargs):
         try:
             import pyarrow.parquet as pq
 
@@ -374,7 +351,7 @@ class FileIO:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write Parquet file {path}: {e}") from e
 
-    def write_orc(self, path: Union[Path, 'URL', str], data: pyarrow.Table, compression: str = 'zstd', **kwargs):
+    def write_orc(self, path: URL, data: pyarrow.Table, compression: str = 'zstd', **kwargs):
         try:
             """Write ORC file using PyArrow ORC writer."""
             import sys
@@ -396,7 +373,7 @@ class FileIO:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write ORC file {path}: {e}") from e
 
-    def write_avro(self, path: Union[Path, 'URL', str], data: pyarrow.Table, avro_schema: Optional[Dict[str, Any]] = None, **kwargs):
+    def write_avro(self, path: URL, data: pyarrow.Table, avro_schema: Optional[Dict[str, Any]] = None, **kwargs):
         import fastavro
         if avro_schema is None:
             from pypaimon.schema.data_types import PyarrowFieldParser
@@ -414,7 +391,7 @@ class FileIO:
         with self.new_output_stream(path) as output_stream:
             fastavro.writer(output_stream, avro_schema, records, **kwargs)
 
-    def write_blob(self, path: Union[Path, 'URL', str], data: pyarrow.Table, blob_as_descriptor: bool, **kwargs):
+    def write_blob(self, path: URL, data: pyarrow.Table, blob_as_descriptor: bool, **kwargs):
         try:
             # Validate input constraints
             if data.num_columns != 1:
@@ -468,58 +445,39 @@ class FileIO:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write blob file {path}: {e}") from e
 
-    def to_filesystem_path(self, path: Union[Path, 'URL', str]) -> str:
+    def to_filesystem_path(self, path: URL) -> str:
         """
-        Convert a path to the format required by the underlying filesystem.
-        Supports pathlib.Path, urlpath.URL, and str types.
+        Convert a URL to the format required by the underlying filesystem.
+        Normalizes path by removing duplicate slashes.
         """
-        from pathlib import Path as PathType
         from pyarrow.fs import S3FileSystem
+        import re
 
-        # Handle urlpath.URL
-        if isinstance(path, URL):
-            parsed = urlparse(str(path))
-            if isinstance(self.filesystem, S3FileSystem):
-                if parsed.scheme:
-                    if parsed.netloc:
-                        return f"{parsed.netloc}{parsed.path}"
-                    else:
-                        return parsed.path.lstrip('/')
-                return str(path)
-            
-            if parsed.scheme:
-                if parsed.scheme == 'file':
-                    return parsed.path
-                elif parsed.netloc:
-                    return parsed.path
-                else:
-                    return parsed.path
-            
-            return str(path)
-
-        # Handle pathlib.Path
-        if isinstance(path, PathType):
-            path_str = str(path)
-        elif isinstance(path, str):
-            path_str = path
-        else:
-            raise TypeError(f"Expected Path, URL, or str, got {type(path)}")
-
-        parsed = urlparse(path_str)
+        parsed = urlparse(str(path))
         if isinstance(self.filesystem, S3FileSystem):
             if parsed.scheme:
                 if parsed.netloc:
-                    return parsed.netloc + parsed.path
+                    # Normalize path: remove duplicate slashes and leading slashes
+                    normalized_path = re.sub(r'/+', '/', parsed.path).lstrip('/')
+                    return f"{parsed.netloc}/{normalized_path}" if normalized_path else parsed.netloc
                 else:
-                    return parsed.path.lstrip('/')
-            return path_str
-
+                    # Normalize path: remove duplicate slashes
+                    normalized_path = re.sub(r'/+', '/', parsed.path).lstrip('/')
+                    return normalized_path
+            return str(path)
+        
         if parsed.scheme:
             if parsed.scheme == 'file':
-                return parsed.path
+                # Normalize path: remove duplicate slashes
+                normalized_path = re.sub(r'/+', '/', parsed.path)
+                return normalized_path
             elif parsed.netloc:
-                return parsed.path
+                # Normalize path: remove duplicate slashes
+                normalized_path = re.sub(r'/+', '/', parsed.path)
+                return normalized_path
             else:
-                return parsed.path
-
-        return path_str
+                # Normalize path: remove duplicate slashes
+                normalized_path = re.sub(r'/+', '/', parsed.path)
+                return normalized_path
+        
+        return str(path)

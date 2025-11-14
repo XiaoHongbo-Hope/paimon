@@ -40,14 +40,8 @@ class UriReader(ABC):
 
     @classmethod
     def get_file_path(cls, uri: str):
-        parsed_uri = urlparse(uri)
-        if parsed_uri.scheme == 'file':
-            path = Path(parsed_uri.path)
-        elif parsed_uri.scheme and parsed_uri.scheme != '':
-            path = Path(parsed_uri.netloc + parsed_uri.path)
-        else:
-            path = Path(uri)
-        return path
+        from urlpath import URL
+        return URL(uri)
 
     @abstractmethod
     def new_input_stream(self, uri: str):

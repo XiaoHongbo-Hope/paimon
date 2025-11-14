@@ -49,23 +49,12 @@ class FileSystemCatalog(Catalog):
         self.file_io = FileIO(self.warehouse, self.catalog_options)
 
     def get_database(self, name: str) -> Database:
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        db_path = self.get_database_path(name)
-        logger.debug(f"get_database: name={name}, db_path={db_path}, type={type(db_path)}")
-        
-        if self.file_io.exists(db_path):
-            logger.debug(f"get_database: database exists: {name}")
+        if self.file_io.exists(self.get_database_path(name)):
             return Database(name, {})
         else:
-            logger.debug(f"get_database: database not found: {name}, path={db_path}")
             raise DatabaseNotExistException(name)
 
     def create_database(self, name: str, ignore_if_exists: bool, properties: Optional[dict] = None):
-        import logging
-        logger = logging.getLogger(__name__)
-        
         try:
             self.get_database(name)
             if not ignore_if_exists:
@@ -74,13 +63,7 @@ class FileSystemCatalog(Catalog):
             if properties and Catalog.DB_LOCATION_PROP in properties:
                 raise ValueError("Cannot specify location for a database when using fileSystem catalog.")
             path = self.get_database_path(name)
-            logger.debug(f"create_database: name={name}, path={path}, type={type(path)}")
-            logger.debug(f"create_database: calling mkdirs with path={path}")
-            result = self.file_io.mkdirs(path)
-            logger.debug(f"create_database: mkdirs result={result}")
-            # Verify creation
-            exists_after = self.file_io.exists(path)
-            logger.debug(f"create_database: exists after mkdirs={exists_after}, path={path}")
+            self.file_io.mkdirs(path)
 
     def get_table(self, identifier: Union[str, Identifier]) -> Table:
         if not isinstance(identifier, Identifier):
@@ -128,17 +111,7 @@ class FileSystemCatalog(Catalog):
         return table_schema
 
     def get_database_path(self, name) -> URL:
-        """Get database path, returning URL to preserve scheme."""
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        # Use URL to preserve scheme
         warehouse_url = URL(self.warehouse)
-        logger.debug(f"get_database_path: warehouse={self.warehouse}, warehouse_url={warehouse_url}, "
-                    f"path={warehouse_url.path}, name={name}")
-        
-        # Handle trailing slash: if path is '/' or empty, remove it before joining
-        # This prevents double slashes like oss://bucket//db.db
         if warehouse_url.path == '/' or warehouse_url.path == '':
             # Reconstruct URL without trailing slash
             from urllib.parse import urlparse
@@ -150,17 +123,13 @@ class FileSystemCatalog(Catalog):
             else:
                 # No path, just scheme://netloc
                 warehouse_url = URL(f"{parsed.scheme}://{parsed.netloc}")
-            logger.debug(f"get_database_path: cleaned warehouse_url={warehouse_url}, path={warehouse_url.path}")
-        
+
         # Join database name (URL handles path joining correctly)
         db_path = warehouse_url / f"{name}{Catalog.DB_SUFFIX}"
-        logger.debug(f"get_database_path: db_path={db_path}, str(db_path)={str(db_path)}")
         return db_path
 
-    def get_table_path(self, identifier: Identifier) -> URL:
-        """Get table path, returning URL to preserve scheme."""
-        db_path = self.get_database_path(identifier.get_database_name())
-        return db_path / identifier.get_table_name()
+    def get_table_path(self, identifier: Identifier) -> Path:
+        return self.get_database_path(identifier.get_database_name()) / identifier.get_table_name()
 
     def commit_snapshot(
             self,
