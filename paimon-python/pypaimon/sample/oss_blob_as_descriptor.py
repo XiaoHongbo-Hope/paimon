@@ -18,8 +18,6 @@
 
 import logging
 import pyarrow as pa
-from pathlib import Path
-from urllib.parse import urlparse
 
 from pypaimon.catalog.catalog_factory import CatalogFactory
 

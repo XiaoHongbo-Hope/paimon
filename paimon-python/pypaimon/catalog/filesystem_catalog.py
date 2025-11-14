@@ -16,9 +16,7 @@
 # limitations under the License.
 #################################################################################
 
-from pathlib import Path
 from typing import List, Optional, Union
-from urllib.parse import urlparse
 
 from urlpath import URL
 

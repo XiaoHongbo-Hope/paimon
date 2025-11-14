@@ -18,8 +18,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from urlpath import URL
 
@@ -60,7 +59,7 @@ class DataFileMeta:
         Set file path, preserving URI scheme using URL.
         """
         path_builder = table_path
-        
+
         # Build full path with partition and bucket
         partition_dict = partition.to_dict()
         for field_name, field_value in partition_dict.items():

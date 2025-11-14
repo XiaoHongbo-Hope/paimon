@@ -18,7 +18,6 @@
 
 import io
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse, ParseResult
 

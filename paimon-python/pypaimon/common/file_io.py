@@ -215,7 +215,7 @@ class FileIO:
         try:
             # Get parent directory
             dst_parent = dst.parent
-            
+
             if str(dst_parent) and not self.exists(dst_parent):
                 self.mkdirs(dst_parent)
 
@@ -459,7 +459,7 @@ class FileIO:
                     normalized_path = re.sub(r'/+', '/', parsed.path).lstrip('/')
                     return normalized_path
             return str(path)
-        
+
         if parsed.scheme:
             if parsed.scheme == 'file':
                 # Normalize path: remove duplicate slashes
@@ -473,5 +473,5 @@ class FileIO:
                 # Normalize path: remove duplicate slashes
                 normalized_path = re.sub(r'/+', '/', parsed.path)
                 return normalized_path
-        
+
         return str(path)
