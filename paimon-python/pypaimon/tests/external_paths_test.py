@@ -25,10 +25,7 @@ import pyarrow as pa
 
 from pypaimon import CatalogFactory, Schema
 from pypaimon.common.core_options import CoreOptions, ExternalPathStrategy
-from pypaimon.common.external_path_provider import (
-    ExternalPathProvider,
-    create_external_path_provider,
-)
+from pypaimon.common.external_path_provider import ExternalPathProvider
 from urlpath import URL
 
 
@@ -231,13 +228,11 @@ class ExternalPathsConfigTest(unittest.TestCase):
         self.assertIsNotNone(external_paths)
         self.assertEqual(len(external_paths), 2)
 
-        # Create provider from external paths
+        # Create provider using path factory (corresponds to Java architecture)
         partition = ("value1",)
         bucket = 0
-        partition_keys = ["dt"]
-        provider = create_external_path_provider(
-            external_paths, partition, bucket, partition_keys
-        )
+        path_factory = table.path_factory()
+        provider = path_factory.create_external_path_provider(partition, bucket)
 
         # Clean up
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -254,21 +249,24 @@ class ExternalPathsConfigTest(unittest.TestCase):
 
     def test_create_external_path_provider_none_strategy(self):
         """Test creating provider with none strategy (empty external paths)."""
-        external_paths = []  # Empty list when strategy is NONE
-
-        provider = create_external_path_provider(
-            external_paths, (), 0, []
-        )
+        # Create a table with none strategy
+        options = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1",
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.NONE,
+        }
+        table = self._create_table_with_options(options)
+        path_factory = table.path_factory()
+        provider = path_factory.create_external_path_provider((), 0)
 
         self.assertIsNone(provider)
 
     def test_create_external_path_provider_no_config(self):
         """Test creating provider without configuration (empty external paths)."""
-        external_paths = []  # Empty list when not configured
-
-        provider = create_external_path_provider(
-            external_paths, (), 0, []
-        )
+        # Create a table without external paths configuration
+        options = {}
+        table = self._create_table_with_options(options)
+        path_factory = table.path_factory()
+        provider = path_factory.create_external_path_provider((), 0)
 
         self.assertIsNone(provider)
 

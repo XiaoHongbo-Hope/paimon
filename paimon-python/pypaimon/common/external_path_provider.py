@@ -16,8 +16,7 @@
 #  limitations under the License.
 ################################################################################
 import random
-from typing import List, Optional
-from urllib.parse import urlparse
+from typing import List
 
 from urlpath import URL
 
@@ -46,37 +45,4 @@ class ExternalPathProvider:
             full_path = external_base / file_name
 
         return full_path
-
-
-def create_external_path_provider(
-    external_paths: List[URL],
-    partition: tuple,
-    bucket: int,
-    partition_keys: List[str]
-) -> Optional[ExternalPathProvider]:
-    """
-    Create ExternalPathProvider for a specific partition and bucket.
-
-    Args:
-        external_paths: List of external paths (URL objects) from table._create_external_paths()
-        partition: Partition tuple
-        bucket: Bucket number
-        partition_keys: List of partition key names
-
-    Returns:
-        ExternalPathProvider instance or None if external paths not configured
-    """
-    if not external_paths:
-        return None
-
-    # Build relative bucket path (same logic as _generate_file_path)
-    relative_parts = []
-    for i, field_name in enumerate(partition_keys):
-        relative_parts.append(f"{field_name}={partition[i]}")
-    relative_parts.append(f"bucket-{bucket}")
-
-    # Use URL for relative path (URL supports relative paths without scheme)
-    relative_bucket_path = URL("/".join(relative_parts))
-
-    return ExternalPathProvider(external_paths, relative_bucket_path)
 

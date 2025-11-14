@@ -150,7 +150,7 @@ class FileIO:
 
         return LocalFileSystem()
 
-    def _normalize_path_for_filesystem(self, path: Path) -> str:
+    def _to_filesystem_path(self, path: Path) -> str:
         """
         Normalize path for PyArrow filesystem operations.
         Removes scheme from file:// URIs for LocalFileSystem.
@@ -167,11 +167,11 @@ class FileIO:
         return path_str
 
     def new_input_stream(self, path: Path):
-        normalized_path = self._normalize_path_for_filesystem(path)
+        normalized_path = self._to_filesystem_path(path)
         return self.filesystem.open_input_file(normalized_path)
 
     def new_output_stream(self, path: Path):
-        normalized_path = self._normalize_path_for_filesystem(path)
+        normalized_path = self._to_filesystem_path(path)
         parent_dir = Path(normalized_path).parent
         if str(parent_dir) and not self.exists(Path(normalized_path).parent):
             self.mkdirs(Path(normalized_path).parent)
@@ -179,12 +179,12 @@ class FileIO:
         return self.filesystem.open_output_stream(normalized_path)
 
     def get_file_status(self, path: Path):
-        normalized_path = self._normalize_path_for_filesystem(path)
+        normalized_path = self._to_filesystem_path(path)
         file_infos = self.filesystem.get_file_info([normalized_path])
         return file_infos[0]
 
     def list_status(self, path: Path):
-        normalized_path = self._normalize_path_for_filesystem(path)
+        normalized_path = self._to_filesystem_path(path)
         selector = pyarrow.fs.FileSelector(normalized_path, recursive=False, allow_not_found=True)
         return self.filesystem.get_file_info(selector)
 
@@ -194,7 +194,7 @@ class FileIO:
 
     def exists(self, path: Path) -> bool:
         try:
-            normalized_path = self._normalize_path_for_filesystem(path)
+            normalized_path = self._to_filesystem_path(path)
             file_info = self.filesystem.get_file_info([normalized_path])[0]
             return file_info.type != pyarrow.fs.FileType.NotFound
         except Exception:
@@ -202,7 +202,7 @@ class FileIO:
 
     def delete(self, path: Path, recursive: bool = False) -> bool:
         try:
-            normalized_path = self._normalize_path_for_filesystem(path)
+            normalized_path = self._to_filesystem_path(path)
             file_info = self.filesystem.get_file_info([normalized_path])[0]
             if file_info.type == pyarrow.fs.FileType.Directory:
                 if recursive:
@@ -218,7 +218,7 @@ class FileIO:
 
     def mkdirs(self, path: Path) -> bool:
         try:
-            normalized_path = self._normalize_path_for_filesystem(path)
+            normalized_path = self._to_filesystem_path(path)
             self.filesystem.create_dir(normalized_path, recursive=True)
             return True
         except Exception as e:
@@ -227,8 +227,8 @@ class FileIO:
 
     def rename(self, src: Path, dst: Path) -> bool:
         try:
-            normalized_src = self._normalize_path_for_filesystem(src)
-            normalized_dst = self._normalize_path_for_filesystem(dst)
+            normalized_src = self._to_filesystem_path(src)
+            normalized_dst = self._to_filesystem_path(dst)
             dst_parent = Path(normalized_dst).parent
             if str(dst_parent) and not self.exists(Path(normalized_dst).parent):
                 self.mkdirs(Path(normalized_dst).parent)
@@ -307,8 +307,8 @@ class FileIO:
         if not overwrite and self.exists(target_path):
             raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
 
-        normalized_source = self._normalize_path_for_filesystem(source_path)
-        normalized_target = self._normalize_path_for_filesystem(target_path)
+        normalized_source = self._to_filesystem_path(source_path)
+        normalized_target = self._to_filesystem_path(target_path)
         self.filesystem.copy_file(normalized_source, normalized_target)
 
     def copy_files(self, source_directory: Path, target_directory: Path, overwrite: bool = False):
