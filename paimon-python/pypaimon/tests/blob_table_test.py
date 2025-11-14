@@ -1063,7 +1063,7 @@ class DataBlobWriterTest(unittest.TestCase):
         self.assertEqual(
             blob_descriptor_from_blob.uri,
             new_blob_descriptor.uri,
-            "Blob.from_descriptor should preserve the URI from the descriptor"
+            f"URI should be preserved. Expected: {new_blob_descriptor.uri}, Got: {blob_descriptor_from_blob.uri}"
         )
 
         # Verify the blob data matches the original

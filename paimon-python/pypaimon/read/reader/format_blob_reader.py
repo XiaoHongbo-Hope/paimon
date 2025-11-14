@@ -126,7 +126,6 @@ class FormatBlobReader(RecordBatchReader):
         self._blob_iterator = None
 
     def _read_index(self) -> None:
-        # Convert string to URL for FileIO
         file_path_url = URL(self.file_path) if isinstance(self.file_path, str) else self.file_path
         with self._file_io.new_input_stream(file_path_url) as f:
             # Seek to header: last 5 bytes

@@ -55,7 +55,7 @@ class DataFileMeta:
     # not a schema field, just for internal usage
     file_path: str = None
 
-    def set_file_path(self, table_path: URL, partition: GenericRow, bucket: int, file_io=None):
+    def set_file_path(self, table_path: URL, partition: GenericRow, bucket: int):
         """
         Set file path, preserving URI scheme using URL.
         """
@@ -66,8 +66,6 @@ class DataFileMeta:
         for field_name, field_value in partition_dict.items():
             path_builder = path_builder / (field_name + "=" + str(field_value))
         path_builder = path_builder / ("bucket-" + str(bucket)) / self.file_name
-        
-        # Convert to string (URL preserves scheme, Path does not)
         self.file_path = str(path_builder)
 
     def copy_without_stats(self) -> 'DataFileMeta':

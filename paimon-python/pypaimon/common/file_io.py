@@ -157,9 +157,7 @@ class FileIO:
 
     def new_output_stream(self, path: URL):
         path_str = self.to_filesystem_path(path)
-        # Get parent directory
         parent_dir = path.parent
-        
         if str(parent_dir) and not self.exists(parent_dir):
             self.mkdirs(parent_dir)
 
@@ -446,10 +444,6 @@ class FileIO:
             raise RuntimeError(f"Failed to write blob file {path}: {e}") from e
 
     def to_filesystem_path(self, path: URL) -> str:
-        """
-        Convert a URL to the format required by the underlying filesystem.
-        Normalizes path by removing duplicate slashes.
-        """
         from pyarrow.fs import S3FileSystem
         import re
 
