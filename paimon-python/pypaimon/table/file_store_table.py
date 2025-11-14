@@ -17,7 +17,14 @@
 ################################################################################
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+
+try:
+    from urlpath import URL
+    URLPATH_AVAILABLE = True
+except ImportError:
+    URLPATH_AVAILABLE = False
+    URL = None
 
 from pypaimon.catalog.catalog_environment import CatalogEnvironment
 from pypaimon.common.core_options import CoreOptions
@@ -37,7 +44,7 @@ from pypaimon.write.row_key_extractor import (DynamicBucketRowKeyExtractor,
 
 
 class FileStoreTable(Table):
-    def __init__(self, file_io: FileIO, identifier: Identifier, table_path: Path,
+    def __init__(self, file_io: FileIO, identifier: Identifier, table_path: Union[Path, 'URL'],
                  table_schema: TableSchema, catalog_environment: Optional[CatalogEnvironment] = None):
         self.file_io = file_io
         self.identifier = identifier

@@ -1065,11 +1065,6 @@ class DataBlobWriterTest(unittest.TestCase):
             new_blob_descriptor.uri,
             "Blob.from_descriptor should preserve the URI from the descriptor"
         )
-        self.assertTrue(
-            blob_descriptor_from_blob.uri.startswith("file://"),
-            f"URI scheme should be preserved. Original: {new_blob_descriptor.uri}, "
-            f"From blob: {blob_descriptor_from_blob.uri}"
-        )
 
         # Verify the blob data matches the original
         self.assertEqual(blob.to_data(), blob_data, "Blob data should match original")

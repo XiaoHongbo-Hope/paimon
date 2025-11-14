@@ -19,7 +19,14 @@
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
+
+try:
+    from urlpath import URL
+    URLPATH_AVAILABLE = True
+except ImportError:
+    URLPATH_AVAILABLE = False
+    URL = None
 
 from pypaimon.manifest.schema.simple_stats import (KEY_STATS_SCHEMA, VALUE_STATS_SCHEMA,
                                                    SimpleStats)
@@ -53,19 +60,51 @@ class DataFileMeta:
     # not a schema field, just for internal usage
     file_path: str = None
 
-    def set_file_path(self, table_path: Path, partition: GenericRow, bucket: int, file_io=None):
-        path_builder = table_path
+    def set_file_path(self, table_path: Union[Path, 'URL', str], partition: GenericRow, bucket: int, file_io=None):
+        """
+        Set file path, preserving URI scheme if using URL.
+        If table_path is a URL, scheme is automatically preserved.
+        If table_path is a Path, it will be converted to URL if urlpath is available.
+        """
+        # Convert to URL if urlpath is available
+        if URLPATH_AVAILABLE:
+            if isinstance(table_path, URL):
+                path_builder = table_path
+            elif isinstance(table_path, str):
+                # Create URL from string (preserves scheme if present)
+                path_builder = URL(table_path)
+            else:
+                # Path object - try to reconstruct with scheme from warehouse if available
+                path_str = str(table_path)
+                if file_io and hasattr(file_io, 'properties'):
+                    warehouse = file_io.properties.get('warehouse', '')
+                    if warehouse and '://' in warehouse:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(warehouse)
+                        if parsed.scheme:
+                            # Reconstruct with scheme from warehouse
+                            path_builder = URL(f"{parsed.scheme}://{path_str}")
+                        else:
+                            path_builder = URL(path_str)
+                    else:
+                        path_builder = URL(path_str)
+                else:
+                    path_builder = URL(path_str)
+        else:
+            # Fallback to Path (will lose scheme)
+            if isinstance(table_path, str):
+                path_builder = Path(table_path)
+            else:
+                path_builder = table_path
+        
+        # Build full path with partition and bucket
         partition_dict = partition.to_dict()
         for field_name, field_value in partition_dict.items():
             path_builder = path_builder / (field_name + "=" + str(field_value))
         path_builder = path_builder / ("bucket-" + str(bucket)) / self.file_name
-        path_str = str(path_builder)
-
-        if file_io is not None and hasattr(file_io, '_scheme') and file_io._scheme:
-            if not path_str.startswith(f"{file_io._scheme}://"):
-                path_str = f"{file_io._scheme}://{path_str}"
-
-        self.file_path = path_str
+        
+        # Convert to string (URL preserves scheme, Path does not)
+        self.file_path = str(path_builder)
 
     def copy_without_stats(self) -> 'DataFileMeta':
         """Create a new DataFileMeta without value statistics."""

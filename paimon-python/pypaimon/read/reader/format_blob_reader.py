@@ -41,8 +41,9 @@ class FormatBlobReader(RecordBatchReader):
         self._push_down_predicate = push_down_predicate
         self._blob_as_descriptor = blob_as_descriptor
 
-        # Get file size
-        self._file_size = file_io.get_file_size(Path(file_path))
+        # Get file size - file_path is already a string (may contain scheme)
+        # FileIO.get_file_size can handle str, Path, or URL
+        self._file_size = file_io.get_file_size(file_path)
 
         # Initialize the low-level blob format reader
         self.file_path = file_path
@@ -124,7 +125,9 @@ class FormatBlobReader(RecordBatchReader):
         self._blob_iterator = None
 
     def _read_index(self) -> None:
-        with self._file_io.new_input_stream(Path(self.file_path)) as f:
+        # file_path is already a string (may contain scheme like "oss://bucket/path")
+        # FileIO.new_input_stream can handle str, Path, or URL
+        with self._file_io.new_input_stream(self.file_path) as f:
             # Seek to header: last 5 bytes
             f.seek(self._file_size - 5)
             header = f.read(5)
