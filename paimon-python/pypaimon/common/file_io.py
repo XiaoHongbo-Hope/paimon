@@ -183,7 +183,7 @@ class FileIO:
             file_info = self.filesystem.get_file_info([path_str])[0]
             result = file_info.type != pyarrow.fs.FileType.NotFound
             return result
-        except Exception as e:
+        except Exception:
             return False
 
     def delete(self, path: Path, recursive: bool = False) -> bool:
@@ -440,7 +440,7 @@ class FileIO:
     def to_filesystem_path(self, path) -> str:
         from pathlib import Path as PathType
         from pyarrow.fs import S3FileSystem
-        
+
         # Convert Path to string if needed
         if isinstance(path, PathType):
             path_str = str(path)
@@ -448,7 +448,7 @@ class FileIO:
             path_str = path
         else:
             raise TypeError(f"Expected Path or str, got {type(path)}")
-        
+
         parsed = urlparse(path_str)
         if isinstance(self.filesystem, S3FileSystem):
             if parsed.scheme:
@@ -457,7 +457,7 @@ class FileIO:
                 else:
                     return parsed.path.lstrip('/')
             return path_str
-        
+
         if parsed.scheme:
             if parsed.scheme == 'file':
                 return parsed.path
@@ -465,5 +465,5 @@ class FileIO:
                 return parsed.path
             else:
                 return parsed.path
-        
+
         return path_str
