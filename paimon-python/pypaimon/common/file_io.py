@@ -19,8 +19,10 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import splitport, urlparse
+
+from urlpath import URL
 
 import pyarrow
 from packaging.version import parse
@@ -150,90 +152,97 @@ class FileIO:
 
         return LocalFileSystem()
 
-    def _to_filesystem_path(self, path: Path) -> str:
+    def _to_filesystem_path(self, path: Union[Path, URL, str]) -> str:
         """
-        Normalize path for PyArrow filesystem operations.
-        Removes scheme from file:// URIs for LocalFileSystem.
+        Convert path to filesystem path for PyArrow filesystem operations.
+        Removes scheme from URIs based on filesystem type:
+        - LocalFileSystem: removes file:// scheme
+        - S3FileSystem (for OSS and S3): removes scheme, returns bucket/path format
         """
+        from pyarrow.fs import LocalFileSystem, S3FileSystem
+        
         path_str = str(path)
         parsed = urlparse(path_str)
         
-        # For LocalFileSystem, remove file:// scheme
-        from pyarrow.fs import LocalFileSystem
         if isinstance(self.filesystem, LocalFileSystem) and parsed.scheme == 'file':
             return parsed.path
         
-        # For other filesystems, return as-is (they handle their own path formats)
+        if isinstance(self.filesystem, S3FileSystem) and parsed.scheme:
+            if parsed.netloc:
+                return f"{parsed.netloc}{parsed.path}"
+            else:
+                return parsed.path.lstrip('/')
+        
         return path_str
 
-    def new_input_stream(self, path: Path):
-        normalized_path = self._to_filesystem_path(path)
-        return self.filesystem.open_input_file(normalized_path)
+    def new_input_stream(self, path: Union[Path, URL, str]):
+        filesystem_path = self._to_filesystem_path(path)
+        return self.filesystem.open_input_file(filesystem_path)
 
-    def new_output_stream(self, path: Path):
-        normalized_path = self._to_filesystem_path(path)
-        parent_dir = Path(normalized_path).parent
-        if str(parent_dir) and not self.exists(Path(normalized_path).parent):
-            self.mkdirs(Path(normalized_path).parent)
+    def new_output_stream(self, path: Union[Path, URL, str]):
+        filesystem_path = self._to_filesystem_path(path)
+        parent_dir = Path(filesystem_path).parent
+        if str(parent_dir) and not self.exists(Path(filesystem_path).parent):
+            self.mkdirs(Path(filesystem_path).parent)
 
-        return self.filesystem.open_output_stream(normalized_path)
+        return self.filesystem.open_output_stream(filesystem_path)
 
-    def get_file_status(self, path: Path):
-        normalized_path = self._to_filesystem_path(path)
-        file_infos = self.filesystem.get_file_info([normalized_path])
+    def get_file_status(self, path: Union[Path, URL, str]):
+        filesystem_path = self._to_filesystem_path(path)
+        file_infos = self.filesystem.get_file_info([filesystem_path])
         return file_infos[0]
 
-    def list_status(self, path: Path):
-        normalized_path = self._to_filesystem_path(path)
-        selector = pyarrow.fs.FileSelector(normalized_path, recursive=False, allow_not_found=True)
+    def list_status(self, path: Union[Path, URL, str]):
+        filesystem_path = self._to_filesystem_path(path)
+        selector = pyarrow.fs.FileSelector(filesystem_path, recursive=False, allow_not_found=True)
         return self.filesystem.get_file_info(selector)
 
-    def list_directories(self, path: Path):
+    def list_directories(self, path: Union[Path, URL, str]):
         file_infos = self.list_status(path)
         return [info for info in file_infos if info.type == pyarrow.fs.FileType.Directory]
 
-    def exists(self, path: Path) -> bool:
+    def exists(self, path: Union[Path, URL, str]) -> bool:
         try:
-            normalized_path = self._to_filesystem_path(path)
-            file_info = self.filesystem.get_file_info([normalized_path])[0]
+            filesystem_path = self._to_filesystem_path(path)
+            file_info = self.filesystem.get_file_info([filesystem_path])[0]
             return file_info.type != pyarrow.fs.FileType.NotFound
         except Exception:
             return False
 
-    def delete(self, path: Path, recursive: bool = False) -> bool:
+    def delete(self, path: Union[Path, URL, str], recursive: bool = False) -> bool:
         try:
-            normalized_path = self._to_filesystem_path(path)
-            file_info = self.filesystem.get_file_info([normalized_path])[0]
+            filesystem_path = self._to_filesystem_path(path)
+            file_info = self.filesystem.get_file_info([filesystem_path])[0]
             if file_info.type == pyarrow.fs.FileType.Directory:
                 if recursive:
-                    self.filesystem.delete_dir_contents(normalized_path)
+                    self.filesystem.delete_dir_contents(filesystem_path)
                 else:
-                    self.filesystem.delete_dir(normalized_path)
+                    self.filesystem.delete_dir(filesystem_path)
             else:
-                self.filesystem.delete_file(normalized_path)
+                self.filesystem.delete_file(filesystem_path)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to delete {path}: {e}")
             return False
 
-    def mkdirs(self, path: Path) -> bool:
+    def mkdirs(self, path: Union[Path, URL, str]) -> bool:
         try:
-            normalized_path = self._to_filesystem_path(path)
-            self.filesystem.create_dir(normalized_path, recursive=True)
+            filesystem_path = self._to_filesystem_path(path)
+            self.filesystem.create_dir(filesystem_path, recursive=True)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to create directory {path}: {e}")
             return False
 
-    def rename(self, src: Path, dst: Path) -> bool:
+    def rename(self, src: Union[Path, URL, str], dst: Union[Path, URL, str]) -> bool:
         try:
-            normalized_src = self._to_filesystem_path(src)
-            normalized_dst = self._to_filesystem_path(dst)
-            dst_parent = Path(normalized_dst).parent
-            if str(dst_parent) and not self.exists(Path(normalized_dst).parent):
-                self.mkdirs(Path(normalized_dst).parent)
+            filesystem_src = self._to_filesystem_path(src)
+            filesystem_dst = self._to_filesystem_path(dst)
+            dst_parent = Path(filesystem_dst).parent
+            if str(dst_parent) and not self.exists(Path(filesystem_dst).parent):
+                self.mkdirs(Path(filesystem_dst).parent)
 
-            self.filesystem.move(normalized_src, normalized_dst)
+            self.filesystem.move(filesystem_src, filesystem_dst)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to rename {src} to {dst}: {e}")
@@ -303,13 +312,13 @@ class FileIO:
         with self.new_output_stream(path) as output_stream:
             output_stream.write(content.encode('utf-8'))
 
-    def copy_file(self, source_path: Path, target_path: Path, overwrite: bool = False):
+    def copy_file(self, source_path: Union[Path, URL, str], target_path: Union[Path, URL, str], overwrite: bool = False):
         if not overwrite and self.exists(target_path):
             raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
 
-        normalized_source = self._to_filesystem_path(source_path)
-        normalized_target = self._to_filesystem_path(target_path)
-        self.filesystem.copy_file(normalized_source, normalized_target)
+        filesystem_source = self._to_filesystem_path(source_path)
+        filesystem_target = self._to_filesystem_path(target_path)
+        self.filesystem.copy_file(filesystem_source, filesystem_target)
 
     def copy_files(self, source_directory: Path, target_directory: Path, overwrite: bool = False):
         file_infos = self.list_status(source_directory)

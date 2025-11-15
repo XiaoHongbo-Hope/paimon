@@ -74,13 +74,6 @@ class FileStoreTable(Table):
         return SnapshotManager(self)
 
     def path_factory(self) -> 'FileStorePathFactory':
-        """
-        Get the path factory for this table.
-        This method corresponds to AbstractFileStore.pathFactory() in Java.
-
-        Returns:
-            FileStorePathFactory instance
-        """
         from pypaimon.utils.file_store_path_factory import FileStorePathFactory
         from urlpath import URL
 
@@ -88,34 +81,21 @@ class FileStoreTable(Table):
         external_paths = self._create_external_paths()
 
         # Get format identifier
-        file_format = self.options.get(CoreOptions.FILE_FORMAT, CoreOptions.FILE_FORMAT_PARQUET)
-        format_identifier = file_format
+        format_identifier = CoreOptions.file_format(self.options)
 
-        # Get file prefixes (defaults from Java CoreOptions)
-        data_file_prefix = self.options.get("data-file.prefix", "data")
-        changelog_file_prefix = self.options.get("changelog-file.prefix", "changelog")
-
-        # Get compression settings (defaults from Java CoreOptions)
-        file_suffix_include_compression = self.options.get("file.suffix-include-compression", False)
-        file_compression = self.options.get(CoreOptions.FILE_COMPRESSION, "zstd")
-
-        # Get data file path directory
-        data_file_path_directory = self.options.get("data-file.path.directory")
-
-        # Get index file in data file dir setting
-        index_file_in_data_file_dir = self.options.get("index.file-in-data-file-dir", False)
+        file_compression = CoreOptions.file_compression(self.options)
 
         return FileStorePathFactory(
             root=URL(str(self.table_path)),
             partition_keys=self.partition_keys,
             format_identifier=format_identifier,
-            data_file_prefix=data_file_prefix,
-            changelog_file_prefix=changelog_file_prefix,
-            file_suffix_include_compression=file_suffix_include_compression,
+            data_file_prefix="data-",
+            changelog_file_prefix="changelog-",
+            file_suffix_include_compression=False,
             file_compression=file_compression,
-            data_file_path_directory=data_file_path_directory,
+            data_file_path_directory=None,  # Hardcoded to None, matching previous behavior
             external_paths=external_paths,
-            index_file_in_data_file_dir=index_file_in_data_file_dir,
+            index_file_in_data_file_dir=False,  # Hardcoded to False, matching previous behavior
         )
 
     def new_snapshot_commit(self):
@@ -179,26 +159,19 @@ class FileStoreTable(Table):
             self.options[key] = value
 
     def _create_external_paths(self) -> List[URL]:
-        """
-        Create list of external paths based on table options.
-        This method corresponds to AbstractFileStore.createExternalPaths() in Java.
-
-        Returns:
-            List of URL objects for external paths, or empty list if not configured
-        """
         from urllib.parse import urlparse
         from urlpath import URL
         from pypaimon.common.core_options import ExternalPathStrategy
 
-        external_paths_str = CoreOptions.get_external_paths(self.options)
+        external_paths_str = CoreOptions.data_file_external_paths(self.options)
         if not external_paths_str:
             return []
 
-        strategy = CoreOptions.get_external_path_strategy(self.options)
+        strategy = CoreOptions.external_path_strategy(self.options)
         if strategy == ExternalPathStrategy.NONE:
             return []
 
-        specific_fs = CoreOptions.get_external_path_specific_fs(self.options)
+        specific_fs = CoreOptions.external_specific_fs(self.options)
 
         # Join paths back to comma-separated string for processing
         external_paths_str_joined = ",".join(external_paths_str)

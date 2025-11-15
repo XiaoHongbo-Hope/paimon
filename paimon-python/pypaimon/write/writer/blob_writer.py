@@ -43,7 +43,7 @@ class BlobWriter(AppendOnlyDataWriter):
         self.blob_column = blob_column
 
         options = self.table.options
-        self.blob_target_file_size = CoreOptions.get_blob_target_file_size(options)
+        self.blob_target_file_size = CoreOptions.blob_target_file_size(options)
 
         self.current_writer: Optional[BlobFileWriter] = None
         self.current_file_path: Optional[Path] = None

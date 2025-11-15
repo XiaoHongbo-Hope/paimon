@@ -48,27 +48,28 @@ class DataWriter(ABC):
         self.trimmed_primary_keys = self.table.trimmed_primary_keys
 
         options = self.table.options
-        self.target_file_size = CoreOptions.get_target_file_size(options, self.table.is_primary_key_table)
-        self.file_format = options.get(CoreOptions.FILE_FORMAT,
-                                       CoreOptions.FILE_FORMAT_PARQUET
-                                       if self.bucket != BucketMode.POSTPONE_BUCKET.value
-                                       else CoreOptions.FILE_FORMAT_AVRO)
-        self.compression = options.get(CoreOptions.FILE_COMPRESSION, "zstd")
+        self.target_file_size = CoreOptions.target_file_size(options, self.table.is_primary_key_table)
+        # Special case: POSTPONE_BUCKET uses AVRO format, otherwise default to PARQUET
+        default_format = (CoreOptions.FILE_FORMAT_AVRO
+                         if self.bucket == BucketMode.POSTPONE_BUCKET.value
+                         else CoreOptions.FILE_FORMAT_PARQUET)
+        self.file_format = CoreOptions.file_format(options, default=default_format)
+        self.compression = CoreOptions.file_compression(options)
         self.sequence_generator = SequenceGenerator(max_seq_number)
 
         self.pending_data: Optional[pa.Table] = None
         self.committed_files: List[DataFileMeta] = []
         self.write_cols = write_cols
-        self.blob_as_descriptor = CoreOptions.get_blob_as_descriptor(options)
+        self.blob_as_descriptor = CoreOptions.blob_as_descriptor(options)
 
-        # Get path factory from table (corresponds to AbstractFileStore.pathFactory() in Java)
+        # Get path factory from table
         self.path_factory = self.table.path_factory()
         # Create external path provider if configured
         self.external_path_provider: Optional[ExternalPathProvider] = self.path_factory.create_external_path_provider(
             self.partition, self.bucket
         )
-        # Store the last generated external URL to preserve scheme in metadata
-        self._last_external_url: Optional['URL'] = None
+        # Store the current generated external URL to preserve scheme in metadata
+        self._current_external_url: Optional['URL'] = None
 
     def write(self, data: pa.RecordBatch):
         try:
@@ -162,7 +163,7 @@ class DataWriter(ABC):
         is_external_path = self.external_path_provider is not None
         if is_external_path:
             # Use the stored URL from _generate_file_path to preserve scheme
-            external_path_str = str(self._last_external_url) if self._last_external_url else None
+            external_path_str = str(self._current_external_url) if self._current_external_url else None
         else:
             external_path_str = None
 
@@ -244,17 +245,11 @@ class DataWriter(ABC):
         Generate file path for a data file.
         Uses external path provider if configured, otherwise uses table path.
         """
-        # If external path provider is configured, use it
         if self.external_path_provider:
-            from urlpath import URL
             external_path_url = self.external_path_provider.get_next_external_data_path(file_name)
-            # Store the URL to preserve scheme in metadata
-            self._last_external_url = external_path_url
-            # Convert URL to Path for compatibility (URL preserves scheme in string representation)
-            # For FileIO operations, we'll use the URL string directly
+            self._current_external_url = external_path_url
             return Path(str(external_path_url))
 
-        # Default: use path factory to generate bucket path
         bucket_path = self.path_factory.bucket_path(self.partition, self.bucket)
         return Path(str(bucket_path / file_name))
 

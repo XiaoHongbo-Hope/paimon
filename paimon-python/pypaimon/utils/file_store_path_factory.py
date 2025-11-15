@@ -23,11 +23,6 @@ from pypaimon.table.bucket_mode import BucketMode
 
 
 class FileStorePathFactory:
-    """
-    Factory which produces paths for manifest files and data files.
-    This class corresponds to org.apache.paimon.utils.FileStorePathFactory in Java.
-    """
-
     MANIFEST_PATH = "manifest"
     MANIFEST_PREFIX = "manifest-"
     MANIFEST_LIST_PREFIX = "manifest-list-"
@@ -54,21 +49,6 @@ class FileStorePathFactory:
         external_paths: Optional[List[URL]] = None,
         index_file_in_data_file_dir: bool = False,
     ):
-        """
-        Initialize FileStorePathFactory.
-
-        Args:
-            root: Table schema root path
-            partition_keys: List of partition key names
-            format_identifier: File format identifier (e.g., "parquet", "orc")
-            data_file_prefix: Prefix for data files
-            changelog_file_prefix: Prefix for changelog files
-            file_suffix_include_compression: Whether file suffix includes compression
-            file_compression: File compression type
-            data_file_path_directory: Optional directory for data files
-            external_paths: Optional list of external paths
-            index_file_in_data_file_dir: Whether index files are in data file directory
-        """
         self.root = root
         self.partition_keys = partition_keys
         self.format_identifier = format_identifier
@@ -80,12 +60,10 @@ class FileStorePathFactory:
         self.external_paths = external_paths or []
         self.index_file_in_data_file_dir = index_file_in_data_file_dir
 
-    def root_path(self) -> URL:
-        """Get the root path."""
+    def root(self) -> URL:
         return self.root
 
     def manifest_path(self) -> URL:
-        """Get the manifest path."""
         return self.root / self.MANIFEST_PATH
 
     def index_path(self) -> URL:
@@ -93,27 +71,14 @@ class FileStorePathFactory:
         return self.root / self.INDEX_PATH
 
     def statistics_path(self) -> URL:
-        """Get the statistics path."""
         return self.root / self.STATISTICS_PATH
 
     def data_file_path(self) -> URL:
-        """Get the data file path."""
         if self.data_file_path_directory:
             return self.root / self.data_file_path_directory
         return self.root
 
     def relative_bucket_path(self, partition: Tuple, bucket: int) -> URL:
-        """
-        Get relative bucket path for a partition and bucket.
-        This corresponds to FileStorePathFactory.relativeBucketPath() in Java.
-
-        Args:
-            partition: Partition tuple
-            bucket: Bucket number
-
-        Returns:
-            Relative bucket path as URL
-        """
         bucket_name = str(bucket)
         if bucket == BucketMode.POSTPONE_BUCKET.value:
             bucket_name = "postpone"
@@ -135,33 +100,11 @@ class FileStorePathFactory:
         return URL("/".join(relative_parts))
 
     def bucket_path(self, partition: Tuple, bucket: int) -> URL:
-        """
-        Get full bucket path for a partition and bucket.
-        This corresponds to FileStorePathFactory.bucketPath() in Java.
-
-        Args:
-            partition: Partition tuple
-            bucket: Bucket number
-
-        Returns:
-            Full bucket path as URL
-        """
         return self.root / self.relative_bucket_path(partition, bucket)
 
     def create_external_path_provider(
         self, partition: Tuple, bucket: int
     ) -> Optional[ExternalPathProvider]:
-        """
-        Create ExternalPathProvider for a partition and bucket.
-        This method corresponds to FileStorePathFactory.createExternalPathProvider() in Java.
-
-        Args:
-            partition: Partition tuple
-            bucket: Bucket number
-
-        Returns:
-            ExternalPathProvider instance or None if external paths not configured
-        """
         if not self.external_paths:
             return None
 

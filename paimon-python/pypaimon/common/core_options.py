@@ -65,11 +65,11 @@ class CoreOptions(str, Enum):
     DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS = "data-file.external-paths.specific-fs"
 
     @staticmethod
-    def get_blob_as_descriptor(options: dict) -> bool:
+    def blob_as_descriptor(options: dict) -> bool:
         return options.get(CoreOptions.FILE_BLOB_AS_DESCRIPTOR, "false").lower() == 'true'
 
     @staticmethod
-    def get_split_target_size(options: dict) -> int:
+    def split_target_size(options: dict) -> int:
         """Get split target size from options, default to 128MB."""
         if CoreOptions.SOURCE_SPLIT_TARGET_SIZE in options:
             size_str = options[CoreOptions.SOURCE_SPLIT_TARGET_SIZE]
@@ -77,7 +77,7 @@ class CoreOptions(str, Enum):
         return MemorySize.of_mebi_bytes(128).get_bytes()
 
     @staticmethod
-    def get_split_open_file_cost(options: dict) -> int:
+    def split_open_file_cost(options: dict) -> int:
         """Get split open file cost from options, default to 4MB."""
         if CoreOptions.SOURCE_SPLIT_OPEN_FILE_COST in options:
             cost_str = options[CoreOptions.SOURCE_SPLIT_OPEN_FILE_COST]
@@ -85,7 +85,7 @@ class CoreOptions(str, Enum):
         return MemorySize.of_mebi_bytes(4).get_bytes()
 
     @staticmethod
-    def get_target_file_size(options: dict, has_primary_key: bool = False) -> int:
+    def target_file_size(options: dict, has_primary_key: bool = False) -> int:
         """Get target file size from options, default to 128MB for primary key table, 256MB for append-only table."""
         if CoreOptions.TARGET_FILE_SIZE in options:
             size_str = options[CoreOptions.TARGET_FILE_SIZE]
@@ -93,36 +93,55 @@ class CoreOptions(str, Enum):
         return MemorySize.of_mebi_bytes(128 if has_primary_key else 256).get_bytes()
 
     @staticmethod
-    def get_blob_target_file_size(options: dict) -> int:
+    def blob_target_file_size(options: dict) -> int:
         """Get blob target file size from options, default to target-file-size (256MB for append-only table)."""
         if CoreOptions.BLOB_TARGET_FILE_SIZE in options:
             size_str = options[CoreOptions.BLOB_TARGET_FILE_SIZE]
             return MemorySize.parse(size_str).get_bytes()
-        return CoreOptions.get_target_file_size(options, has_primary_key=False)
+        return CoreOptions.target_file_size(options, has_primary_key=False)
 
     @staticmethod
-    def get_external_paths(options: dict) -> Optional[List[str]]:
-        """Get external paths from options, returns None if not configured."""
+    def data_file_external_paths(options: dict) -> Optional[List[str]]:
+        """
+        Get external paths from options Returns list of paths, or None if not configured.
+        """
         external_paths_str = options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS)
         if not external_paths_str:
             return None
         return [path.strip() for path in external_paths_str.split(",") if path.strip()]
 
     @staticmethod
-    def get_external_path_strategy(options: dict) -> str:
-        """Get external path strategy from options, default to 'none'."""
+    def external_path_strategy(options: dict) -> str:
+        """
+        Get external path strategy from options.
+        Default to 'none'.
+        """
         return options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY, "none").lower()
 
     @staticmethod
-    def get_external_path_specific_fs(options: dict) -> Optional[str]:
-        """Get specific filesystem for external paths, returns None if not configured."""
+    def external_specific_fs(options: dict) -> Optional[str]:
+        """
+        Get specific filesystem for external paths.
+        Returns None if not configured.
+        """
         return options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS)
+
+    @staticmethod
+    def file_compression(options: dict) -> str:
+        """Get file compression from options, default to 'zstd'."""
+        return options.get(CoreOptions.FILE_COMPRESSION, "zstd")
+
+    @staticmethod
+    def file_format(options: dict, default: Optional[str] = None) -> str:
+        if default is None:
+            default = CoreOptions.FILE_FORMAT_PARQUET
+        file_format = options.get(CoreOptions.FILE_FORMAT, default)
+        return file_format.lower() if file_format else file_format
 
 
 class ExternalPathStrategy(str, Enum):
     """
     Strategy for selecting external paths.
-    This enum corresponds to CoreOptions.ExternalPathStrategy in Java.
     """
     NONE = "none"
     ROUND_ROBIN = "round-robin"
