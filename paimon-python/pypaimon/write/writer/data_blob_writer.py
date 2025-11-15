@@ -266,7 +266,9 @@ class DataBlobWriter(DataWriter):
         # Generate metadata
         return self._create_data_file_meta(file_name, file_path, data, external_path_str)
 
-    def _create_data_file_meta(self, file_name: str, file_path: Path, data: pa.Table, external_path: Optional[str] = None) -> DataFileMeta:
+    def _create_data_file_meta(
+        self, file_name: str, file_path: Path, data: pa.Table, external_path: Optional[str] = None
+    ) -> DataFileMeta:
         # Column stats (only for normal columns)
         column_stats = {
             field.name: self._get_column_stats(data, field.name)

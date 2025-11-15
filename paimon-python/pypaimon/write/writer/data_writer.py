@@ -50,9 +50,11 @@ class DataWriter(ABC):
         options = self.table.options
         self.target_file_size = CoreOptions.target_file_size(options, self.table.is_primary_key_table)
         # POSTPONE_BUCKET uses AVRO format, otherwise default to PARQUET
-        default_format = (CoreOptions.FILE_FORMAT_AVRO
-                         if self.bucket == BucketMode.POSTPONE_BUCKET.value
-                         else CoreOptions.FILE_FORMAT_PARQUET)
+        default_format = (
+            CoreOptions.FILE_FORMAT_AVRO
+            if self.bucket == BucketMode.POSTPONE_BUCKET.value
+            else CoreOptions.FILE_FORMAT_PARQUET
+        )
         self.file_format = CoreOptions.file_format(options, default=default_format)
         self.compression = CoreOptions.file_compression(options)
         self.sequence_generator = SequenceGenerator(max_seq_number)

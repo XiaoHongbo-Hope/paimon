@@ -289,7 +289,9 @@ class FileIO:
         with self.new_output_stream(path) as output_stream:
             output_stream.write(content.encode('utf-8'))
 
-    def copy_file(self, source_path: Union[Path, URL, str], target_path: Union[Path, URL, str], overwrite: bool = False):
+    def copy_file(
+        self, source_path: Union[Path, URL, str], target_path: Union[Path, URL, str], overwrite: bool = False
+    ):
         if not overwrite and self.exists(target_path):
             raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
 

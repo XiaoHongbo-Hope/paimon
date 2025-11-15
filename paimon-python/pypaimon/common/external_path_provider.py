@@ -20,6 +20,7 @@ from typing import List
 
 from urlpath import URL
 
+
 class ExternalPathProvider:
     def __init__(self, external_table_paths: List[URL], relative_bucket_path: URL):
         self.external_table_paths = external_table_paths
@@ -35,7 +36,7 @@ class ExternalPathProvider:
 
         # Use current position first, then increment for next call
         external_base = self.external_table_paths[self.position]
-        
+
         # Increment position for next call
         self.position = (self.position + 1) % len(self.external_table_paths)
 
@@ -45,4 +46,3 @@ class ExternalPathProvider:
             full_path = external_base / file_name
 
         return full_path
-

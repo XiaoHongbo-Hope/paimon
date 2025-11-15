@@ -113,6 +113,3 @@ class FileStorePathFactory:
 
         relative_bucket_path = self.relative_bucket_path(partition, bucket)
         return ExternalPathProvider(self.external_paths, relative_bucket_path)
-
-
-

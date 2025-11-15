@@ -43,13 +43,13 @@ class ExternalPathProviderTest(unittest.TestCase):
         provider = ExternalPathProvider(external_paths, relative_path)
 
         paths = [str(provider.get_next_external_data_path("file.parquet")) for _ in range(6)]
-        
+
         # Verify all buckets are used (2 cycles = 2 times each)
         bucket_counts = {f"bucket{i}": sum(1 for p in paths if f"bucket{i}" in p) for i in [1, 2, 3]}
         self.assertEqual(bucket_counts["bucket1"], 2)
         self.assertEqual(bucket_counts["bucket2"], 2)
         self.assertEqual(bucket_counts["bucket3"], 2)
-        
+
         # Verify path structure
         self.assertIn("partition=value", paths[0])
         self.assertIn("bucket-0", paths[0])
@@ -162,7 +162,7 @@ class ExternalPathsConfigTest(unittest.TestCase):
         }
         table = self._create_table_with_options(options)
         path_factory = table.path_factory()
-        
+
         # Test with external paths configured
         provider = path_factory.create_external_path_provider(("value1",), 0)
         self.assertIsNotNone(provider)
@@ -376,4 +376,3 @@ class ExternalPathsIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
