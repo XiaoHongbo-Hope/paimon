@@ -51,7 +51,7 @@ class FileStorePathFactory:
         external_paths: Optional[List[URL]] = None,
         index_file_in_data_file_dir: bool = False,
     ):
-        self.root = root
+        self._root = root
         self.partition_keys = partition_keys
         self.default_part_value = default_part_value
         self.format_identifier = format_identifier
@@ -65,21 +65,21 @@ class FileStorePathFactory:
         self.legacy_partition_name = legacy_partition_name
 
     def root(self) -> URL:
-        return self.root
+        return self._root
 
     def manifest_path(self) -> URL:
-        return self.root / self.MANIFEST_PATH
+        return self._root / self.MANIFEST_PATH
 
     def index_path(self) -> URL:
-        return self.root / self.INDEX_PATH
+        return self._root / self.INDEX_PATH
 
     def statistics_path(self) -> URL:
-        return self.root / self.STATISTICS_PATH
+        return self._root / self.STATISTICS_PATH
 
     def data_file_path(self) -> URL:
         if self.data_file_path_directory:
-            return self.root / self.data_file_path_directory
-        return self.root
+            return self._root / self.data_file_path_directory
+        return self._root
 
     def relative_bucket_path(self, partition: Tuple, bucket: int) -> URL:
         bucket_name = str(bucket)
@@ -103,7 +103,7 @@ class FileStorePathFactory:
         return URL("/".join(relative_parts))
 
     def bucket_path(self, partition: Tuple, bucket: int) -> URL:
-        return self.root / self.relative_bucket_path(partition, bucket)
+        return self._root / self.relative_bucket_path(partition, bucket)
 
     def create_external_path_provider(
         self, partition: Tuple, bucket: int

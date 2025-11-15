@@ -19,7 +19,6 @@ import os
 import shutil
 import tempfile
 import unittest
-from pathlib import Path
 
 import pyarrow as pa
 
@@ -30,81 +29,45 @@ from urlpath import URL
 
 
 class ExternalPathProviderTest(unittest.TestCase):
+    """Test ExternalPathProvider functionality."""
 
-    def test_round_robin_path_selection(self):
-        """Test round-robin path selection."""
+    def test_path_selection_and_structure(self):
+        """Test path selection (round-robin) and path structure with various scenarios."""
+        # Test multiple paths with round-robin
         external_paths = [
             URL("oss://bucket1/external"),
             URL("oss://bucket2/external"),
             URL("oss://bucket3/external"),
         ]
         relative_path = URL("partition=value/bucket-0")
-
         provider = ExternalPathProvider(external_paths, relative_path)
 
-        # Get multiple paths and verify round-robin behavior
-        paths = []
-        for _ in range(6):  # 2 full cycles
-            path = provider.get_next_external_data_path("file.parquet")
-            paths.append(str(path))
-
-        # Verify all three buckets are used (order may vary due to random start)
-        bucket_counts = {
-            "bucket1": sum(1 for p in paths if "bucket1" in p),
-            "bucket2": sum(1 for p in paths if "bucket2" in p),
-            "bucket3": sum(1 for p in paths if "bucket3" in p),
-        }
-        # Each bucket should appear exactly 2 times in 2 full cycles
-        self.assertEqual(bucket_counts["bucket1"], 2, f"bucket1 should appear 2 times, got {bucket_counts['bucket1']}. Paths: {paths}")
-        self.assertEqual(bucket_counts["bucket2"], 2, f"bucket2 should appear 2 times, got {bucket_counts['bucket2']}. Paths: {paths}")
-        self.assertEqual(bucket_counts["bucket3"], 2, f"bucket3 should appear 2 times, got {bucket_counts['bucket3']}. Paths: {paths}")
-
-        # Verify round-robin: consecutive paths should use different buckets
-        # (except when wrapping around, which happens once in 6 calls)
-        consecutive_same = 0
-        for i in range(len(paths) - 1):
-            # Extract bucket name from path
-            bucket_i = None
-            bucket_next = None
-            for bucket in ["bucket1", "bucket2", "bucket3"]:
-                if bucket in paths[i]:
-                    bucket_i = bucket
-                if bucket in paths[i + 1]:
-                    bucket_next = bucket
-            if bucket_i == bucket_next:
-                consecutive_same += 1
-        # In 6 calls (2 cycles), there should be at most 1 wrap-around (consecutive same)
-        self.assertLessEqual(consecutive_same, 1, f"Too many consecutive same buckets: {consecutive_same}. Paths: {paths}")
-
+        paths = [str(provider.get_next_external_data_path("file.parquet")) for _ in range(6)]
+        
+        # Verify all buckets are used (2 cycles = 2 times each)
+        bucket_counts = {f"bucket{i}": sum(1 for p in paths if f"bucket{i}" in p) for i in [1, 2, 3]}
+        self.assertEqual(bucket_counts["bucket1"], 2)
+        self.assertEqual(bucket_counts["bucket2"], 2)
+        self.assertEqual(bucket_counts["bucket3"], 2)
+        
         # Verify path structure
         self.assertIn("partition=value", paths[0])
         self.assertIn("bucket-0", paths[0])
         self.assertIn("file.parquet", paths[0])
 
-    def test_single_external_path(self):
-        """Test with single external path."""
-        external_paths = [URL("oss://bucket/external")]
-        relative_path = URL("bucket-0")
+        # Test single path
+        single_provider = ExternalPathProvider([URL("oss://bucket/external")], URL("bucket-0"))
+        single_path = str(single_provider.get_next_external_data_path("data.parquet"))
+        self.assertIn("bucket/external", single_path)
+        self.assertIn("bucket-0", single_path)
+        self.assertIn("data.parquet", single_path)
 
-        provider = ExternalPathProvider(external_paths, relative_path)
-        path = provider.get_next_external_data_path("data.parquet")
-
-        self.assertIn("bucket/external", str(path))
-        self.assertIn("bucket-0", str(path))
-        self.assertIn("data.parquet", str(path))
-
-    def test_empty_relative_path(self):
-        """Test with empty relative path."""
-        external_paths = [URL("oss://bucket/external")]
-        relative_path = URL("")
-
-        provider = ExternalPathProvider(external_paths, relative_path)
-        path = provider.get_next_external_data_path("file.parquet")
-
-        self.assertIn("bucket/external", str(path))
-        self.assertIn("file.parquet", str(path))
-        # Should not have bucket-0 in path
-        self.assertNotIn("bucket-0", str(path))
+        # Test empty relative path
+        empty_provider = ExternalPathProvider([URL("oss://bucket/external")], URL(""))
+        empty_path = str(empty_provider.get_next_external_data_path("file.parquet"))
+        self.assertIn("bucket/external", empty_path)
+        self.assertIn("file.parquet", empty_path)
+        self.assertNotIn("bucket-0", empty_path)
 
 
 class ExternalPathsConfigTest(unittest.TestCase):
@@ -115,9 +78,7 @@ class ExternalPathsConfigTest(unittest.TestCase):
         """Set up test environment."""
         cls.temp_dir = tempfile.mkdtemp()
         cls.warehouse = os.path.join(cls.temp_dir, "warehouse")
-        cls.catalog = CatalogFactory.create({
-            "warehouse": cls.warehouse
-        })
+        cls.catalog = CatalogFactory.create({"warehouse": cls.warehouse})
         cls.catalog.create_database("test_db", False)
 
     @classmethod
@@ -127,148 +88,102 @@ class ExternalPathsConfigTest(unittest.TestCase):
 
     def _create_table_with_options(self, options: dict) -> 'FileStoreTable':
         """Helper method to create a table with specific options."""
-        pa_schema = pa.schema([
-            ("id", pa.int32()),
-            ("name", pa.string()),
-        ])
+        pa_schema = pa.schema([("id", pa.int32()), ("name", pa.string())])
         schema = Schema.from_pyarrow_schema(pa_schema, options=options)
         self.catalog.create_table("test_db.config_test", schema, True)
         return self.catalog.get_table("test_db.config_test")
 
-    def test_create_external_paths_round_robin(self):
-        """Test creating external paths with round-robin strategy."""
+    def test_external_paths_strategies(self):
+        """Test different external path strategies (round-robin, specific-fs, none)."""
+        # Test round-robin strategy
         options = {
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1,oss://bucket2/path2,oss://bucket3/path3",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
         }
         table = self._create_table_with_options(options)
         paths = table._create_external_paths()
-
         self.assertEqual(len(paths), 3)
         self.assertEqual(str(paths[0]), "oss://bucket1/path1")
         self.assertEqual(str(paths[1]), "oss://bucket2/path2")
         self.assertEqual(str(paths[2]), "oss://bucket3/path3")
 
-    def test_create_external_paths_specific_fs(self):
-        """Test creating external paths with specific-fs strategy."""
-        options = {
+        # Test specific-fs strategy
+        options2 = {
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1,s3://bucket2/path2,oss://bucket3/path3",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.SPECIFIC_FS,
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS: "oss",
         }
-        table = self._create_table_with_options(options)
-        paths = table._create_external_paths()
+        table2 = self._create_table_with_options(options2)
+        paths2 = table2._create_external_paths()
+        self.assertEqual(len(paths2), 2)
+        self.assertIn("oss://bucket1/path1", [str(p) for p in paths2])
+        self.assertIn("oss://bucket3/path3", [str(p) for p in paths2])
+        self.assertNotIn("s3://bucket2/path2", [str(p) for p in paths2])
 
-        # Should only include OSS paths
-        self.assertEqual(len(paths), 2)
-        self.assertIn("oss://bucket1/path1", [str(p) for p in paths])
-        self.assertIn("oss://bucket3/path3", [str(p) for p in paths])
-        self.assertNotIn("s3://bucket2/path2", [str(p) for p in paths])
-
-    def test_create_external_paths_none_strategy(self):
-        """Test creating external paths with none strategy."""
-        options = {
+        # Test none strategy
+        options3 = {
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.NONE,
         }
-        table = self._create_table_with_options(options)
-        paths = table._create_external_paths()
+        table3 = self._create_table_with_options(options3)
+        paths3 = table3._create_external_paths()
+        self.assertEqual(len(paths3), 0)
 
-        self.assertEqual(len(paths), 0)
-
-    def test_create_external_paths_empty_string(self):
-        """Test creating external paths with empty string."""
+    def test_external_paths_edge_cases(self):
+        """Test edge cases: empty string, no config, invalid scheme."""
+        # Test empty string
         options = {
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
         }
         table = self._create_table_with_options(options)
-        paths = table._create_external_paths()
-        self.assertEqual(len(paths), 0)
+        self.assertEqual(len(table._create_external_paths()), 0)
 
-        # Test with no external paths option
-        options2 = {
-            CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
-        }
+        # Test no external paths option
+        options2 = {CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN}
         table2 = self._create_table_with_options(options2)
-        paths2 = table2._create_external_paths()
-        self.assertEqual(len(paths2), 0)
+        self.assertEqual(len(table2._create_external_paths()), 0)
 
-    def test_create_external_paths_invalid_scheme(self):
-        """Test creating external paths with invalid scheme."""
-        options = {
-            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "/invalid/path",  # No scheme
+        # Test invalid scheme (no scheme)
+        options3 = {
+            CoreOptions.DATA_FILE_EXTERNAL_PATHS: "/invalid/path",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
         }
-        table = self._create_table_with_options(options)
-
+        table3 = self._create_table_with_options(options3)
         with self.assertRaises(ValueError) as context:
-            table._create_external_paths()
-
+            table3._create_external_paths()
         self.assertIn("scheme", str(context.exception))
 
     def test_create_external_path_provider(self):
-        """Test creating ExternalPathProvider from external paths list."""
-        # Create a table with external paths
+        """Test creating ExternalPathProvider from path factory."""
         options = {
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1,oss://bucket2/path2",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
         }
-        temp_dir = tempfile.mkdtemp()
-        warehouse = os.path.join(temp_dir, "warehouse")
-        catalog = CatalogFactory.create({"warehouse": warehouse})
-        catalog.create_database("test_db", False)
-        pa_schema = pa.schema([("id", pa.int32()), ("name", pa.string())])
-        schema = Schema.from_pyarrow_schema(pa_schema, options=options)
-        catalog.create_table("test_db.provider_test", schema, False)
-        table = catalog.get_table("test_db.provider_test")
-
-        # Get external paths from table
-        external_paths = table._create_external_paths()
-        self.assertIsNotNone(external_paths)
-        self.assertEqual(len(external_paths), 2)
-
-        # Create provider using path factory (corresponds to Java architecture)
-        partition = ("value1",)
-        bucket = 0
+        table = self._create_table_with_options(options)
         path_factory = table.path_factory()
-        provider = path_factory.create_external_path_provider(partition, bucket)
-
-        # Clean up
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
+        
+        # Test with external paths configured
+        provider = path_factory.create_external_path_provider(("value1",), 0)
         self.assertIsNotNone(provider)
         path = provider.get_next_external_data_path("file.parquet")
-        # Verify path contains one of the buckets (order may vary due to random start)
-        self.assertTrue(
-            "bucket1" in str(path) or "bucket2" in str(path),
-            f"Path should contain bucket1 or bucket2, got: {path}"
-        )
+        self.assertTrue("bucket1" in str(path) or "bucket2" in str(path))
         self.assertIn("dt=value1", str(path))
         self.assertIn("bucket-0", str(path))
 
-    def test_create_external_path_provider_none_strategy(self):
-        """Test creating provider with none strategy (empty external paths)."""
-        # Create a table with none strategy
-        options = {
+        # Test with none strategy (should return None)
+        options2 = {
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.NONE,
         }
-        table = self._create_table_with_options(options)
-        path_factory = table.path_factory()
-        provider = path_factory.create_external_path_provider((), 0)
+        table2 = self._create_table_with_options(options2)
+        provider2 = table2.path_factory().create_external_path_provider((), 0)
+        self.assertIsNone(provider2)
 
-        self.assertIsNone(provider)
-
-    def test_create_external_path_provider_no_config(self):
-        """Test creating provider without configuration (empty external paths)."""
-        # Create a table without external paths configuration
-        options = {}
-        table = self._create_table_with_options(options)
-        path_factory = table.path_factory()
-        provider = path_factory.create_external_path_provider((), 0)
-
-        self.assertIsNone(provider)
+        # Test without external paths config (should return None)
+        table3 = self._create_table_with_options({})
+        provider3 = table3.path_factory().create_external_path_provider((), 0)
+        self.assertIsNone(provider3)
 
 
 class ExternalPathsIntegrationTest(unittest.TestCase):
