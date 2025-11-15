@@ -152,29 +152,6 @@ class FileIO:
 
         return LocalFileSystem()
 
-    def _to_filesystem_path(self, path: Union[Path, URL, str]) -> str:
-        """
-        Convert path to filesystem path for PyArrow filesystem operations.
-        Removes scheme from URIs based on filesystem type:
-        - LocalFileSystem: removes file:// scheme
-        - S3FileSystem (for OSS and S3): removes scheme, returns bucket/path format
-        """
-        from pyarrow.fs import LocalFileSystem, S3FileSystem
-        
-        path_str = str(path)
-        parsed = urlparse(path_str)
-        
-        if isinstance(self.filesystem, LocalFileSystem) and parsed.scheme == 'file':
-            return parsed.path
-        
-        if isinstance(self.filesystem, S3FileSystem) and parsed.scheme:
-            if parsed.netloc:
-                return f"{parsed.netloc}{parsed.path}"
-            else:
-                return parsed.path.lstrip('/')
-        
-        return path_str
-
     def new_input_stream(self, path: Union[Path, URL, str]):
         filesystem_path = self._to_filesystem_path(path)
         return self.filesystem.open_input_file(filesystem_path)
@@ -459,3 +436,20 @@ class FileIO:
         except Exception as e:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write blob file {path}: {e}") from e
+
+    def _to_filesystem_path(self, path: Union[Path, URL, str]) -> str:
+        from pyarrow.fs import LocalFileSystem, S3FileSystem
+
+        path_str = str(path)
+        parsed = urlparse(path_str)
+
+        if isinstance(self.filesystem, LocalFileSystem) and parsed.scheme == 'file':
+            return parsed.path
+
+        if isinstance(self.filesystem, S3FileSystem) and parsed.scheme:
+            if parsed.netloc:
+                return f"{parsed.netloc}{parsed.path}"
+            else:
+                return parsed.path.lstrip('/')
+
+        return path_str

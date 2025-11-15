@@ -63,6 +63,9 @@ class CoreOptions(str, Enum):
     DATA_FILE_EXTERNAL_PATHS = "data-file.external-paths"
     DATA_FILE_EXTERNAL_PATHS_STRATEGY = "data-file.external-paths.strategy"
     DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS = "data-file.external-paths.specific-fs"
+    # Partition options
+    PARTITION_DEFAULT_NAME = "partition.default-name"
+    PARTITION_GENERATE_LEGACY_NAME = "partition.legacy-name"
 
     @staticmethod
     def blob_as_descriptor(options: dict) -> bool:
@@ -102,9 +105,6 @@ class CoreOptions(str, Enum):
 
     @staticmethod
     def data_file_external_paths(options: dict) -> Optional[List[str]]:
-        """
-        Get external paths from options Returns list of paths, or None if not configured.
-        """
         external_paths_str = options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS)
         if not external_paths_str:
             return None
@@ -112,18 +112,10 @@ class CoreOptions(str, Enum):
 
     @staticmethod
     def external_path_strategy(options: dict) -> str:
-        """
-        Get external path strategy from options.
-        Default to 'none'.
-        """
         return options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY, "none").lower()
 
     @staticmethod
     def external_specific_fs(options: dict) -> Optional[str]:
-        """
-        Get specific filesystem for external paths.
-        Returns None if not configured.
-        """
         return options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS)
 
     @staticmethod

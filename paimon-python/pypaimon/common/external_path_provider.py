@@ -24,7 +24,6 @@ class ExternalPathProvider:
     def __init__(self, external_table_paths: List[URL], relative_bucket_path: URL):
         self.external_table_paths = external_table_paths
         self.relative_bucket_path = relative_bucket_path
-        # Start from a random position for load balancing
         self.position = random.randint(0, len(external_table_paths) - 1) if external_table_paths else 0
 
     def get_next_external_data_path(self, file_name: str) -> URL:
@@ -34,7 +33,6 @@ class ExternalPathProvider:
         if not self.external_table_paths:
             raise ValueError("No external paths available")
 
-        # Round-robin: move to next path
         self.position = (self.position + 1) % len(self.external_table_paths)
 
         external_base = self.external_table_paths[self.position]

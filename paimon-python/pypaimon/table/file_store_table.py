@@ -88,14 +88,16 @@ class FileStoreTable(Table):
         return FileStorePathFactory(
             root=URL(str(self.table_path)),
             partition_keys=self.partition_keys,
+            default_part_value="__DEFAULT_PARTITION__",
             format_identifier=format_identifier,
             data_file_prefix="data-",
             changelog_file_prefix="changelog-",
+            legacy_partition_name=True,
             file_suffix_include_compression=False,
             file_compression=file_compression,
-            data_file_path_directory=None,  # Hardcoded to None, matching previous behavior
+            data_file_path_directory=None,
             external_paths=external_paths,
-            index_file_in_data_file_dir=False,  # Hardcoded to False, matching previous behavior
+            index_file_in_data_file_dir=False,
         )
 
     def new_snapshot_commit(self):

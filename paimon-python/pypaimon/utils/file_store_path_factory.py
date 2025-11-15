@@ -40,9 +40,11 @@ class FileStorePathFactory:
         self,
         root: URL,
         partition_keys: List[str],
+        default_part_value: str,
         format_identifier: str,
         data_file_prefix: str,
         changelog_file_prefix: str,
+        legacy_partition_name: bool,
         file_suffix_include_compression: bool,
         file_compression: str,
         data_file_path_directory: Optional[str] = None,
@@ -59,6 +61,8 @@ class FileStorePathFactory:
         self.data_file_path_directory = data_file_path_directory
         self.external_paths = external_paths or []
         self.index_file_in_data_file_dir = index_file_in_data_file_dir
+        self.default_part_value = default_part_value
+        self.legacy_partition_name = legacy_partition_name
 
     def root(self) -> URL:
         return self.root
@@ -110,4 +114,6 @@ class FileStorePathFactory:
 
         relative_bucket_path = self.relative_bucket_path(partition, bucket)
         return ExternalPathProvider(self.external_paths, relative_bucket_path)
+
+
 
