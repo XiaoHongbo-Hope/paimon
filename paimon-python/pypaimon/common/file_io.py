@@ -446,7 +446,9 @@ class FileIO:
         if isinstance(self.filesystem, LocalFileSystem) and parsed.scheme == 'file':
             return parsed.path
 
-        if isinstance(self.filesystem, S3FileSystem) and parsed.scheme:
+        # Only apply S3-specific path transformation if scheme matches S3/OSS schemes
+        s3_schemes = {'s3', 's3a', 's3n', 'oss'}
+        if isinstance(self.filesystem, S3FileSystem) and parsed.scheme in s3_schemes:
             if parsed.netloc:
                 return f"{parsed.netloc}{parsed.path}"
             else:
