@@ -53,6 +53,7 @@ class FileStorePathFactory:
     ):
         self.root = root
         self.partition_keys = partition_keys
+        self.default_part_value = default_part_value
         self.format_identifier = format_identifier
         self.data_file_prefix = data_file_prefix
         self.changelog_file_prefix = changelog_file_prefix
@@ -61,7 +62,6 @@ class FileStorePathFactory:
         self.data_file_path_directory = data_file_path_directory
         self.external_paths = external_paths or []
         self.index_file_in_data_file_dir = index_file_in_data_file_dir
-        self.default_part_value = default_part_value
         self.legacy_partition_name = legacy_partition_name
 
     def root(self) -> URL:
@@ -71,7 +71,6 @@ class FileStorePathFactory:
         return self.root / self.MANIFEST_PATH
 
     def index_path(self) -> URL:
-        """Get the index path."""
         return self.root / self.INDEX_PATH
 
     def statistics_path(self) -> URL:

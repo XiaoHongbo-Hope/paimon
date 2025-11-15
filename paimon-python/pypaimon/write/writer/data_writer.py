@@ -49,7 +49,7 @@ class DataWriter(ABC):
 
         options = self.table.options
         self.target_file_size = CoreOptions.target_file_size(options, self.table.is_primary_key_table)
-        # Special case: POSTPONE_BUCKET uses AVRO format, otherwise default to PARQUET
+        # POSTPONE_BUCKET uses AVRO format, otherwise default to PARQUET
         default_format = (CoreOptions.FILE_FORMAT_AVRO
                          if self.bucket == BucketMode.POSTPONE_BUCKET.value
                          else CoreOptions.FILE_FORMAT_PARQUET)
@@ -62,9 +62,7 @@ class DataWriter(ABC):
         self.write_cols = write_cols
         self.blob_as_descriptor = CoreOptions.blob_as_descriptor(options)
 
-        # Get path factory from table
         self.path_factory = self.table.path_factory()
-        # Create external path provider if configured
         self.external_path_provider: Optional[ExternalPathProvider] = self.path_factory.create_external_path_provider(
             self.partition, self.bucket
         )
@@ -158,8 +156,6 @@ class DataWriter(ABC):
         file_name = f"data-{uuid.uuid4()}-0.{self.file_format}"
         file_path = self._generate_file_path(file_name)
 
-        # Determine if this is an external path
-        # For external paths, preserve the original URL string (with scheme) for metadata
         is_external_path = self.external_path_provider is not None
         if is_external_path:
             # Use the stored URL from _generate_file_path to preserve scheme
@@ -241,10 +237,6 @@ class DataWriter(ABC):
         ))
 
     def _generate_file_path(self, file_name: str) -> Path:
-        """
-        Generate file path for a data file.
-        Uses external path provider if configured, otherwise uses table path.
-        """
         if self.external_path_provider:
             external_path_url = self.external_path_provider.get_next_external_data_path(file_name)
             self._current_external_url = external_path_url

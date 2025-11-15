@@ -63,9 +63,6 @@ class CoreOptions(str, Enum):
     DATA_FILE_EXTERNAL_PATHS = "data-file.external-paths"
     DATA_FILE_EXTERNAL_PATHS_STRATEGY = "data-file.external-paths.strategy"
     DATA_FILE_EXTERNAL_PATHS_SPECIFIC_FS = "data-file.external-paths.specific-fs"
-    # Partition options
-    PARTITION_DEFAULT_NAME = "partition.default-name"
-    PARTITION_GENERATE_LEGACY_NAME = "partition.legacy-name"
 
     @staticmethod
     def blob_as_descriptor(options: dict) -> bool:
