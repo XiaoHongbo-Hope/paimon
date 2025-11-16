@@ -260,11 +260,12 @@ class FileStoreCommit:
 
         # Check if path scheme matches warehouse scheme
         warehouse_path_str = str(self.table.table_path)
-        warehouse_parsed = urlparse(
-            warehouse_path_str
-            if warehouse_path_str.startswith(('file://', 's3://', 's3a://', 's3n://', 'oss://', 'hdfs://', 'viewfs://'))
-            else f"file://{warehouse_path_str}"
-        )
+        supported_schemes = ('file://', 's3://', 's3a://', 's3n://', 'oss://', 'hdfs://', 'viewfs://')
+        if warehouse_path_str.startswith(supported_schemes):
+            warehouse_url = warehouse_path_str
+        else:
+            warehouse_url = f"file://{warehouse_path_str}"
+        warehouse_parsed = urlparse(warehouse_url)
         warehouse_scheme = warehouse_parsed.scheme or 'file'
 
         # Normalize schemes for comparison
