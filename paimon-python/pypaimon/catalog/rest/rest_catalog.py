@@ -16,8 +16,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    from urlpath import URL
+else:
+    try:
+        from urlpath import URL
+    except ImportError:
+        URL = None  # type: ignore
 
 import pyarrow
 from packaging.version import parse
@@ -240,7 +248,7 @@ class RESTCatalog(Catalog):
 
     @staticmethod
     def create(file_io: FileIO,
-               table_path: Path,
+               table_path: Union[Path, 'URL'],
                table_schema: TableSchema,
                catalog_environment: CatalogEnvironment
                ) -> FileStoreTable:

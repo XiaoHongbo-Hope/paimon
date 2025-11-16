@@ -21,7 +21,15 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from urlpath import URL
+else:
+    try:
+        from urlpath import URL
+    except ImportError:
+        URL = None  # type: ignore
 
 from pypaimon.common.core_options import CoreOptions
 from pypaimon.manifest.schema.data_file_meta import DataFileMeta
@@ -219,7 +227,7 @@ class DataWriter(ABC):
             file_path=str(file_path),
         ))
 
-    def _generate_file_path(self, file_name: str) -> Path:
+    def _generate_file_path(self, file_name: str) -> Union[Path, 'URL']:
         path_builder = self.table.table_path
 
         for i, field_name in enumerate(self.table.partition_keys):

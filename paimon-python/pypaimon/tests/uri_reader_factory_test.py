@@ -18,9 +18,13 @@ limitations under the License.
 import os
 import tempfile
 import unittest
-from pathlib import Path
 from pypaimon.common.file_io import FileIO
 from pypaimon.common.uri_reader import UriReaderFactory, HttpUriReader, FileUriReader, UriReader
+
+try:
+    from urlpath import URL
+except ImportError:
+    URL = None  # type: ignore
 
 
 class MockFileIO:
@@ -31,10 +35,15 @@ class MockFileIO:
 
     def get_file_size(self, path: str) -> int:
         """Get file size."""
-        return self._file_io.get_file_size(Path(path))
+        path_obj = URL(path) if URL else path
+        return self._file_io.get_file_size(path_obj)
 
-    def new_input_stream(self, path: Path):
+    def new_input_stream(self, path):
         """Create new input stream for reading."""
+        if URL and not isinstance(path, (str, URL, type(None))):
+            path = URL(str(path))
+        elif not URL and not isinstance(path, (str, type(None))):
+            path = str(path)
         return self._file_io.new_input_stream(path)
 
 

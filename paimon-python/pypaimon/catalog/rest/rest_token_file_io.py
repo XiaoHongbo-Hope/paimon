@@ -19,7 +19,15 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
+
+if TYPE_CHECKING:
+    from urlpath import URL
+else:
+    try:
+        from urlpath import URL
+    except ImportError:
+        URL = None  # type: ignore
 
 from pyarrow._fs import FileSystem
 
@@ -46,7 +54,7 @@ class RESTTokenFileIO(FileIO):
         self.properties.update(self.token.token)
         return super()._initialize_oss_fs(path)
 
-    def new_output_stream(self, path: Path):
+    def new_output_stream(self, path: Union[Path, 'URL']):
         return self.filesystem.open_output_stream(str(path))
 
     def try_to_refresh_token(self):

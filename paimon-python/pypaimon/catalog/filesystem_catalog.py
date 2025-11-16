@@ -126,7 +126,7 @@ class FileSystemCatalog(Catalog):
         db_path = warehouse_url / f"{name}{Catalog.DB_SUFFIX}"
         return db_path
 
-    def get_table_path(self, identifier: Identifier) -> Path:
+    def get_table_path(self, identifier: Identifier) -> URL:
         return self.get_database_path(identifier.get_database_name()) / identifier.get_table_name()
 
     def commit_snapshot(

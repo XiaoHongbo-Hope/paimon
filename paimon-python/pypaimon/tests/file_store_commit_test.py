@@ -18,8 +18,12 @@
 
 import unittest
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import Mock, patch
+
+try:
+    from urlpath import URL
+except ImportError:
+    URL = None  # type: ignore
 
 from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.manifest_entry import ManifestEntry
@@ -41,7 +45,7 @@ class TestFileStoreCommit(unittest.TestCase):
         self.mock_table = Mock()
         self.mock_table.partition_keys = ['dt', 'region']
         self.mock_table.current_branch.return_value = 'main'
-        self.mock_table.table_path = Path('/test/table/path')
+        self.mock_table.table_path = URL('file:///test/table/path') if URL else '/test/table/path'
         self.mock_table.file_io = Mock()
 
         # Mock snapshot commit
