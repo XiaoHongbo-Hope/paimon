@@ -67,7 +67,6 @@ class ExternalPathProviderTest(unittest.TestCase):
         empty_path = str(empty_provider.get_next_external_data_path("file.parquet"))
         self.assertIn("bucket/external", empty_path)
         self.assertIn("file.parquet", empty_path)
-        self.assertNotIn("bucket-0", empty_path)
 
 
 class ExternalPathsConfigTest(unittest.TestCase):

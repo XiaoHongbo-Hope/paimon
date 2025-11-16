@@ -34,15 +34,11 @@ class ExternalPathProvider:
         if not self.external_table_paths:
             raise ValueError("No external paths available")
 
-        # Use current position first, then increment for next call
+        self.position += 1
+        if self.position == len(self.external_table_paths):
+            self.position = 0
+
         external_base = self.external_table_paths[self.position]
-
-        # Increment position for next call
-        self.position = (self.position + 1) % len(self.external_table_paths)
-
-        if str(self.relative_bucket_path):
-            full_path = external_base / self.relative_bucket_path / file_name
-        else:
-            full_path = external_base / file_name
+        full_path = external_base / self.relative_bucket_path / file_name
 
         return full_path
