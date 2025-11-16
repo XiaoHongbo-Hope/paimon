@@ -617,10 +617,6 @@ class BlobEndToEndTest(unittest.TestCase):
         from pypaimon.common.file_io import FileIO
         from pypaimon.table.row.generic_row import GenericRow, GenericRowSerializer
         from pypaimon.table.row.row_kind import RowKind
-        try:
-            from urlpath import URL
-        except ImportError:
-            URL = None  # type: ignore
 
         # Set up file I/O
         file_io = FileIO(self.temp_dir, {})
@@ -763,10 +759,6 @@ class BlobEndToEndTest(unittest.TestCase):
         from pypaimon.schema.data_types import DataField, AtomicType
         from pypaimon.common.file_io import FileIO
         from pypaimon.common.delta_varint_compressor import DeltaVarintCompressor
-        try:
-            from urlpath import URL
-        except ImportError:
-            URL = None  # type: ignore
 
         # Set up file I/O
         file_io = FileIO(self.temp_dir, {})
