@@ -447,6 +447,14 @@ class FileIO:
         path_scheme = parsed.scheme
         s3_schemes = {'s3', 's3a', 's3n', 'oss'}
 
+        # Check if scheme is actually a Windows drive letter (e.g., C:)
+        # urlparse treats "C:\path" or "C:/path" as scheme="C", which is incorrect
+        is_windows_drive = path_scheme and len(path_scheme) == 1 and path_scheme.isalpha()
+        if is_windows_drive:
+            # This is a Windows path with drive letter, not a URL scheme
+            # Return the original path string as-is for LocalFileSystem to handle
+            path_scheme = None
+
         # LocalFileSystem: expect file:// or no scheme
         if isinstance(self.filesystem, LocalFileSystem):
             if path_scheme and path_scheme != 'file':
@@ -454,7 +462,10 @@ class FileIO:
                     f"Filesystem scheme mismatch: warehouse uses 'file://' but path uses "
                     f"'{path_scheme}://'. Path: {path_str}"
                 )
-            return parsed.path or path_str
+            # For file:// scheme, return just the path; otherwise return the full path string
+            if path_scheme == 'file':
+                return parsed.path or path_str
+            return path_str
 
         # S3FileSystem: expect s3/oss schemes
         if isinstance(self.filesystem, S3FileSystem):
