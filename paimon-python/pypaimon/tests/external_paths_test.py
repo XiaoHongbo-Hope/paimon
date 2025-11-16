@@ -87,10 +87,16 @@ class ExternalPathsConfigTest(unittest.TestCase):
 
     def _create_table_with_options(self, options: dict) -> 'FileStoreTable':
         """Helper method to create a table with specific options."""
+        table_name = "test_db.config_test"
+        # Drop tablçe if exists to ensure clean test environment
+        try:
+            self.catalog.drop_table(table_name, True)
+        except Exception:
+            pass  # Table may not exist, ignore
         pa_schema = pa.schema([("id", pa.int32()), ("name", pa.string())])
         schema = Schema.from_pyarrow_schema(pa_schema, options=options)
-        self.catalog.create_table("test_db.config_test", schema, True)
-        return self.catalog.get_table("test_db.config_test")
+        self.catalog.create_table(table_name, schema, True)
+        return self.catalog.get_table(table_name)
 
     def test_external_paths_strategies(self):
         """Test different external path strategies (round-robin, specific-fs, none)."""
@@ -155,6 +161,12 @@ class ExternalPathsConfigTest(unittest.TestCase):
 
     def test_create_external_path_provider(self):
         """Test creating ExternalPathProvider from path factory."""
+        table_name = "test_db.config_test"
+        # Drop table if exists to ensure clean test environment
+        try:
+            self.catalog.drop_table(table_name, True)
+        except Exception:
+            pass  # Table may not exist, ignore
         options = {
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1,oss://bucket2/path2",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
@@ -165,8 +177,8 @@ class ExternalPathsConfigTest(unittest.TestCase):
             ("dt", pa.string()),
         ])
         schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=["dt"], options=options)
-        self.catalog.create_table("test_db.config_test", schema, True)
-        table = self.catalog.get_table("test_db.config_test")
+        self.catalog.create_table(table_name, schema, True)
+        table = self.catalog.get_table(table_name)
         path_factory = table.path_factory()
 
         # Test with external paths configured
