@@ -23,6 +23,7 @@ import unittest
 import pyarrow as pa
 
 from pypaimon import CatalogFactory, Schema
+from pypaimon.catalog.catalog import Identifier
 from pypaimon.common.core_options import CoreOptions, ExternalPathStrategy
 from pypaimon.common.external_path_provider import ExternalPathProvider
 from urlpath import URL
@@ -88,9 +89,13 @@ class ExternalPathsConfigTest(unittest.TestCase):
     def _create_table_with_options(self, options: dict) -> 'FileStoreTable':
         """Helper method to create a table with specific options."""
         table_name = "test_db.config_test"
-        # Drop tablçe if exists to ensure clean test environment
+        # Manually delete table directory if it exists to ensure clean test environment
+        # FileSystemCatalog doesn't have drop_table method, so we need to delete manually
         try:
-            self.catalog.drop_table(table_name, True)
+            table_path = self.catalog.get_table_path(Identifier.from_string(table_name))
+            # file_io.exists and delete accept Union[Path, URL, str]
+            if self.catalog.file_io.exists(table_path):
+                self.catalog.file_io.delete(table_path, recursive=True)
         except Exception:
             pass  # Table may not exist, ignore
         pa_schema = pa.schema([("id", pa.int32()), ("name", pa.string())])
@@ -190,16 +195,43 @@ class ExternalPathsConfigTest(unittest.TestCase):
         self.assertIn("bucket-0", str(path))
 
         # Test with none strategy (should return None)
+        # Use a different table name to avoid conflicts
         options2 = {
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.NONE,
         }
-        table2 = self._create_table_with_options(options2)
+        pa_schema2 = pa.schema([("id", pa.int32()), ("name", pa.string())])
+        schema2 = Schema.from_pyarrow_schema(pa_schema2, options=options2)
+        table_name2 = "test_db.config_test_none"
+        try:
+            # Manually delete table directory if it exists
+            table_path2 = self.catalog.get_table_path(Identifier.from_string(table_name2))
+            # file_io.exists and delete accept Union[Path, URL, str]
+            if self.catalog.file_io.exists(table_path2):
+                self.catalog.file_io.delete(table_path2, recursive=True)
+        except Exception:
+            pass  # Table may not exist, ignore
+        self.catalog.create_table(table_name2, schema2, True)
+        table2 = self.catalog.get_table(table_name2)
         provider2 = table2.path_factory().create_external_path_provider((), 0)
         self.assertIsNone(provider2)
 
         # Test without external paths config (should return None)
-        table3 = self._create_table_with_options({})
+        # Use a different table name to avoid conflicts
+        options3 = {}
+        pa_schema3 = pa.schema([("id", pa.int32()), ("name", pa.string())])
+        schema3 = Schema.from_pyarrow_schema(pa_schema3, options=options3)
+        table_name3 = "test_db.config_test_empty"
+        try:
+            # Manually delete table directory if it exists
+            table_path3 = self.catalog.get_table_path(Identifier.from_string(table_name3))
+            # file_io.exists and delete accept Union[Path, URL, str]
+            if self.catalog.file_io.exists(table_path3):
+                self.catalog.file_io.delete(table_path3, recursive=True)
+        except Exception:
+            pass  # Table may not exist, ignore
+        self.catalog.create_table(table_name3, schema3, True)
+        table3 = self.catalog.get_table(table_name3)
         provider3 = table3.path_factory().create_external_path_provider((), 0)
         self.assertIsNone(provider3)
 
