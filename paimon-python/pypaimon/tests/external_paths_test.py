@@ -159,7 +159,14 @@ class ExternalPathsConfigTest(unittest.TestCase):
             CoreOptions.DATA_FILE_EXTERNAL_PATHS: "oss://bucket1/path1,oss://bucket2/path2",
             CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY: ExternalPathStrategy.ROUND_ROBIN,
         }
-        table = self._create_table_with_options(options)
+        pa_schema = pa.schema([
+            ("id", pa.int32()),
+            ("name", pa.string()),
+            ("dt", pa.string()),
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=["dt"], options=options)
+        self.catalog.create_table("test_db.config_test", schema, True)
+        table = self.catalog.get_table("test_db.config_test")
         path_factory = table.path_factory()
 
         # Test with external paths configured
