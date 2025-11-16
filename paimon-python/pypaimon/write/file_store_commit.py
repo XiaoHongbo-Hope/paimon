@@ -170,7 +170,7 @@ class FileStoreCommit:
         # Get the appropriate FileIO instance for the path
         # If using external paths with different scheme, create a new FileIO instance
         file_io_to_use = self._get_file_io_for_path(str(manifest_file_path))
-        
+
         new_manifest_list = ManifestFileMeta(
             file_name=new_manifest_file,
             file_size=file_io_to_use.get_file_size(manifest_file_path),
