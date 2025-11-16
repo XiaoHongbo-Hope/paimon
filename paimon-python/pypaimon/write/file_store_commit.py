@@ -167,8 +167,6 @@ class FileStoreCommit:
             raise RuntimeError("Partition value should not be null")
 
         manifest_file_path = self.manifest_file_manager.manifest_path / new_manifest_file
-        # Get the appropriate FileIO instance for the path
-        # If using external paths with different scheme, create a new FileIO instance
         file_io_to_use = self._get_file_io_for_path(str(manifest_file_path))
 
         new_manifest_list = ManifestFileMeta(
@@ -238,8 +236,6 @@ class FileStoreCommit:
                     # Use external_path if available (contains full URL scheme), otherwise use file_path
                     path_to_delete = file.external_path if file.external_path else file.file_path
                     if path_to_delete:
-                        # Get the appropriate FileIO instance for the path
-                        # This ensures we use the same FileIO instance that was used to write the file
                         file_io_to_use = self._get_file_io_for_path(path_to_delete)
                         file_io_to_use.delete_quietly(Path(path_to_delete))
                 except Exception as e:
@@ -249,10 +245,6 @@ class FileStoreCommit:
                     logger.warning(f"Failed to clean up file {path_to_delete} during abort: {e}")
 
     def _get_file_io_for_path(self, path_str: str) -> 'FileIO':
-        """
-        Get the appropriate FileIO instance for the given path.
-        If the path uses a different scheme than the warehouse, create a new FileIO instance.
-        """
         from urllib.parse import urlparse
         from pypaimon.common.file_io import FileIO
 
@@ -278,12 +270,9 @@ class FileStoreCommit:
         path_is_s3 = path_scheme in s3_schemes
         warehouse_is_s3 = warehouse_scheme in s3_schemes
 
-        # If schemes match (both S3/OSS or both file), use existing file_io
         if path_scheme == warehouse_scheme or (path_is_s3 and warehouse_is_s3):
             return self.table.file_io
 
-        # Schemes don't match - create a new FileIO instance for the external path
-        # Use the same catalog options as the warehouse FileIO
         return FileIO(path_str, self.table.file_io.properties)
 
     def close(self):
