@@ -117,13 +117,16 @@ class DataWriter(ABC):
         # Delete any files that were written
         for file_meta in self.committed_files:
             try:
-                if file_meta.file_path:
-                    self.file_io.delete_quietly(file_meta.file_path)
+                # Use external_path if available (contains full URL scheme), otherwise use file_path
+                path_to_delete = file_meta.external_path if file_meta.external_path else file_meta.file_path
+                if path_to_delete:
+                    self.file_io.delete_quietly(path_to_delete)
             except Exception as e:
                 # Log but don't raise - we want to clean up as much as possible
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.warning(f"Failed to delete file {file_meta.file_path} during abort: {e}")
+                path_to_delete = file_meta.external_path if file_meta.external_path else file_meta.file_path
+                logger.warning(f"Failed to delete file {path_to_delete} during abort: {e}")
 
         # Clean up resources
         self.pending_data = None
@@ -165,14 +168,18 @@ class DataWriter(ABC):
         else:
             external_path_str = None
 
+        # Get the appropriate FileIO instance for the path
+        # If using external paths with different scheme, create a new FileIO instance
+        file_io_to_use = self._get_file_io_for_path(file_path)
+
         if self.file_format == CoreOptions.FILE_FORMAT_PARQUET:
-            self.file_io.write_parquet(file_path, data, compression=self.compression)
+            file_io_to_use.write_parquet(file_path, data, compression=self.compression)
         elif self.file_format == CoreOptions.FILE_FORMAT_ORC:
-            self.file_io.write_orc(file_path, data, compression=self.compression)
+            file_io_to_use.write_orc(file_path, data, compression=self.compression)
         elif self.file_format == CoreOptions.FILE_FORMAT_AVRO:
-            self.file_io.write_avro(file_path, data)
+            file_io_to_use.write_avro(file_path, data)
         elif self.file_format == CoreOptions.FILE_FORMAT_BLOB:
-            self.file_io.write_blob(file_path, data, self.blob_as_descriptor)
+            file_io_to_use.write_blob(file_path, data, self.blob_as_descriptor)
         else:
             raise ValueError(f"Unsupported file format: {self.file_format}")
 
@@ -208,7 +215,7 @@ class DataWriter(ABC):
         self.sequence_generator.start = self.sequence_generator.current
         self.committed_files.append(DataFileMeta(
             file_name=file_name,
-            file_size=self.file_io.get_file_size(file_path),
+            file_size=file_io_to_use.get_file_size(file_path),
             row_count=data.num_rows,
             min_key=GenericRow(min_key, self.trimmed_primary_keys_fields),
             max_key=GenericRow(max_key, self.trimmed_primary_keys_fields),
@@ -237,6 +244,40 @@ class DataWriter(ABC):
             # None means all columns in the table have been written
             file_path=str(file_path),
         ))
+
+    def _get_file_io_for_path(self, path: Path) -> 'FileIO':
+        """
+        Get the appropriate FileIO instance for the given path.
+        If the path uses a different scheme than the warehouse, create a new FileIO instance.
+        """
+        from urllib.parse import urlparse
+        from pypaimon.common.file_io import FileIO
+
+        path_str = str(path)
+        parsed = urlparse(path_str)
+        path_scheme = parsed.scheme
+
+        # If no scheme or scheme matches warehouse, use existing file_io
+        if not path_scheme:
+            return self.file_io
+
+        # Check if path scheme matches warehouse scheme
+        warehouse_path_str = str(self.table.table_path)
+        warehouse_parsed = urlparse(warehouse_path_str if warehouse_path_str.startswith(('file://', 's3://', 's3a://', 's3n://', 'oss://', 'hdfs://', 'viewfs://')) else f"file://{warehouse_path_str}")
+        warehouse_scheme = warehouse_parsed.scheme or 'file'
+
+        # Normalize schemes for comparison
+        s3_schemes = {'s3', 's3a', 's3n', 'oss'}
+        path_is_s3 = path_scheme in s3_schemes
+        warehouse_is_s3 = warehouse_scheme in s3_schemes
+
+        # If schemes match (both S3/OSS or both file), use existing file_io
+        if path_scheme == warehouse_scheme or (path_is_s3 and warehouse_is_s3):
+            return self.file_io
+
+        # Schemes don't match - create a new FileIO instance for the external path
+        # Use the same catalog options as the warehouse FileIO
+        return FileIO(path_str, self.file_io.properties)
 
     def _generate_file_path(self, file_name: str) -> Path:
         if self.external_path_provider:

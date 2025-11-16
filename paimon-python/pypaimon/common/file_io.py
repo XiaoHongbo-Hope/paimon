@@ -444,16 +444,29 @@ class FileIO:
 
         path_str = str(path)
         parsed = urlparse(path_str)
-
-        if isinstance(self.filesystem, LocalFileSystem) and parsed.scheme == 'file':
-            return parsed.path
-
-        # Only apply S3-specific path transformation if scheme matches S3/OSS schemes
+        path_scheme = parsed.scheme
         s3_schemes = {'s3', 's3a', 's3n', 'oss'}
-        if isinstance(self.filesystem, S3FileSystem) and parsed.scheme in s3_schemes:
-            if parsed.netloc:
-                return f"{parsed.netloc}{parsed.path}"
-            else:
-                return parsed.path.lstrip('/')
 
-        return path_str
+        # LocalFileSystem: expect file:// or no scheme
+        if isinstance(self.filesystem, LocalFileSystem):
+            if path_scheme and path_scheme != 'file':
+                raise ValueError(
+                    f"Filesystem scheme mismatch: warehouse uses 'file://' but path uses "
+                    f"'{path_scheme}://'. Path: {path_str}"
+                )
+            return parsed.path or path_str
+
+        # S3FileSystem: expect s3/oss schemes
+        if isinstance(self.filesystem, S3FileSystem):
+            if path_scheme in s3_schemes:
+                return f"{parsed.netloc}{parsed.path}" if parsed.netloc else parsed.path.lstrip('/')
+            if path_scheme and path_scheme not in s3_schemes:
+                raise ValueError(
+                    f"Filesystem scheme mismatch: warehouse uses S3/OSS but path uses "
+                    f"'{path_scheme}://'. Path: {path_str}"
+                )
+            # No scheme, assume S3 format
+            return path_str.lstrip('/') if path_str.startswith('/') else path_str
+
+        # Other filesystems (HDFS, etc.)
+        return parsed.path if parsed.path else path_str

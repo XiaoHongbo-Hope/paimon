@@ -226,14 +226,19 @@ class FileStoreCommit:
                 raise RuntimeError(f"Failed to commit snapshot {new_snapshot_id}")
 
     def abort(self, commit_messages: List[CommitMessage]):
+        """Abort commit and delete files. Uses external_path if available to ensure proper scheme handling."""
         for message in commit_messages:
             for file in message.new_files:
                 try:
-                    file_path_obj = Path(file.file_path)
-                    if file_path_obj.exists():
-                        file_path_obj.unlink()
+                    # Use external_path if available (contains full URL scheme), otherwise use file_path
+                    path_to_delete = file.external_path if file.external_path else file.file_path
+                    if path_to_delete:
+                        self.table.file_io.delete_quietly(path_to_delete)
                 except Exception as e:
-                    print(f"Warning: Failed to clean up file {file.file_path}: {e}")
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    path_to_delete = file.external_path if file.external_path else file.file_path
+                    logger.warning(f"Failed to clean up file {path_to_delete} during abort: {e}")
 
     def close(self):
         """Close the FileStoreCommit and release resources."""
