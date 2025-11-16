@@ -175,15 +175,8 @@ class FileStoreTable(Table):
 
         specific_fs = CoreOptions.external_specific_fs(self.options)
 
-        # Join paths back to comma-separated string for processing
-        external_paths_str_joined = ",".join(external_paths_str)
-
-        if not external_paths_str_joined or not external_paths_str_joined.strip():
-            return []
-
         paths = []
-        for path_string in external_paths_str_joined.split(","):
-            path_string = path_string.strip()
+        for path_string in external_paths_str:
             if not path_string:
                 continue
 

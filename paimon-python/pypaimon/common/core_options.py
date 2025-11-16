@@ -108,8 +108,21 @@ class CoreOptions(str, Enum):
         return [path.strip() for path in external_paths_str.split(",") if path.strip()]
 
     @staticmethod
-    def external_path_strategy(options: dict) -> str:
-        return options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY, "none").lower()
+    def external_path_strategy(options: dict) -> 'ExternalPathStrategy':
+        strategy_value = options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY, "none")
+        if strategy_value is None:
+            strategy_value = "none"
+        
+        strategy_str = strategy_value.lower() if isinstance(strategy_value, str) else str(strategy_value).lower()
+        
+        try:
+            return ExternalPathStrategy(strategy_str)
+        except ValueError:
+            valid_values = [e.value for e in ExternalPathStrategy]
+            raise ValueError(
+                f"Could not parse value '{strategy_value}' for key '{CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY}'. "
+                f"Expected one of: {valid_values}"
+            )
 
     @staticmethod
     def external_specific_fs(options: dict) -> Optional[str]:
@@ -118,13 +131,20 @@ class CoreOptions(str, Enum):
     @staticmethod
     def file_compression(options: dict) -> str:
         """Get file compression from options, default to 'zstd'."""
-        return options.get(CoreOptions.FILE_COMPRESSION, "zstd")
+        compression = options.get(CoreOptions.FILE_COMPRESSION, "zstd")
+        # Handle case where FILE_COMPRESSION is explicitly set to None
+        # dict.get() returns the stored None value rather than the default
+        if compression is None:
+            compression = "zstd"
+        return compression
 
     @staticmethod
     def file_format(options: dict, default: Optional[str] = None) -> str:
         if default is None:
             default = CoreOptions.FILE_FORMAT_PARQUET
         file_format = options.get(CoreOptions.FILE_FORMAT, default)
+        if file_format is None:
+            file_format = default
         return file_format.lower() if file_format else file_format
 
 
