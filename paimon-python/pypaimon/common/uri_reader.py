@@ -39,8 +39,24 @@ class UriReader(ABC):
 
     @classmethod
     def get_file_path(cls, uri: str):
-        from urlpath import URL
-        return URL(uri)
+        from urllib.parse import urlparse
+        parsed = urlparse(uri)
+        
+        # If no scheme, assume it's a local path
+        if not parsed.scheme:
+            return uri
+        
+        if parsed.scheme == 'file':
+            if parsed.netloc:
+                return f"{parsed.netloc}{parsed.path}" if parsed.path else parsed.netloc
+            else:
+                return parsed.path or '/'
+        
+        if parsed.netloc:
+            path = parsed.path.lstrip('/')
+            return f"{parsed.netloc}/{path}" if path else parsed.netloc
+        else:
+            return parsed.path.lstrip('/')
 
     @abstractmethod
     def new_input_stream(self, uri: str):

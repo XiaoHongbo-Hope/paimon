@@ -546,6 +546,14 @@ class BlobTest(unittest.TestCase):
 class BlobEndToEndTest(unittest.TestCase):
     """End-to-end tests for blob functionality with schema definition, file writing, and reading."""
 
+    @staticmethod
+    def _to_url(path):
+        """Convert Path to URL for FileIO methods."""
+        if isinstance(path, Path):
+            path_str = str(path)
+            return URL(f"file://{path_str}") if URL else path_str
+        return path
+
     def setUp(self):
         """Set up test environment."""
         self.temp_dir = tempfile.mkdtemp()

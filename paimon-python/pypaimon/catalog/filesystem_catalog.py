@@ -111,16 +111,10 @@ class FileSystemCatalog(Catalog):
     def get_database_path(self, name) -> URL:
         warehouse_url = URL(self.warehouse)
         if warehouse_url.path == '/' or warehouse_url.path == '':
-            # Reconstruct URL without trailing slash
             from urllib.parse import urlparse
             parsed = urlparse(str(warehouse_url))
-            # Remove trailing slash from path
-            clean_path = parsed.path.rstrip('/')
-            if clean_path:
-                warehouse_url = URL(f"{parsed.scheme}://{parsed.netloc}{clean_path}")
-            else:
-                # No path, just scheme://netloc
-                warehouse_url = URL(f"{parsed.scheme}://{parsed.netloc}")
+            clean_path = '/' if parsed.path == '/' or not parsed.path else parsed.path.rstrip('/') or '/'
+            warehouse_url = URL(f"{parsed.scheme}://{parsed.netloc}{clean_path}")
 
         # Join database name (URL handles path joining correctly)
         db_path = warehouse_url / f"{name}{Catalog.DB_SUFFIX}"
