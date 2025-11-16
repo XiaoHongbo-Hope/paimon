@@ -19,8 +19,10 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import splitport, urlparse
+
+from urlpath import URL
 
 import pyarrow
 from packaging.version import parse
@@ -150,65 +152,74 @@ class FileIO:
 
         return LocalFileSystem()
 
-    def new_input_stream(self, path: Path):
-        return self.filesystem.open_input_file(str(path))
+    def new_input_stream(self, path: Union[Path, URL, str]):
+        filesystem_path = self._to_filesystem_path(path)
+        return self.filesystem.open_input_file(filesystem_path)
 
-    def new_output_stream(self, path: Path):
-        parent_dir = path.parent
-        if str(parent_dir) and not self.exists(parent_dir):
-            self.mkdirs(parent_dir)
+    def new_output_stream(self, path: Union[Path, URL, str]):
+        filesystem_path = self._to_filesystem_path(path)
+        parent_dir = Path(filesystem_path).parent
+        if str(parent_dir) and not self.exists(Path(filesystem_path).parent):
+            self.mkdirs(Path(filesystem_path).parent)
 
-        return self.filesystem.open_output_stream(str(path))
+        return self.filesystem.open_output_stream(filesystem_path)
 
-    def get_file_status(self, path: Path):
-        file_infos = self.filesystem.get_file_info([str(path)])
+    def get_file_status(self, path: Union[Path, URL, str]):
+        filesystem_path = self._to_filesystem_path(path)
+        file_infos = self.filesystem.get_file_info([filesystem_path])
         return file_infos[0]
 
-    def list_status(self, path: Path):
-        selector = pyarrow.fs.FileSelector(str(path), recursive=False, allow_not_found=True)
+    def list_status(self, path: Union[Path, URL, str]):
+        filesystem_path = self._to_filesystem_path(path)
+        selector = pyarrow.fs.FileSelector(filesystem_path, recursive=False, allow_not_found=True)
         return self.filesystem.get_file_info(selector)
 
-    def list_directories(self, path: Path):
+    def list_directories(self, path: Union[Path, URL, str]):
         file_infos = self.list_status(path)
         return [info for info in file_infos if info.type == pyarrow.fs.FileType.Directory]
 
-    def exists(self, path: Path) -> bool:
+    def exists(self, path: Union[Path, URL, str]) -> bool:
         try:
-            file_info = self.filesystem.get_file_info([str(path)])[0]
+            filesystem_path = self._to_filesystem_path(path)
+            file_info = self.filesystem.get_file_info([filesystem_path])[0]
             return file_info.type != pyarrow.fs.FileType.NotFound
         except Exception:
             return False
 
-    def delete(self, path: Path, recursive: bool = False) -> bool:
+    def delete(self, path: Union[Path, URL, str], recursive: bool = False) -> bool:
         try:
-            file_info = self.filesystem.get_file_info([str(path)])[0]
+            filesystem_path = self._to_filesystem_path(path)
+            file_info = self.filesystem.get_file_info([filesystem_path])[0]
             if file_info.type == pyarrow.fs.FileType.Directory:
                 if recursive:
-                    self.filesystem.delete_dir_contents(str(path))
+                    self.filesystem.delete_dir_contents(filesystem_path)
                 else:
-                    self.filesystem.delete_dir(str(path))
+                    self.filesystem.delete_dir(filesystem_path)
             else:
-                self.filesystem.delete_file(str(path))
+                self.filesystem.delete_file(filesystem_path)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to delete {path}: {e}")
             return False
 
-    def mkdirs(self, path: Path) -> bool:
+    def mkdirs(self, path: Union[Path, URL, str]) -> bool:
         try:
-            self.filesystem.create_dir(str(path), recursive=True)
+            filesystem_path = self._to_filesystem_path(path)
+            self.filesystem.create_dir(filesystem_path, recursive=True)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to create directory {path}: {e}")
             return False
 
-    def rename(self, src: Path, dst: Path) -> bool:
+    def rename(self, src: Union[Path, URL, str], dst: Union[Path, URL, str]) -> bool:
         try:
-            dst_parent = dst.parent
-            if str(dst_parent) and not self.exists(dst_parent):
-                self.mkdirs(dst_parent)
+            filesystem_src = self._to_filesystem_path(src)
+            filesystem_dst = self._to_filesystem_path(dst)
+            dst_parent = Path(filesystem_dst).parent
+            if str(dst_parent) and not self.exists(Path(filesystem_dst).parent):
+                self.mkdirs(Path(filesystem_dst).parent)
 
-            self.filesystem.move(str(src), str(dst))
+            self.filesystem.move(filesystem_src, filesystem_dst)
             return True
         except Exception as e:
             self.logger.warning(f"Failed to rename {src} to {dst}: {e}")
@@ -278,11 +289,15 @@ class FileIO:
         with self.new_output_stream(path) as output_stream:
             output_stream.write(content.encode('utf-8'))
 
-    def copy_file(self, source_path: Path, target_path: Path, overwrite: bool = False):
+    def copy_file(
+        self, source_path: Union[Path, URL, str], target_path: Union[Path, URL, str], overwrite: bool = False
+    ):
         if not overwrite and self.exists(target_path):
             raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
 
-        self.filesystem.copy_file(str(source_path), str(target_path))
+        filesystem_source = self._to_filesystem_path(source_path)
+        filesystem_target = self._to_filesystem_path(target_path)
+        self.filesystem.copy_file(filesystem_source, filesystem_target)
 
     def copy_files(self, source_directory: Path, target_directory: Path, overwrite: bool = False):
         file_infos = self.list_status(source_directory)
@@ -423,3 +438,46 @@ class FileIO:
         except Exception as e:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write blob file {path}: {e}") from e
+
+    def _to_filesystem_path(self, path: Union[Path, URL, str]) -> str:
+        from pyarrow.fs import LocalFileSystem, S3FileSystem
+
+        path_str = str(path)
+        parsed = urlparse(path_str)
+        path_scheme = parsed.scheme
+        s3_schemes = {'s3', 's3a', 's3n', 'oss'}
+
+        # Check if scheme is actually a Windows drive letter (e.g., C:)
+        # urlparse treats "C:\path" or "C:/path" as scheme="C", which is incorrect
+        is_windows_drive = path_scheme and len(path_scheme) == 1 and path_scheme.isalpha()
+        if is_windows_drive:
+            # This is a Windows path with drive letter, not a URL scheme
+            # Return the original path string as-is for LocalFileSystem to handle
+            path_scheme = None
+
+        # LocalFileSystem: expect file:// or no scheme
+        if isinstance(self.filesystem, LocalFileSystem):
+            if path_scheme and path_scheme != 'file':
+                raise ValueError(
+                    f"Filesystem scheme mismatch: warehouse uses 'file://' but path uses "
+                    f"'{path_scheme}://'. Path: {path_str}"
+                )
+            # For file:// scheme, return just the path; otherwise return the full path string
+            if path_scheme == 'file':
+                return parsed.path or path_str
+            return path_str
+
+        # S3FileSystem: expect s3/oss schemes
+        if isinstance(self.filesystem, S3FileSystem):
+            if path_scheme in s3_schemes:
+                return f"{parsed.netloc}{parsed.path}" if parsed.netloc else parsed.path.lstrip('/')
+            if path_scheme and path_scheme not in s3_schemes:
+                raise ValueError(
+                    f"Filesystem scheme mismatch: warehouse uses S3/OSS but path uses "
+                    f"'{path_scheme}://'. Path: {path_str}"
+                )
+            # No scheme, assume S3 format
+            return path_str.lstrip('/') if path_str.startswith('/') else path_str
+
+        # Other filesystems (HDFS, etc.)
+        return parsed.path if parsed.path else path_str
