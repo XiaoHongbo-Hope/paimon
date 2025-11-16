@@ -112,9 +112,9 @@ class CoreOptions(str, Enum):
         strategy_value = options.get(CoreOptions.DATA_FILE_EXTERNAL_PATHS_STRATEGY, "none")
         if strategy_value is None:
             strategy_value = "none"
-        
+
         strategy_str = strategy_value.lower() if isinstance(strategy_value, str) else str(strategy_value).lower()
-        
+
         try:
             return ExternalPathStrategy(strategy_str)
         except ValueError:
