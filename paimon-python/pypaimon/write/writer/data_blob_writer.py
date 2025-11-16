@@ -249,13 +249,17 @@ class DataBlobWriter(DataWriter):
         file_name = f"data-{uuid.uuid4()}-0.{self.file_format}"
         file_path = self._generate_file_path(file_name)
 
+        # Get the appropriate FileIO instance for the path
+        # If using external paths with different scheme, create a new FileIO instance
+        file_io_to_use = self._get_file_io_for_path(file_path)
+
         # Write file based on format
         if self.file_format == CoreOptions.FILE_FORMAT_PARQUET:
-            self.file_io.write_parquet(file_path, data, compression=self.compression)
+            file_io_to_use.write_parquet(file_path, data, compression=self.compression)
         elif self.file_format == CoreOptions.FILE_FORMAT_ORC:
-            self.file_io.write_orc(file_path, data, compression=self.compression)
+            file_io_to_use.write_orc(file_path, data, compression=self.compression)
         elif self.file_format == CoreOptions.FILE_FORMAT_AVRO:
-            self.file_io.write_avro(file_path, data)
+            file_io_to_use.write_avro(file_path, data)
         else:
             raise ValueError(f"Unsupported file format: {self.file_format}")
 
@@ -263,11 +267,12 @@ class DataBlobWriter(DataWriter):
         is_external_path = self.external_path_provider is not None
         external_path_str = str(file_path) if is_external_path else None
 
-        # Generate metadata
-        return self._create_data_file_meta(file_name, file_path, data, external_path_str)
+        # Generate metadata (pass file_io_to_use for get_file_size)
+        return self._create_data_file_meta(file_name, file_path, data, external_path_str, file_io_to_use)
 
     def _create_data_file_meta(
-        self, file_name: str, file_path: Path, data: pa.Table, external_path: Optional[str] = None
+        self, file_name: str, file_path: Path, data: pa.Table, external_path: Optional[str] = None,
+        file_io_to_use=None
     ) -> DataFileMeta:
         # Column stats (only for normal columns)
         column_stats = {
@@ -286,9 +291,12 @@ class DataBlobWriter(DataWriter):
 
         self.sequence_generator.start = self.sequence_generator.current
 
+        # Use the provided file_io_to_use if available, otherwise fall back to self.file_io
+        file_io_for_size = file_io_to_use if file_io_to_use is not None else self.file_io
+
         return DataFileMeta(
             file_name=file_name,
-            file_size=self.file_io.get_file_size(file_path),
+            file_size=file_io_for_size.get_file_size(file_path),
             row_count=data.num_rows,
             min_key=GenericRow([], []),
             max_key=GenericRow([], []),

@@ -166,9 +166,14 @@ class FileStoreCommit:
         if not all(count == 0 for count in partition_null_counts):
             raise RuntimeError("Partition value should not be null")
 
+        manifest_file_path = self.manifest_file_manager.manifest_path / new_manifest_file
+        # Get the appropriate FileIO instance for the path
+        # If using external paths with different scheme, create a new FileIO instance
+        file_io_to_use = self._get_file_io_for_path(str(manifest_file_path))
+        
         new_manifest_list = ManifestFileMeta(
             file_name=new_manifest_file,
-            file_size=self.table.file_io.get_file_size(self.manifest_file_manager.manifest_path / new_manifest_file),
+            file_size=file_io_to_use.get_file_size(manifest_file_path),
             num_added_files=added_file_count,
             num_deleted_files=deleted_file_count,
             partition_stats=SimpleStats(
