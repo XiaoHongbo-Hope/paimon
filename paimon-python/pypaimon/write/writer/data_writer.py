@@ -21,15 +21,8 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
-
-if TYPE_CHECKING:
-    from urlpath import URL
-else:
-    try:
-        from urlpath import URL
-    except ImportError:
-        URL = None  # type: ignore
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 from pypaimon.common.core_options import CoreOptions
 from pypaimon.manifest.schema.data_file_meta import DataFileMeta
@@ -154,14 +147,33 @@ class DataWriter(ABC):
             return
         file_name = f"data-{uuid.uuid4()}-0.{self.file_format}"
         file_path = self._generate_file_path(file_name)
+        
+        # Check if using external paths
+        external_path_provider = self.table.path_factory().create_external_path_provider(
+            self.partition, self.bucket
+        )
+        is_external_path = external_path_provider is not None
+        if is_external_path:
+            # Get external path with scheme preserved
+            external_path = external_path_provider.get_next_external_data_path(file_name)
+            external_path_str = str(external_path) if external_path else None
+            # Use external path for writing
+            file_path = external_path_str
+        else:
+            external_path_str = None
+
+        # Get the appropriate FileIO instance for the path
+        # If using external paths with different scheme, create a new FileIO instance
+        file_io_to_use = self._get_file_io_for_path(file_path)
+
         if self.file_format == CoreOptions.FILE_FORMAT_PARQUET:
-            self.file_io.write_parquet(file_path, data, compression=self.compression)
+            file_io_to_use.write_parquet(file_path, data, compression=self.compression)
         elif self.file_format == CoreOptions.FILE_FORMAT_ORC:
-            self.file_io.write_orc(file_path, data, compression=self.compression)
+            file_io_to_use.write_orc(file_path, data, compression=self.compression)
         elif self.file_format == CoreOptions.FILE_FORMAT_AVRO:
-            self.file_io.write_avro(file_path, data)
+            file_io_to_use.write_avro(file_path, data)
         elif self.file_format == CoreOptions.FILE_FORMAT_BLOB:
-            self.file_io.write_blob(file_path, data, self.blob_as_descriptor)
+            file_io_to_use.write_blob(file_path, data, self.blob_as_descriptor)
         else:
             raise ValueError(f"Unsupported file format: {self.file_format}")
 
@@ -197,7 +209,7 @@ class DataWriter(ABC):
         self.sequence_generator.start = self.sequence_generator.current
         self.committed_files.append(DataFileMeta(
             file_name=file_name,
-            file_size=self.file_io.get_file_size(file_path),
+            file_size=file_io_to_use.get_file_size(file_path),
             row_count=data.num_rows,
             min_key=GenericRow(min_key, self.trimmed_primary_keys_fields),
             max_key=GenericRow(max_key, self.trimmed_primary_keys_fields),
@@ -220,23 +232,31 @@ class DataWriter(ABC):
             delete_row_count=0,
             file_source=0,
             value_stats_cols=None,  # None means all columns in the data have statistics
-            external_path=None,
+            external_path=external_path_str,
             first_row_id=None,
             write_cols=self.write_cols,
             # None means all columns in the table have been written
-            file_path=str(file_path),
+            file_path=file_path,
         ))
 
-    def _generate_file_path(self, file_name: str) -> Union[Path, 'URL']:
-        path_builder = self.table.table_path
+    def _generate_file_path(self, file_name: str) -> str:
+        path_builder = str(self.table.table_path)
 
         for i, field_name in enumerate(self.table.partition_keys):
-            path_builder = path_builder / (field_name + "=" + str(self.partition[i]))
+            if path_builder.endswith('/'):
+                path_builder = f"{path_builder}{field_name}={str(self.partition[i])}"
+            else:
+                path_builder = f"{path_builder}/{field_name}={str(self.partition[i])}"
+        
         if self.bucket == BucketMode.POSTPONE_BUCKET.value:
             bucket_name = "postpone"
         else:
             bucket_name = str(self.bucket)
-        path_builder = path_builder / ("bucket-" + bucket_name) / file_name
+        
+        if path_builder.endswith('/'):
+            path_builder = f"{path_builder}bucket-{bucket_name}/{file_name}"
+        else:
+            path_builder = f"{path_builder}/bucket-{bucket_name}/{file_name}"
 
         return path_builder
 
@@ -261,6 +281,43 @@ class DataWriter(ABC):
                 right = mid - 1
 
         return best_split
+
+    def _get_file_io_for_path(self, path: str) -> 'FileIO':
+        """
+        Get the appropriate FileIO instance for the given path.
+        If the path uses a different scheme than the warehouse, create a new FileIO instance.
+        """
+        from pypaimon.common.file_io import FileIO
+
+        parsed = urlparse(path)
+        path_scheme = parsed.scheme
+
+        # If no scheme or scheme matches warehouse, use existing file_io
+        if not path_scheme:
+            return self.file_io
+
+        # Check if path scheme matches warehouse scheme
+        warehouse_path_str = str(self.table.table_path)
+        supported_schemes = ('file://', 's3://', 's3a://', 's3n://', 'oss://', 'hdfs://', 'viewfs://')
+        if warehouse_path_str.startswith(supported_schemes):
+            warehouse_url = warehouse_path_str
+        else:
+            warehouse_url = f"file://{warehouse_path_str}"
+        warehouse_parsed = urlparse(warehouse_url)
+        warehouse_scheme = warehouse_parsed.scheme or 'file'
+
+        # Normalize schemes for comparison
+        s3_schemes = {'s3', 's3a', 's3n', 'oss'}
+        path_is_s3 = path_scheme in s3_schemes
+        warehouse_is_s3 = warehouse_scheme in s3_schemes
+
+        # If schemes match (both S3/OSS or both file), use existing file_io
+        if path_scheme == warehouse_scheme or (path_is_s3 and warehouse_is_s3):
+            return self.file_io
+
+        # Schemes don't match - create a new FileIO instance for the external path
+        # Use the same catalog options as the warehouse FileIO
+        return FileIO(path, self.file_io.properties)
 
     @staticmethod
     def _get_column_stats(record_batch: pa.RecordBatch, column_name: str) -> Dict:

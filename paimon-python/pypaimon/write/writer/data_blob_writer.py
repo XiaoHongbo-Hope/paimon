@@ -20,15 +20,7 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
-
-if TYPE_CHECKING:
-    from urlpath import URL
-else:
-    try:
-        from urlpath import URL
-    except ImportError:
-        URL = None  # type: ignore
+from typing import List, Optional, Tuple
 
 import pyarrow as pa
 
@@ -270,7 +262,7 @@ class DataBlobWriter(DataWriter):
         # Generate metadata
         return self._create_data_file_meta(file_name, file_path, data)
 
-    def _create_data_file_meta(self, file_name: str, file_path: Union[Path, 'URL'], data: pa.Table) -> DataFileMeta:
+    def _create_data_file_meta(self, file_name: str, file_path: str, data: pa.Table) -> DataFileMeta:
         # Column stats (only for normal columns)
         column_stats = {
             field.name: self._get_column_stats(data, field.name)

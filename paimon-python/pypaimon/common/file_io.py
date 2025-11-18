@@ -19,9 +19,7 @@ import logging
 import os
 import subprocess
 from typing import Any, Dict, List, Optional
-from urllib.parse import splitport, urlparse
-
-from urlpath import URL
+from urllib.parse import splitport, urlparse, urljoin
 
 import pyarrow
 from packaging.version import parse
@@ -151,33 +149,43 @@ class FileIO:
 
         return LocalFileSystem()
 
-    def new_input_stream(self, path: URL):
+    def new_input_stream(self, path: str):
         path_str = self.to_filesystem_path(path)
         return self.filesystem.open_input_file(path_str)
 
-    def new_output_stream(self, path: URL):
+    def new_output_stream(self, path: str):
         path_str = self.to_filesystem_path(path)
-        parent_dir = path.parent
-        if str(parent_dir) and not self.exists(parent_dir):
+        # Get parent directory using urllib.parse
+        parsed = urlparse(path)
+        if parsed.path:
+            parent_path = '/'.join(parsed.path.rstrip('/').split('/')[:-1])
+            if parent_path:
+                parent_dir = f"{parsed.scheme}://{parsed.netloc}{parent_path}" if parsed.scheme else parent_path
+            else:
+                parent_dir = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else "/"
+        else:
+            parent_dir = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else ""
+        
+        if parent_dir and not self.exists(parent_dir):
             self.mkdirs(parent_dir)
 
         return self.filesystem.open_output_stream(path_str)
 
-    def get_file_status(self, path: URL):
+    def get_file_status(self, path: str):
         path_str = self.to_filesystem_path(path)
         file_infos = self.filesystem.get_file_info([path_str])
         return file_infos[0]
 
-    def list_status(self, path: URL):
+    def list_status(self, path: str):
         path_str = self.to_filesystem_path(path)
         selector = pyarrow.fs.FileSelector(path_str, recursive=False, allow_not_found=True)
         return self.filesystem.get_file_info(selector)
 
-    def list_directories(self, path: URL):
+    def list_directories(self, path: str):
         file_infos = self.list_status(path)
         return [info for info in file_infos if info.type == pyarrow.fs.FileType.Directory]
 
-    def exists(self, path: URL) -> bool:
+    def exists(self, path: str) -> bool:
         try:
             path_str = self.to_filesystem_path(path)
             file_info = self.filesystem.get_file_info([path_str])[0]
@@ -186,7 +194,7 @@ class FileIO:
         except Exception:
             return False
 
-    def delete(self, path: URL, recursive: bool = False) -> bool:
+    def delete(self, path: str, recursive: bool = False) -> bool:
         try:
             path_str = self.to_filesystem_path(path)
             file_info = self.filesystem.get_file_info([path_str])[0]
@@ -202,7 +210,7 @@ class FileIO:
             self.logger.warning(f"Failed to delete {path}: {e}")
             return False
 
-    def mkdirs(self, path: URL) -> bool:
+    def mkdirs(self, path: str) -> bool:
         try:
             path_str = self.to_filesystem_path(path)
             self.filesystem.create_dir(path_str, recursive=True)
@@ -211,12 +219,20 @@ class FileIO:
             self.logger.warning(f"Failed to create directory {path}: {e}")
             return False
 
-    def rename(self, src: URL, dst: URL) -> bool:
+    def rename(self, src: str, dst: str) -> bool:
         try:
             # Get parent directory
-            dst_parent = dst.parent
+            parsed = urlparse(dst)
+            if parsed.path:
+                parent_path = '/'.join(parsed.path.rstrip('/').split('/')[:-1])
+                if parent_path:
+                    dst_parent = f"{parsed.scheme}://{parsed.netloc}{parent_path}" if parsed.scheme else parent_path
+                else:
+                    dst_parent = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else "/"
+            else:
+                dst_parent = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else ""
 
-            if str(dst_parent) and not self.exists(dst_parent):
+            if dst_parent and not self.exists(dst_parent):
                 self.mkdirs(dst_parent)
 
             src_str = self.to_filesystem_path(src)
@@ -227,7 +243,7 @@ class FileIO:
             self.logger.warning(f"Failed to rename {src} to {dst}: {e}")
             return False
 
-    def delete_quietly(self, path: URL):
+    def delete_quietly(self, path: str):
         if self.logger.isEnabledFor(logging.DEBUG):
             self.logger.debug(f"Ready to delete {path}")
 
@@ -237,11 +253,11 @@ class FileIO:
         except Exception:
             self.logger.warning(f"Exception occurs when deleting file {path}", exc_info=True)
 
-    def delete_files_quietly(self, files: List[URL]):
+    def delete_files_quietly(self, files: List[str]):
         for file_path in files:
             self.delete_quietly(file_path)
 
-    def delete_directory_quietly(self, directory: URL):
+    def delete_directory_quietly(self, directory: str):
         if self.logger.isEnabledFor(logging.DEBUG):
             self.logger.debug(f"Ready to delete {directory}")
 
@@ -251,30 +267,30 @@ class FileIO:
         except Exception:
             self.logger.warning(f"Exception occurs when deleting directory {directory}", exc_info=True)
 
-    def get_file_size(self, path: URL) -> int:
+    def get_file_size(self, path: str) -> int:
         file_info = self.get_file_status(path)
         if file_info.size is None:
             raise ValueError(f"File size not available for {path}")
         return file_info.size
 
-    def is_dir(self, path: URL) -> bool:
+    def is_dir(self, path: str) -> bool:
         file_info = self.get_file_status(path)
         return file_info.type == pyarrow.fs.FileType.Directory
 
-    def check_or_mkdirs(self, path: URL):
+    def check_or_mkdirs(self, path: str):
         if self.exists(path):
             if not self.is_dir(path):
                 raise ValueError(f"The path '{path}' should be a directory.")
         else:
             self.mkdirs(path)
 
-    def read_file_utf8(self, path: URL) -> str:
+    def read_file_utf8(self, path: str) -> str:
         with self.new_input_stream(path) as input_stream:
             return input_stream.read().decode('utf-8')
 
-    def try_to_write_atomic(self, path: URL, content: str) -> bool:
+    def try_to_write_atomic(self, path: str, content: str) -> bool:
         # Create temp path
-        temp_path = URL(str(path) + ".tmp")
+        temp_path = path + ".tmp"
         success = False
         try:
             self.write_file(temp_path, content, False)
@@ -284,15 +300,15 @@ class FileIO:
                 self.delete_quietly(temp_path)
             return success
 
-    def write_file(self, path: URL, content: str, overwrite: bool = False):
+    def write_file(self, path: str, content: str, overwrite: bool = False):
         with self.new_output_stream(path) as output_stream:
             output_stream.write(content.encode('utf-8'))
 
-    def overwrite_file_utf8(self, path: URL, content: str):
+    def overwrite_file_utf8(self, path: str, content: str):
         with self.new_output_stream(path) as output_stream:
             output_stream.write(content.encode('utf-8'))
 
-    def copy_file(self, source_path: URL, target_path: URL, overwrite: bool = False):
+    def copy_file(self, source_path: str, target_path: str, overwrite: bool = False):
         if not overwrite and self.exists(target_path):
             raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
 
@@ -338,7 +354,7 @@ class FileIO:
 
         return None
 
-    def write_parquet(self, path: URL, data: pyarrow.Table, compression: str = 'snappy', **kwargs):
+    def write_parquet(self, path: str, data: pyarrow.Table, compression: str = 'snappy', **kwargs):
         try:
             import pyarrow.parquet as pq
 
@@ -349,7 +365,7 @@ class FileIO:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write Parquet file {path}: {e}") from e
 
-    def write_orc(self, path: URL, data: pyarrow.Table, compression: str = 'zstd', **kwargs):
+    def write_orc(self, path: str, data: pyarrow.Table, compression: str = 'zstd', **kwargs):
         try:
             """Write ORC file using PyArrow ORC writer."""
             import sys
@@ -371,7 +387,7 @@ class FileIO:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write ORC file {path}: {e}") from e
 
-    def write_avro(self, path: URL, data: pyarrow.Table, avro_schema: Optional[Dict[str, Any]] = None, **kwargs):
+    def write_avro(self, path: str, data: pyarrow.Table, avro_schema: Optional[Dict[str, Any]] = None, **kwargs):
         import fastavro
         if avro_schema is None:
             from pypaimon.schema.data_types import PyarrowFieldParser
@@ -389,7 +405,7 @@ class FileIO:
         with self.new_output_stream(path) as output_stream:
             fastavro.writer(output_stream, avro_schema, records, **kwargs)
 
-    def write_blob(self, path: URL, data: pyarrow.Table, blob_as_descriptor: bool, **kwargs):
+    def write_blob(self, path: str, data: pyarrow.Table, blob_as_descriptor: bool, **kwargs):
         try:
             # Validate input constraints
             if data.num_columns != 1:
@@ -443,11 +459,11 @@ class FileIO:
             self.delete_quietly(path)
             raise RuntimeError(f"Failed to write blob file {path}: {e}") from e
 
-    def to_filesystem_path(self, path: URL) -> str:
+    def to_filesystem_path(self, path: str) -> str:
         from pyarrow.fs import S3FileSystem
         import re
 
-        parsed = urlparse(str(path))
+        parsed = urlparse(path)
         if isinstance(self.filesystem, S3FileSystem):
             if parsed.scheme:
                 if parsed.netloc:

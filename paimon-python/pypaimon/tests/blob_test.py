@@ -21,11 +21,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-try:
-    from urlpath import URL
-except ImportError:
-    URL = None  # type: ignore
-
 import pyarrow as pa
 
 from pypaimon import CatalogFactory
@@ -45,14 +40,11 @@ class MockFileIO:
 
     def get_file_size(self, path: str) -> int:
         """Get file size."""
-        path_obj = URL(path) if URL else path
-        return self._file_io.get_file_size(path_obj)
+        return self._file_io.get_file_size(path)
 
     def new_input_stream(self, path):
         """Create new input stream for reading."""
-        if URL and not isinstance(path, (str, URL, type(None))):
-            path = URL(str(path))
-        elif not URL and not isinstance(path, (str, type(None))):
+        if not isinstance(path, (str, type(None))):
             path = str(path)
         return self._file_io.new_input_stream(path)
 
@@ -62,11 +54,11 @@ class BlobTest(unittest.TestCase):
 
     @staticmethod
     def _to_url(path):
-        """Convert Path to URL for FileIO methods."""
+        """Convert Path to string for FileIO methods."""
         if isinstance(path, Path):
             path_str = str(path)
-            return URL(f"file://{path_str}") if URL else path_str
-        return path
+            return f"file://{path_str}"
+        return str(path) if path else path
 
     def setUp(self):
         """Set up test environment with temporary file."""
@@ -548,11 +540,11 @@ class BlobEndToEndTest(unittest.TestCase):
 
     @staticmethod
     def _to_url(path):
-        """Convert Path to URL for FileIO methods."""
+        """Convert Path to string for FileIO methods."""
         if isinstance(path, Path):
             path_str = str(path)
-            return URL(f"file://{path_str}") if URL else path_str
-        return path
+            return f"file://{path_str}"
+        return str(path) if path else path
 
     def setUp(self):
         """Set up test environment."""

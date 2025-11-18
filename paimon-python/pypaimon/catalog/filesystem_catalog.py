@@ -18,8 +18,6 @@
 
 from typing import List, Optional, Union
 
-from urlpath import URL
-
 from pypaimon.catalog.catalog import Catalog
 from pypaimon.catalog.catalog_environment import CatalogEnvironment
 from pypaimon.catalog.catalog_exception import (DatabaseAlreadyExistException,
@@ -108,20 +106,33 @@ class FileSystemCatalog(Catalog):
             raise TableNotExistException(identifier)
         return table_schema
 
-    def get_database_path(self, name) -> URL:
-        warehouse_url = URL(self.warehouse)
-        if warehouse_url.path == '/' or warehouse_url.path == '':
-            from urllib.parse import urlparse
-            parsed = urlparse(str(warehouse_url))
-            clean_path = '/' if parsed.path == '/' or not parsed.path else parsed.path.rstrip('/') or '/'
-            warehouse_url = URL(f"{parsed.scheme}://{parsed.netloc}{clean_path}")
-
-        # Join database name (URL handles path joining correctly)
-        db_path = warehouse_url / f"{name}{Catalog.DB_SUFFIX}"
+    def get_database_path(self, name) -> str:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(self.warehouse)
+        
+        # Handle root path '/'
+        if parsed.path == '/' or parsed.path == '':
+            clean_path = '/'
+        else:
+            clean_path = parsed.path.rstrip('/') or '/'
+        
+        # Reconstruct warehouse URL
+        warehouse_url = urlunparse((parsed.scheme, parsed.netloc, clean_path, parsed.params, parsed.query, parsed.fragment))
+        
+        # Join database name
+        if warehouse_url.endswith('/'):
+            db_path = f"{warehouse_url}{name}{Catalog.DB_SUFFIX}"
+        else:
+            db_path = f"{warehouse_url}/{name}{Catalog.DB_SUFFIX}"
         return db_path
 
-    def get_table_path(self, identifier: Identifier) -> URL:
-        return self.get_database_path(identifier.get_database_name()) / identifier.get_table_name()
+    def get_table_path(self, identifier: Identifier) -> str:
+        db_path = self.get_database_path(identifier.get_database_name())
+        table_name = identifier.get_table_name()
+        if db_path.endswith('/'):
+            return f"{db_path}{table_name}"
+        else:
+            return f"{db_path}/{table_name}"
 
     def commit_snapshot(
             self,
