@@ -316,18 +316,24 @@ class FileIO:
         target_str = self.to_filesystem_path(target_path)
         self.filesystem.copy_file(source_str, target_str)
 
-    def copy_files(self, source_directory: URL, target_directory: URL, overwrite: bool = False):
+    def copy_files(self, source_directory: str, target_directory: str, overwrite: bool = False):
         file_infos = self.list_status(source_directory)
         for file_info in file_infos:
             if file_info.type == pyarrow.fs.FileType.File:
-                # file_info.path is already a string from filesystem (without scheme)
-                # Reconstruct source_file URL by joining with source_directory
-                source_file = source_directory / file_info.path.split('/')[-1]
+                # Reconstruct source_file by joining with source_directory
+                file_name = file_info.path.split('/')[-1]
+                if source_directory.endswith('/'):
+                    source_file = f"{source_directory}{file_name}"
+                else:
+                    source_file = f"{source_directory}/{file_name}"
                 # Build target path
-                target_file = target_directory / file_info.path.split('/')[-1]
+                if target_directory.endswith('/'):
+                    target_file = f"{target_directory}{file_name}"
+                else:
+                    target_file = f"{target_directory}/{file_name}"
                 self.copy_file(source_file, target_file, overwrite)
 
-    def read_overwritten_file_utf8(self, path: URL) -> Optional[str]:
+    def read_overwritten_file_utf8(self, path: str) -> Optional[str]:
         retry_number = 0
         exception = None
         while retry_number < 5:

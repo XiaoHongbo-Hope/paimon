@@ -57,15 +57,17 @@ def oss_blob_as_descriptor():
     table = catalog.get_table("test_db.blob_uri_scheme_test")
 
     # Create external blob file in OSS
-    from urlpath import URL
-    external_blob_uri = URL(warehouse) / "external_blob_scheme_test.bin"
+    if warehouse.endswith('/'):
+        external_blob_uri = f"{warehouse}external_blob_scheme_test.bin"
+    else:
+        external_blob_uri = f"{warehouse}/external_blob_scheme_test.bin"
     blob_content = b'This is external blob data'
 
     with table.file_io.new_output_stream(external_blob_uri) as out_stream:
         out_stream.write(blob_content)
 
     # Create BlobDescriptor with OSS scheme
-    blob_descriptor = BlobDescriptor(str(external_blob_uri), 0, len(blob_content))
+    blob_descriptor = BlobDescriptor(external_blob_uri, 0, len(blob_content))
     descriptor_bytes = blob_descriptor.serialize()
 
     # Write the descriptor bytes to the table

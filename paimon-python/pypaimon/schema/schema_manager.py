@@ -16,9 +16,8 @@
 # limitations under the License.
 ################################################################################
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Union
 
-from urlpath import URL
 from pypaimon.common.file_io import FileIO
 from pypaimon.common.json_util import JSON
 from pypaimon.schema.schema import Schema
@@ -27,11 +26,15 @@ from pypaimon.schema.table_schema import TableSchema
 
 class SchemaManager:
 
-    def __init__(self, file_io: FileIO, table_path: URL):
+    def __init__(self, file_io: FileIO, table_path: Union[Path, str]):
         self.schema_prefix = "schema-"
         self.file_io = file_io
-        self.table_path = table_path
-        self.schema_path = table_path / "schema"
+        self.table_path = str(table_path) if isinstance(table_path, Path) else table_path
+        table_path_str = self.table_path
+        if table_path_str.endswith('/'):
+            self.schema_path = f"{table_path_str}schema"
+        else:
+            self.schema_path = f"{table_path_str}/schema"
         self.schema_cache = {}
 
     def latest(self) -> Optional['TableSchema']:
@@ -66,8 +69,11 @@ class SchemaManager:
         except Exception as e:
             raise RuntimeError(f"Failed to commit schema: {e}") from e
 
-    def _to_schema_path(self, schema_id: int) -> URL:
-        return self.schema_path / f"{self.schema_prefix}{schema_id}"
+    def _to_schema_path(self, schema_id: int) -> str:
+        if self.schema_path.endswith('/'):
+            return f"{self.schema_path}{self.schema_prefix}{schema_id}"
+        else:
+            return f"{self.schema_path}/{self.schema_prefix}{schema_id}"
 
     def get_schema(self, schema_id: int) -> Optional[TableSchema]:
         if schema_id not in self.schema_cache:
