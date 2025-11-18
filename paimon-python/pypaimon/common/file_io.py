@@ -20,7 +20,7 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import splitport, urlparse, urljoin, urlunparse
+from urllib.parse import splitport, urlparse
 
 import pyarrow
 from packaging.version import parse
@@ -270,7 +270,6 @@ class FileIO:
             return input_stream.read().decode('utf-8')
 
     def try_to_write_atomic(self, path: str, content: str) -> bool:
-        # Create temp path
         temp_path = path + ".tmp"
         success = False
         try:
@@ -444,12 +443,17 @@ class FileIO:
 
         parsed = urlparse(path)
         normalized_path = re.sub(r'/+', '/', parsed.path) if parsed.path else ''
-        
+
         if isinstance(self.filesystem, S3FileSystem):
             # For S3, return "bucket/path" format
-            if parsed.scheme and parsed.netloc:
-                path_part = normalized_path.lstrip('/')
-                return f"{parsed.netloc}/{path_part}" if path_part else parsed.netloc
+            if parsed.scheme:
+                if parsed.netloc:
+                    # Has netloc (bucket): return "bucket/path" format
+                    path_part = normalized_path.lstrip('/')
+                    return f"{parsed.netloc}/{path_part}" if path_part else parsed.netloc
+                else:
+                    # Has scheme but no netloc: return path without scheme
+                    return normalized_path.lstrip('/')
             return str(path)
 
         # For other filesystems, return path without scheme

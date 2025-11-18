@@ -108,9 +108,6 @@ class FileSystemCatalog(Catalog):
 
     def get_database_path(self, name) -> str:
         warehouse = self.warehouse.rstrip('/')
-        # Handle root path: file:/// -> file://
-        if warehouse.endswith('://'):
-            return f"{warehouse}{name}{Catalog.DB_SUFFIX}"
         return f"{warehouse}/{name}{Catalog.DB_SUFFIX}"
 
     def get_table_path(self, identifier: Identifier) -> str:

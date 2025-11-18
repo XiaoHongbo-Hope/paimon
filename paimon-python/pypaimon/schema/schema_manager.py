@@ -29,10 +29,7 @@ class SchemaManager:
         self.schema_prefix = "schema-"
         self.file_io = file_io
         self.table_path = table_path
-        if table_path.endswith('/'):
-            self.schema_path = f"{table_path}schema"
-        else:
-            self.schema_path = f"{table_path}/schema"
+        self.schema_path = f"{table_path.rstrip('/')}/schema"
         self.schema_cache = {}
 
     def latest(self) -> Optional['TableSchema']:
@@ -68,10 +65,7 @@ class SchemaManager:
             raise RuntimeError(f"Failed to commit schema: {e}") from e
 
     def _to_schema_path(self, schema_id: int) -> str:
-        if self.schema_path.endswith('/'):
-            return f"{self.schema_path}{self.schema_prefix}{schema_id}"
-        else:
-            return f"{self.schema_path}/{self.schema_prefix}{schema_id}"
+        return f"{self.schema_path.rstrip('/')}/{self.schema_prefix}{schema_id}"
 
     def get_schema(self, schema_id: int) -> Optional[TableSchema]:
         if schema_id not in self.schema_cache:
@@ -92,7 +86,7 @@ class SchemaManager:
 
         versions = []
         for status in statuses:
-            name = Path(status.path).name
+            name = status.path.split('/')[-1]
             if name.startswith(self.schema_prefix):
                 try:
                     version = int(name[len(self.schema_prefix):])

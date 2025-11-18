@@ -39,12 +39,11 @@ class UriReader(ABC):
 
     @classmethod
     def get_file_path(cls, uri: str):
-        from urllib.parse import urlparse
-        parsed = urlparse(uri)
-        if parsed.scheme == 'file':
-            return parsed.path
-        elif parsed.scheme and parsed.scheme != '':
-            return f"{parsed.netloc}{parsed.path}"
+        parsed_uri = urlparse(uri)
+        if parsed_uri.scheme == 'file':
+            return parsed_uri.path
+        elif parsed_uri.scheme and parsed_uri.scheme != '':
+            return f"{parsed_uri.netloc}{parsed_uri.path}"
         else:
             return uri
 

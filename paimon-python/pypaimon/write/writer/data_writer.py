@@ -20,7 +20,6 @@ import pyarrow.compute as pc
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from pypaimon.common.core_options import CoreOptions
@@ -223,20 +222,14 @@ class DataWriter(ABC):
         path_builder = str(self.table.table_path)
 
         for i, field_name in enumerate(self.table.partition_keys):
-            if path_builder.endswith('/'):
-                path_builder = f"{path_builder}{field_name}={str(self.partition[i])}"
-            else:
-                path_builder = f"{path_builder}/{field_name}={str(self.partition[i])}"
-        
+            path_builder = f"{path_builder.rstrip('/')}/{field_name}={str(self.partition[i])}"
+
         if self.bucket == BucketMode.POSTPONE_BUCKET.value:
             bucket_name = "postpone"
         else:
             bucket_name = str(self.bucket)
-        
-        if path_builder.endswith('/'):
-            path_builder = f"{path_builder}bucket-{bucket_name}/{file_name}"
-        else:
-            path_builder = f"{path_builder}/bucket-{bucket_name}/{file_name}"
+
+        path_builder = f"{path_builder.rstrip('/')}/bucket-{bucket_name}/{file_name}"
 
         return path_builder
 
