@@ -70,8 +70,9 @@ class FileUriReader(UriReader):
 
     def new_input_stream(self, uri: str):
         try:
-            path = self.get_file_path(uri)
-            return self._file_io.new_input_stream(path)
+            # Pass the full URI with scheme to FileIO.new_input_stream
+            # FileIO.to_filesystem_path will handle the URI parsing and conversion
+            return self._file_io.new_input_stream(uri)
         except Exception as e:
             raise IOError(f"Failed to read file {uri}: {e}")
 

@@ -15,8 +15,7 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
-from pathlib import Path
-from typing import Optional, List, Union
+from typing import Optional, List
 
 from pypaimon.common.file_io import FileIO
 from pypaimon.common.json_util import JSON
@@ -26,15 +25,14 @@ from pypaimon.schema.table_schema import TableSchema
 
 class SchemaManager:
 
-    def __init__(self, file_io: FileIO, table_path: Union[Path, str]):
+    def __init__(self, file_io: FileIO, table_path: str):
         self.schema_prefix = "schema-"
         self.file_io = file_io
-        self.table_path = str(table_path) if isinstance(table_path, Path) else table_path
-        table_path_str = self.table_path
-        if table_path_str.endswith('/'):
-            self.schema_path = f"{table_path_str}schema"
+        self.table_path = table_path
+        if table_path.endswith('/'):
+            self.schema_path = f"{table_path}schema"
         else:
-            self.schema_path = f"{table_path_str}/schema"
+            self.schema_path = f"{table_path}/schema"
         self.schema_cache = {}
 
     def latest(self) -> Optional['TableSchema']:
