@@ -17,9 +17,6 @@ limitations under the License.
 """
 from typing import Any, Callable, Dict, List, Optional, Union
 
-import pyarrow
-from packaging.version import parse
-
 from pypaimon.api.api_response import GetTableResponse, PagedList
 from pypaimon.api.options import Options
 from pypaimon.api.rest_api import RESTApi
@@ -223,8 +220,7 @@ class RESTCatalog(Catalog):
             catalog_loader=self.catalog_loader(),
             supports_version_management=True  # REST catalogs support version management
         )
-        # Use the path from server response directly (may include scheme)
-        # This matches Java's behavior: Path path = new Path(schema.options().get(PATH.key()));
+        # Use the path from server response directly (do not trim scheme)
         table_path = schema.options.get(CoreOptions.PATH)
         table = self.create(data_file_io(table_path),
                             table_path,

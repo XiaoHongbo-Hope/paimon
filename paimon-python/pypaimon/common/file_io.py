@@ -453,11 +453,14 @@ class FileIO:
                     return f"{parsed.netloc}/{path_part}" if path_part else parsed.netloc
                 else:
                     # Has scheme but no netloc: return path without scheme
-                    return normalized_path.lstrip('/')
+                    result = normalized_path.lstrip('/')
+                    return result if result else '.'
             return str(path)
 
-        # For other filesystems, return path without scheme
         if parsed.scheme:
+            # Handle empty path: return '.' for current directory
+            if not normalized_path:
+                return '.'
             return normalized_path
 
         return str(path)
