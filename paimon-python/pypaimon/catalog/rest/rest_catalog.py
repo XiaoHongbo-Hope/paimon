@@ -15,7 +15,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import urlparse
 
@@ -233,14 +232,14 @@ class RESTCatalog(Catalog):
             table_path = path_parsed.netloc + path_parsed.path \
                 if parse(pyarrow.__version__) >= parse("7.0.0") else path_parsed.path[1:]
         table = self.create(data_file_io(path),
-                            Path(table_path),
+                            table_path,
                             schema,
                             catalog_env)
         return table
 
     @staticmethod
     def create(file_io: FileIO,
-               table_path: Union[Path, str],
+               table_path: str,
                table_schema: TableSchema,
                catalog_environment: CatalogEnvironment
                ) -> FileStoreTable:

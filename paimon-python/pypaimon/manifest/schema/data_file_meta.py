@@ -19,7 +19,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from pypaimon.manifest.schema.simple_stats import (KEY_STATS_SCHEMA, VALUE_STATS_SCHEMA,
                                                    SimpleStats)
@@ -53,26 +53,13 @@ class DataFileMeta:
     # not a schema field, just for internal usage
     file_path: str = None
 
-    def set_file_path(self, table_path: Union[Path, str], partition: GenericRow, bucket: int):
-        """
-        Set file path, preserving URI scheme.
-        """
-        path_builder = str(table_path) if isinstance(table_path, Path) else table_path
-
-        # Build full path with partition and bucket
+    def set_file_path(self, table_path: str, partition: GenericRow, bucket: int):
+        path_builder = Path(table_path)
         partition_dict = partition.to_dict()
         for field_name, field_value in partition_dict.items():
-            if path_builder.endswith('/'):
-                path_builder = f"{path_builder}{field_name}={str(field_value)}"
-            else:
-                path_builder = f"{path_builder}/{field_name}={str(field_value)}"
-        
-        if path_builder.endswith('/'):
-            path_builder = f"{path_builder}bucket-{str(bucket)}/{self.file_name}"
-        else:
-            path_builder = f"{path_builder}/bucket-{str(bucket)}/{self.file_name}"
-        
-        self.file_path = path_builder
+            path_builder = path_builder / (field_name + "=" + str(field_value))
+        path_builder = path_builder / ("bucket-" + str(bucket)) / self.file_name
+        self.file_path = str(path_builder)
 
     def copy_without_stats(self) -> 'DataFileMeta':
         """Create a new DataFileMeta without value statistics."""

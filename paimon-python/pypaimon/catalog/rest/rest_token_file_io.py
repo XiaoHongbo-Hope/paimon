@@ -18,8 +18,7 @@ limitations under the License.
 import logging
 import threading
 import time
-from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 
 from pyarrow._fs import FileSystem
 
@@ -46,8 +45,8 @@ class RESTTokenFileIO(FileIO):
         self.properties.update(self.token.token)
         return super()._initialize_oss_fs(path)
 
-    def new_output_stream(self, path: Union[Path, str]):
-        return self.filesystem.open_output_stream(str(path))
+    def new_output_stream(self, path: str):
+        return self.filesystem.open_output_stream(path)
 
     def try_to_refresh_token(self):
         if self.should_refresh():

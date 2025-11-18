@@ -41,22 +41,12 @@ class UriReader(ABC):
     def get_file_path(cls, uri: str):
         from urllib.parse import urlparse
         parsed = urlparse(uri)
-
-        # If no scheme, assume it's a local path
-        if not parsed.scheme:
-            return uri
-
         if parsed.scheme == 'file':
-            if parsed.netloc:
-                return f"{parsed.netloc}{parsed.path}" if parsed.path else parsed.netloc
-            else:
-                return parsed.path or '/'
-
-        if parsed.netloc:
-            path = parsed.path.lstrip('/')
-            return f"{parsed.netloc}/{path}" if path else parsed.netloc
+            return parsed.path
+        elif parsed.scheme and parsed.scheme != '':
+            return f"{parsed.netloc}{parsed.path}"
         else:
-            return parsed.path.lstrip('/')
+            return uri
 
     @abstractmethod
     def new_input_stream(self, uri: str):
@@ -70,8 +60,6 @@ class FileUriReader(UriReader):
 
     def new_input_stream(self, uri: str):
         try:
-            # Pass the full URI with scheme to FileIO.new_input_stream
-            # FileIO.to_filesystem_path will handle the URI parsing and conversion
             return self._file_io.new_input_stream(uri)
         except Exception as e:
             raise IOError(f"Failed to read file {uri}: {e}")

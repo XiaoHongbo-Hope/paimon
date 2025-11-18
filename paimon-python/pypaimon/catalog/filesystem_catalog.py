@@ -107,32 +107,15 @@ class FileSystemCatalog(Catalog):
         return table_schema
 
     def get_database_path(self, name) -> str:
-        from urllib.parse import urlparse, urlunparse
-        parsed = urlparse(self.warehouse)
-        
-        # Handle root path '/'
-        if parsed.path == '/' or parsed.path == '':
-            clean_path = '/'
-        else:
-            clean_path = parsed.path.rstrip('/') or '/'
-        
-        # Reconstruct warehouse URL
-        warehouse_url = urlunparse((parsed.scheme, parsed.netloc, clean_path, parsed.params, parsed.query, parsed.fragment))
-        
-        # Join database name
-        if warehouse_url.endswith('/'):
-            db_path = f"{warehouse_url}{name}{Catalog.DB_SUFFIX}"
-        else:
-            db_path = f"{warehouse_url}/{name}{Catalog.DB_SUFFIX}"
-        return db_path
+        warehouse = self.warehouse.rstrip('/')
+        # Handle root path: file:/// -> file://
+        if warehouse.endswith('://'):
+            return f"{warehouse}{name}{Catalog.DB_SUFFIX}"
+        return f"{warehouse}/{name}{Catalog.DB_SUFFIX}"
 
     def get_table_path(self, identifier: Identifier) -> str:
         db_path = self.get_database_path(identifier.get_database_name())
-        table_name = identifier.get_table_name()
-        if db_path.endswith('/'):
-            return f"{db_path}{table_name}"
-        else:
-            return f"{db_path}/{table_name}"
+        return f"{db_path}/{identifier.get_table_name()}"
 
     def commit_snapshot(
             self,

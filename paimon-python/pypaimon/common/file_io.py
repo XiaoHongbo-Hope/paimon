@@ -18,8 +18,9 @@
 import logging
 import os
 import subprocess
+from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import splitport, urlparse, urljoin
+from urllib.parse import splitport, urlparse, urljoin, urlunparse
 
 import pyarrow
 from packaging.version import parse
@@ -155,19 +156,9 @@ class FileIO:
 
     def new_output_stream(self, path: str):
         path_str = self.to_filesystem_path(path)
-        # Get parent directory using urllib.parse
-        parsed = urlparse(path)
-        if parsed.path:
-            parent_path = '/'.join(parsed.path.rstrip('/').split('/')[:-1])
-            if parent_path:
-                parent_dir = f"{parsed.scheme}://{parsed.netloc}{parent_path}" if parsed.scheme else parent_path
-            else:
-                parent_dir = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else "/"
-        else:
-            parent_dir = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else ""
-        
-        if parent_dir and not self.exists(parent_dir):
-            self.mkdirs(parent_dir)
+        parent_dir = Path(path_str).parent
+        if str(parent_dir) and not self.exists(str(parent_dir)):
+            self.mkdirs(str(parent_dir))
 
         return self.filesystem.open_output_stream(path_str)
 
@@ -221,22 +212,12 @@ class FileIO:
 
     def rename(self, src: str, dst: str) -> bool:
         try:
-            # Get parent directory
-            parsed = urlparse(dst)
-            if parsed.path:
-                parent_path = '/'.join(parsed.path.rstrip('/').split('/')[:-1])
-                if parent_path:
-                    dst_parent = f"{parsed.scheme}://{parsed.netloc}{parent_path}" if parsed.scheme else parent_path
-                else:
-                    dst_parent = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else "/"
-            else:
-                dst_parent = f"{parsed.scheme}://{parsed.netloc}/" if parsed.scheme else ""
-
-            if dst_parent and not self.exists(dst_parent):
-                self.mkdirs(dst_parent)
+            dst_str = self.to_filesystem_path(dst)
+            dst_parent = Path(dst_str).parent
+            if str(dst_parent) and not self.exists(str(dst_parent)):
+                self.mkdirs(str(dst_parent))
 
             src_str = self.to_filesystem_path(src)
-            dst_str = self.to_filesystem_path(dst)
             self.filesystem.move(src_str, dst_str)
             return True
         except Exception as e:
@@ -320,17 +301,9 @@ class FileIO:
         file_infos = self.list_status(source_directory)
         for file_info in file_infos:
             if file_info.type == pyarrow.fs.FileType.File:
-                # Reconstruct source_file by joining with source_directory
-                file_name = file_info.path.split('/')[-1]
-                if source_directory.endswith('/'):
-                    source_file = f"{source_directory}{file_name}"
-                else:
-                    source_file = f"{source_directory}/{file_name}"
-                # Build target path
-                if target_directory.endswith('/'):
-                    target_file = f"{target_directory}{file_name}"
-                else:
-                    target_file = f"{target_directory}/{file_name}"
+                source_file = file_info.path
+                file_name = Path(source_file).name
+                target_file = f"{target_directory.rstrip('/')}/{file_name}" if target_directory else file_name
                 self.copy_file(source_file, target_file, overwrite)
 
     def read_overwritten_file_utf8(self, path: str) -> Optional[str]:
@@ -470,30 +443,17 @@ class FileIO:
         import re
 
         parsed = urlparse(path)
+        normalized_path = re.sub(r'/+', '/', parsed.path) if parsed.path else ''
+        
         if isinstance(self.filesystem, S3FileSystem):
-            if parsed.scheme:
-                if parsed.netloc:
-                    # Normalize path: remove duplicate slashes and leading slashes
-                    normalized_path = re.sub(r'/+', '/', parsed.path).lstrip('/')
-                    return f"{parsed.netloc}/{normalized_path}" if normalized_path else parsed.netloc
-                else:
-                    # Normalize path: remove duplicate slashes
-                    normalized_path = re.sub(r'/+', '/', parsed.path).lstrip('/')
-                    return normalized_path
+            # For S3, return "bucket/path" format
+            if parsed.scheme and parsed.netloc:
+                path_part = normalized_path.lstrip('/')
+                return f"{parsed.netloc}/{path_part}" if path_part else parsed.netloc
             return str(path)
 
+        # For other filesystems, return path without scheme
         if parsed.scheme:
-            if parsed.scheme == 'file':
-                # Normalize path: remove duplicate slashes
-                normalized_path = re.sub(r'/+', '/', parsed.path)
-                return normalized_path
-            elif parsed.netloc:
-                # Normalize path: remove duplicate slashes
-                normalized_path = re.sub(r'/+', '/', parsed.path)
-                return normalized_path
-            else:
-                # Normalize path: remove duplicate slashes
-                normalized_path = re.sub(r'/+', '/', parsed.path)
-                return normalized_path
+            return normalized_path
 
         return str(path)
