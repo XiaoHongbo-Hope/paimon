@@ -446,8 +446,13 @@ class FileIO:
 
         if parsed.scheme and len(parsed.scheme) == 1 and not parsed.netloc:
             # This is likely a Windows drive letter, not a URI scheme
-            # Return the original path to preserve the drive letter
             return str(path)
+
+        if parsed.scheme == 'file' and parsed.netloc and parsed.netloc.endswith(':'):
+            # file://C:/path format - netloc is 'C:', need to reconstruct path with drive letter
+            drive_letter = parsed.netloc.rstrip(':')
+            path_part = normalized_path.lstrip('/')
+            return f"{drive_letter}:/{path_part}" if path_part else f"{drive_letter}:"
 
         if isinstance(self.filesystem, S3FileSystem):
             # For S3, return "bucket/path" format
