@@ -301,7 +301,7 @@ class FileIO:
         for file_info in file_infos:
             if file_info.type == pyarrow.fs.FileType.File:
                 source_file = file_info.path
-                file_name = Path(source_file).name
+                file_name = source_file.split('/')[-1]
                 target_file = f"{target_directory.rstrip('/')}/{file_name}" if target_directory else file_name
                 self.copy_file(source_file, target_file, overwrite)
 
@@ -443,6 +443,11 @@ class FileIO:
 
         parsed = urlparse(path)
         normalized_path = re.sub(r'/+', '/', parsed.path) if parsed.path else ''
+
+        if parsed.scheme and len(parsed.scheme) == 1 and not parsed.netloc:
+            # This is likely a Windows drive letter, not a URI scheme
+            # Return the original path to preserve the drive letter
+            return str(path)
 
         if isinstance(self.filesystem, S3FileSystem):
             # For S3, return "bucket/path" format
