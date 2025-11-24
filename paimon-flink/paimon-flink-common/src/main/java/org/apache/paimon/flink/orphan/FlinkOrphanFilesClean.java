@@ -487,7 +487,7 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
         }
 
         if (empty) {
-            while (!dryRun) {
+            while (!dryRun && dirPath != null && !table.location().equals(dirPath)) {
                 try {
                     fileIO.delete(dirPath, false);
                     // recursive cleaning
