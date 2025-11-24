@@ -341,9 +341,9 @@ public abstract class OrphanFilesClean implements Serializable {
         long start = System.currentTimeMillis();
         List<Path> paimonFileDirs = new ArrayList<>();
 
-        paimonFileDirs.add(new Path(manifestPath));
-        paimonFileDirs.add(new Path(indexPath));
-        paimonFileDirs.add(new Path(statisticsPath));
+        // paimonFileDirs.add(new Path(manifestPath));
+        // paimonFileDirs.add(new Path(indexPath));
+        // paimonFileDirs.add(new Path(statisticsPath));
         paimonFileDirs.addAll(listFileDirs(new Path(dataFilePath), partitionKeysNum));
 
         // add external data paths
@@ -364,7 +364,7 @@ public abstract class OrphanFilesClean implements Serializable {
      * List directories that contains data files. The argument level is used to control recursive
      * depth.
      */
-    private List<Path> listFileDirs(Path dir, int level) {
+    protected List<Path> listFileDirs(Path dir, int level) {
         List<FileStatus> dirs = tryBestListingDirs(dir);
 
         if (level == 0) {
@@ -381,7 +381,7 @@ public abstract class OrphanFilesClean implements Serializable {
         return result;
     }
 
-    private List<Path> filterDirs(List<FileStatus> statuses, Predicate<Path> filter) {
+    protected List<Path> filterDirs(List<FileStatus> statuses, Predicate<Path> filter) {
         List<Path> filtered = new ArrayList<>();
 
         for (FileStatus status : statuses) {

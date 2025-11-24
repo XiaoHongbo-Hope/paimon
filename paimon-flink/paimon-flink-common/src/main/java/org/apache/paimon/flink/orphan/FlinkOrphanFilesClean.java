@@ -23,9 +23,9 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.utils.BoundedOneInputOperator;
 import org.apache.paimon.flink.utils.BoundedTwoInputOperator;
-import org.apache.paimon.flink.utils.OrphanFilesCleanUtil;
 import org.apache.paimon.fs.FileStatus;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.fs.RemoteIterator;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFile;
 import org.apache.paimon.operation.CleanOrphanFilesResult;
@@ -34,9 +34,13 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.utils.FileStorePathFactory;
 
+import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
+import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -53,6 +57,7 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -86,7 +91,16 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
 
     @Nullable
     public DataStream<CleanOrphanFilesResult> doOrphanClean(StreamExecutionEnvironment env) {
-        OrphanFilesCleanUtil.configureFlinkEnvironment(env, parallelism);
+        Configuration flinkConf = new Configuration();
+        flinkConf.set(ExecutionOptions.RUNTIME_MODE, RuntimeExecutionMode.BATCH);
+        flinkConf.set(ExecutionOptions.SORT_INPUTS, false);
+        flinkConf.set(ExecutionOptions.USE_BATCH_STATE_BACKEND, false);
+        if (parallelism != null) {
+            flinkConf.set(CoreOptions.DEFAULT_PARALLELISM, parallelism);
+        }
+        // Flink 1.17 introduced this config, use string to keep compatibility
+        flinkConf.setString("execution.batch.adaptive.auto-parallelism.enabled", "false");
+        env.configure(flinkConf);
         LOG.info("Starting orphan files clean for table {}", table.name());
         long start = System.currentTimeMillis();
         List<String> branches = validBranches();
@@ -105,7 +119,16 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
                                             String branch,
                                             ProcessFunction<String, Tuple2<Long, Long>>.Context ctx,
                                             Collector<Tuple2<Long, Long>> out) {
-                                        processForBranchSnapshotDirDeleted(branch, out);
+                                        AtomicLong deletedFilesCount = new AtomicLong(0);
+                                        AtomicLong deletedFilesLenInBytes = new AtomicLong(0);
+                                        cleanBranchSnapshotDir(
+                                                branch,
+                                                path -> deletedFilesCount.incrementAndGet(),
+                                                deletedFilesLenInBytes::addAndGet);
+                                        out.collect(
+                                                new Tuple2<>(
+                                                        deletedFilesCount.get(),
+                                                        deletedFilesLenInBytes.get()));
                                     }
                                 })
                         .keyBy(tuple -> 1)
@@ -215,20 +238,42 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
                                 });
 
         usedFiles = usedFiles.union(usedManifestFiles);
-        DataStream<Tuple2<String, Long>> candidates =
-                env.fromCollection(Collections.singletonList(1), TypeInformation.of(Integer.class))
+
+        List<String> partitionPaths = selectPartitionPathsForParallelism(env);
+        LOG.info(
+                "Found {} partition paths for table {} (parallelism: {}), will list directories in parallel",
+                partitionPaths.size(),
+                table.name(),
+                parallelism != null ? parallelism : env.getParallelism());
+
+        DataStream<String> dirs =
+                env.fromCollection(partitionPaths, STRING_TYPE_INFO)
                         .process(
-                                new ProcessFunction<Integer, Tuple2<String, Long>>() {
+                                new ProcessFunction<String, String>() {
                                     @Override
                                     public void processElement(
-                                            Integer i,
-                                            ProcessFunction<Integer, Tuple2<String, Long>>.Context
-                                                    ctx,
-                                            Collector<Tuple2<String, Long>> out) {
-                                        listPaimonFilesForTable(out);
+                                            String partitionPath,
+                                            ProcessFunction<String, String>.Context ctx,
+                                            Collector<String> out) {
+                                        listPaimonDirsForPartition(partitionPath, out);
                                     }
                                 })
-                        .setParallelism(1);
+                        .name("list dirs");
+
+        DataStream<Tuple2<String, Long>> candidates =
+                dirs.rebalance()
+                        .process(
+                                new ProcessFunction<String, Tuple2<String, Long>>() {
+                                    @Override
+                                    public void processElement(
+                                            String dir,
+                                            ProcessFunction<String, Tuple2<String, Long>>.Context
+                                                    ctx,
+                                            Collector<Tuple2<String, Long>> out) {
+                                        listPaimonFilesForTable(dir, out);
+                                    }
+                                })
+                        .name("list files");
 
         DataStream<CleanOrphanFilesResult> deleted =
                 usedFiles
@@ -256,13 +301,26 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
 
                                     @Override
                                     public void endInput(int inputId) {
-                                        buildEnd =
-                                                OrphanFilesCleanUtil.endInputForDeleted(
-                                                        inputId,
-                                                        buildEnd,
-                                                        emittedFilesCount,
-                                                        emittedFilesLen,
-                                                        output);
+                                        switch (inputId) {
+                                            case 1:
+                                                checkState(!buildEnd, "Should not build ended.");
+                                                LOG.info("Finish build phase.");
+                                                buildEnd = true;
+                                                break;
+                                            case 2:
+                                                checkState(buildEnd, "Should build ended.");
+                                                LOG.info("Finish probe phase.");
+                                                LOG.info(
+                                                        "Clean files count : {}",
+                                                        emittedFilesCount);
+                                                LOG.info("Clean files size : {}", emittedFilesLen);
+                                                output.collect(
+                                                        new StreamRecord<>(
+                                                                new CleanOrphanFilesResult(
+                                                                        emittedFilesCount,
+                                                                        emittedFilesLen)));
+                                                break;
+                                        }
                                     }
 
                                     @Override
@@ -290,47 +348,154 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
         return deleted;
     }
 
-    protected void listPaimonFilesForTable(Collector<Tuple2<String, Long>> out) {
+    /**
+     *
+     *
+     * <ul>
+     *   <li>If first-level partition count >= parallelism: return first-level partitions
+     *   <li>If first-level partition count < parallelism: continue to list next-level partitions
+     *   <li>Continue until partition count >= parallelism or all levels are exhausted
+     * </ul>
+     */
+    private List<String> selectPartitionPathsForParallelism(StreamExecutionEnvironment env) {
+        int actualParallelism = parallelism != null ? parallelism : env.getParallelism();
+        List<String> currentLevelPaths = getFirstLevelPartitions();
+
+        if (currentLevelPaths.size() >= actualParallelism) {
+            return currentLevelPaths;
+        }
+
+        if (partitionKeysNum == 0) {
+            return currentLevelPaths;
+        }
+
+        for (int level = 1; level < partitionKeysNum; level++) {
+            List<String> nextLevelPaths = new ArrayList<>();
+            for (String currentPath : currentLevelPaths) {
+                Path path = new Path(currentPath);
+                List<FileStatus> dirs = tryBestListingDirs(path);
+                List<Path> nextLevelPartitions = filterDirs(dirs, p -> p.getName().contains("="));
+                for (Path nextPartition : nextLevelPartitions) {
+                    nextLevelPaths.add(nextPartition.toUri().toString());
+                }
+            }
+
+            if (nextLevelPaths.size() >= actualParallelism) {
+                LOG.info(
+                        "Partition count at level {} ({}) >= parallelism ({}), using this level",
+                        level,
+                        nextLevelPaths.size(),
+                        actualParallelism);
+                return nextLevelPaths;
+            }
+
+            currentLevelPaths = nextLevelPaths;
+            if (currentLevelPaths.isEmpty()) {
+                break;
+            }
+        }
+
+        LOG.info(
+                "After listing all partition levels, found {} partitions (parallelism: {})",
+                currentLevelPaths.size(),
+                actualParallelism);
+
+        return currentLevelPaths;
+    }
+
+    private List<String> getFirstLevelPartitions() {
         FileStorePathFactory pathFactory = table.store().pathFactory();
-        List<String> dirs =
-                listPaimonFileDirs(
-                                table.fullName(),
-                                pathFactory.manifestPath().toString(),
-                                pathFactory.indexPath().toString(),
-                                pathFactory.statisticsPath().toString(),
-                                pathFactory.dataFilePath().toString(),
-                                partitionKeysNum,
-                                table.coreOptions().dataFileExternalPaths())
-                        .stream()
-                        .map(Path::toUri)
-                        .map(Object::toString)
-                        .collect(Collectors.toList());
-        Set<Path> emptyDirs = new HashSet<>();
-        for (String dir : dirs) {
-            Path dirPath = new Path(dir);
-            List<FileStatus> files = tryBestListingDirs(dirPath);
-            for (FileStatus file : files) {
+        Path dataFilePath = pathFactory.dataFilePath();
+        List<String> partitionPaths = new ArrayList<>();
+
+        if (partitionKeysNum > 0) {
+            partitionPaths.addAll(getFirstLevelPartitionsFromPath(dataFilePath));
+
+            String dataFileExternalPaths = table.coreOptions().dataFileExternalPaths();
+            if (dataFileExternalPaths != null) {
+                String[] externalPathArr = dataFileExternalPaths.split(",");
+                for (String externalPath : externalPathArr) {
+                    partitionPaths.addAll(getFirstLevelPartitionsFromPath(new Path(externalPath)));
+                }
+            }
+        } else {
+            partitionPaths.add(dataFilePath.toUri().toString());
+            String dataFileExternalPaths = table.coreOptions().dataFileExternalPaths();
+            if (dataFileExternalPaths != null) {
+                partitionPaths.addAll(Arrays.asList(dataFileExternalPaths.split(",")));
+            }
+        }
+
+        return partitionPaths;
+    }
+
+    private List<String> getFirstLevelPartitionsFromPath(Path rootPath) {
+        List<FileStatus> dirs = tryBestListingDirs(rootPath);
+        List<Path> firstLevelPartitions = filterDirs(dirs, p -> p.getName().contains("="));
+        return firstLevelPartitions.stream()
+                .map(p -> p.toUri().toString())
+                .collect(Collectors.toList());
+    }
+
+    private void listPaimonDirsForPartition(String partitionPathStr, Collector<String> out) {
+        Path partitionPath = new Path(partitionPathStr);
+
+        int currentPartitionLevel = getPartitionLevel(partitionPath);
+        int remainingLevels =
+                partitionKeysNum > 0 ? partitionKeysNum - currentPartitionLevel - 1 : 0;
+
+        List<Path> bucketDirs = listFileDirs(partitionPath, remainingLevels);
+        bucketDirs.stream().map(Path::toUri).map(Object::toString).forEach(out::collect);
+    }
+
+    /**
+     *
+     *
+     * <ul>
+     *   <li>"pt1=2024-01" -> level 0 (first-level partition, 1 segment)
+     *   <li>"pt1=2024-01/pt2=12" -> level 1 (second-level partition, 2 segments)
+     * </ul>
+     */
+    private int getPartitionLevel(Path path) {
+        String pathStr = path.toUri().toString();
+        String[] segments = pathStr.split("/");
+        int level = 0;
+        for (String segment : segments) {
+            if (segment.contains("=")) {
+                level++;
+            }
+        }
+        return level > 0 ? level - 1 : 0;
+    }
+
+    public void listPaimonFilesForTable(String dir, Collector<Tuple2<String, Long>> out) {
+        Path dirPath = new Path(dir);
+
+        boolean empty = true;
+        try {
+            RemoteIterator<FileStatus> it = fileIO.listFilesIterative(dirPath, false);
+            while (it.hasNext()) {
+                empty = false;
+                FileStatus file = it.next();
                 if (oldEnough(file)) {
                     out.collect(new Tuple2<>(file.getPath().toUri().toString(), file.getLen()));
                 }
             }
-            if (files.isEmpty()) {
-                emptyDirs.add(dirPath);
-            }
+        } catch (Exception e) {
+            LOG.warn("Failed to list paimon files in directory {}", dir);
+            return;
         }
 
-        // delete empty dir
-        while (!emptyDirs.isEmpty()) {
-            Set<Path> newEmptyDir = new HashSet<>();
-            for (Path emptyDir : emptyDirs) {
+        if (empty) {
+            while (true) {
                 try {
-                    fileIO.delete(emptyDir, false);
+                    fileIO.delete(dirPath, false);
                     // recursive cleaning
-                    newEmptyDir.add(emptyDir.getParent());
+                    dirPath = dirPath.getParent();
                 } catch (IOException ignored) {
+                    break;
                 }
             }
-            emptyDirs = newEmptyDir;
         }
     }
 
