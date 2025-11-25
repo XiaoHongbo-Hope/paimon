@@ -33,6 +33,7 @@ import org.apache.paimon.operation.OrphanFilesClean;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.utils.FileStorePathFactory;
+import org.apache.paimon.utils.PartitionPathUtils;
 
 import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.api.common.functions.ReduceFunction;
@@ -61,6 +62,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -270,7 +272,7 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
                                             ProcessFunction<String, Tuple2<String, Long>>.Context
                                                     ctx,
                                             Collector<Tuple2<String, Long>> out) {
-                                        listPaimonFilesForTable(dir, out);
+                                        listPaimonFilesForDir(dir, out);
                                     }
                                 })
                         .name("list files");
@@ -448,8 +450,24 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
         bucketDirs.stream().map(Path::toUri).map(Object::toString).forEach(out::collect);
     }
 
+    protected void listPaimonDirsForTable(Collector<String> out) {
+        FileStorePathFactory pathFactory = table.store().pathFactory();
+        listPaimonFileDirs(
+                        table.fullName(),
+                        pathFactory.manifestPath().toString(),
+                        pathFactory.indexPath().toString(),
+                        pathFactory.statisticsPath().toString(),
+                        pathFactory.dataFilePath().toString(),
+                        partitionKeysNum,
+                        table.coreOptions().dataFileExternalPaths())
+                .stream()
+                .map(Path::toUri)
+                .map(Object::toString)
+                .forEach(out::collect);
+    }
+
     /**
-     *
+     * Get partition level from path.
      *
      * <ul>
      *   <li>"pt1=2024-01" -> level 0 (first-level partition, 1 segment)
@@ -457,18 +475,12 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
      * </ul>
      */
     private int getPartitionLevel(Path path) {
-        String pathStr = path.toUri().toString();
-        String[] segments = pathStr.split("/");
-        int level = 0;
-        for (String segment : segments) {
-            if (segment.contains("=")) {
-                level++;
-            }
-        }
-        return level > 0 ? level - 1 : 0;
+        LinkedHashMap<String, String> partitionSpec =
+                PartitionPathUtils.extractPartitionSpecFromPath(path);
+        return partitionSpec.isEmpty() ? 0 : partitionSpec.size() - 1;
     }
 
-    public void listPaimonFilesForTable(String dir, Collector<Tuple2<String, Long>> out) {
+    public void listPaimonFilesForDir(String dir, Collector<Tuple2<String, Long>> out) {
         Path dirPath = new Path(dir);
 
         boolean empty = true;

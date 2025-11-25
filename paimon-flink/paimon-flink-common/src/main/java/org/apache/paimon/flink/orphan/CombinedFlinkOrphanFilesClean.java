@@ -344,17 +344,16 @@ public class CombinedFlinkOrphanFilesClean implements Serializable {
                                 });
 
         usedFiles = usedFiles.union(usedManifestFiles);
-        DataStream<Tuple2<String, Long>> candidates =
+
+        DataStream<String> dirs =
                 env.fromCollection(tableIdentifiers, TypeInformation.of(Identifier.class))
                         .process(
-                                new ProcessFunction<Identifier, Tuple2<String, Long>>() {
+                                new ProcessFunction<Identifier, String>() {
                                     @Override
                                     public void processElement(
                                             Identifier identifier,
-                                            ProcessFunction<Identifier, Tuple2<String, Long>>
-                                                            .Context
-                                                    ctx,
-                                            Collector<Tuple2<String, Long>> out) {
+                                            ProcessFunction<Identifier, String>.Context ctx,
+                                            Collector<String> out) {
                                         LOG.info(
                                                 "Processing table {} in subtask {}",
                                                 identifier,
@@ -364,11 +363,35 @@ public class CombinedFlinkOrphanFilesClean implements Serializable {
                                         if (cleanerMap.containsKey(buildTableKey(identifier))) {
                                             cleanerMap
                                                     .get(buildTableKey(identifier))
-                                                    .listPaimonFilesForTable(out);
+                                                    .listPaimonDirsForTable(out);
                                         }
                                     }
                                 })
-                        .setParallelism(Objects.nonNull(parallelism) ? parallelism : 1);
+                        .name("list dirs");
+
+        DataStream<Tuple2<String, Long>> candidates =
+                dirs.rebalance()
+                        .process(
+                                new ProcessFunction<String, Tuple2<String, Long>>() {
+                                    @Override
+                                    public void processElement(
+                                            String dir,
+                                            ProcessFunction<String, Tuple2<String, Long>>.Context
+                                                    ctx,
+                                            Collector<Tuple2<String, Long>> out) {
+                                        LOG.info(
+                                                "Processing files for table {} in subtask {}",
+                                                dir,
+                                                RuntimeContextUtils.getIndexOfThisSubtask(
+                                                        getRuntimeContext()));
+                                        FlinkOrphanFilesClean cleanerForPath =
+                                                getCleanerForPath(new Path(dir));
+                                        if (Objects.nonNull(cleanerForPath)) {
+                                            cleanerForPath.listPaimonFilesForDir(dir, out);
+                                        }
+                                    }
+                                })
+                        .name("list files");
 
         DataStream<CleanOrphanFilesResult> deleted =
                 usedFiles
