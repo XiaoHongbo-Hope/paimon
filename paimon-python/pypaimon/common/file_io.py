@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import splitport, urlparse
 
+import lance
 import pyarrow
 from packaging.version import parse
 from pyarrow._fs import FileSystem
@@ -382,6 +383,23 @@ class FileIO:
 
         with self.new_output_stream(path) as output_stream:
             fastavro.writer(output_stream, avro_schema, records, **kwargs)
+
+    def write_lance(self, path: str, data: pyarrow.Table, **kwargs):
+        from pypaimon.read.reader.lance_utils import to_lance_specified
+        file_path_for_lance, storage_options = to_lance_specified(self, path)
+        
+        # Ensure parent directory exists
+        parent_dir = os.path.dirname(file_path_for_lance)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+        
+        writer = lance.file.LanceFileWriter(file_path_for_lance, data.schema, storage_options=storage_options, **kwargs)
+        try:
+            # Write all batches
+            for batch in data.to_batches():
+                writer.write_batch(batch)
+        finally:
+            writer.close()
 
     def write_blob(self, path: str, data: pyarrow.Table, blob_as_descriptor: bool, **kwargs):
         try:
