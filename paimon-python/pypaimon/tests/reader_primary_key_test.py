@@ -121,7 +121,7 @@ class PkReaderTest(unittest.TestCase):
         read_builder = table.new_read_builder()
         table_scan = read_builder.new_scan()
         splits = table_scan.plan().splits()
-        
+
         for split in splits:
             for file in split.files:
                 file_path = file.file_path
@@ -129,9 +129,9 @@ class PkReaderTest(unittest.TestCase):
                 full_path = os.path.join(table_path, file_path)
                 if os.path.exists(full_path):
                     self.assertTrue(os.path.exists(full_path))
-                    self.assertTrue(file_path.endswith('.lance'),
-                                   f"Expected file path to end with .lance, got {file_path}")
-
+                    self.assertTrue(
+                        file_path.endswith('.lance'),
+                        f"Expected file path to end with .lance, got {file_path}")
         read_builder = table.new_read_builder()
         actual = self._read_test_table(read_builder).sort_by('user_id')
         self.assertEqual(actual, self.expected)

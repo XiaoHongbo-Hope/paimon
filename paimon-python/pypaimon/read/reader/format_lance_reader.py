@@ -37,14 +37,17 @@ class FormatLanceReader(RecordBatchReader):
                  push_down_predicate: Any, batch_size: int = 4096):
         """Initialize Lance reader."""
         file_path_for_lance, storage_options = to_lance_specified(file_io, file_path)
-        
+
         columns_for_lance = read_fields if read_fields else None
-        lance_reader = lance.file.LanceFileReader(file_path_for_lance, storage_options=storage_options, columns=columns_for_lance)
+        lance_reader = lance.file.LanceFileReader(
+            file_path_for_lance,
+            storage_options=storage_options,
+            columns=columns_for_lance)
         reader_results = lance_reader.read_all()
-        
+
         # Convert to PyArrow table
         pa_table = reader_results.to_table()
-        
+
         if push_down_predicate is not None:
             in_memory_dataset = ds.InMemoryDataset(pa_table)
             scanner = in_memory_dataset.scanner(filter=push_down_predicate, batch_size=batch_size)
@@ -66,4 +69,3 @@ class FormatLanceReader(RecordBatchReader):
     def close(self):
         if self.reader is not None:
             self.reader = None
-

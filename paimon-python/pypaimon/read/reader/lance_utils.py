@@ -20,7 +20,7 @@ import os
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
-from pypaimon.common.config import OssOptions
+from pypaimon.common.config import CatalogOptions, OssOptions
 from pypaimon.common.file_io import FileIO
 
 
@@ -29,25 +29,28 @@ def to_lance_specified(file_io: FileIO, file_path: str) -> Tuple[str, Optional[D
     scheme, _, _ = file_io.parse_location(file_path)
     storage_options = None
     file_path_for_lance = file_io.to_filesystem_path(file_path)
-    
+
     # For local filesystem, ensure absolute path
     if scheme in {'file', None} or not scheme:
         if not os.path.isabs(file_path_for_lance):
             file_path_for_lance = os.path.abspath(file_path_for_lance)
     else:
         file_path_for_lance = file_path
-    
+
     if scheme == 'oss':
         storage_options = {}
         if hasattr(file_io, 'properties'):
             uri = urlparse(file_path)
             host = uri.netloc or uri.hostname or ''
-            endpoint = file_io.properties.get(OssOptions.OSS_ENDPOINT)
+            # DLF OSS endpoint should override the standard OSS endpoint.
+            endpoint = file_io.properties.get(CatalogOptions.DLF_OSS_ENDPOINT)
+            if not endpoint:
+                endpoint = file_io.properties.get(OssOptions.OSS_ENDPOINT)
             if endpoint and host:
                 storage_options['endpoint'] = f"https://{host}.{endpoint}"
             elif endpoint:
                 storage_options['endpoint'] = endpoint
-            
+
             if OssOptions.OSS_ACCESS_KEY_ID in file_io.properties:
                 storage_options['access_key_id'] = file_io.properties[OssOptions.OSS_ACCESS_KEY_ID]
             if OssOptions.OSS_ACCESS_KEY_SECRET in file_io.properties:
@@ -55,8 +58,7 @@ def to_lance_specified(file_io: FileIO, file_path: str) -> Tuple[str, Optional[D
             if OssOptions.OSS_SECURITY_TOKEN in file_io.properties:
                 storage_options['session_token'] = file_io.properties[OssOptions.OSS_SECURITY_TOKEN]
             storage_options['virtual_hosted_style_request'] = 'true'
-        
-        file_path_for_lance = file_path.replace('oss://', 's3://')
-    
-    return file_path_for_lance, storage_options
 
+        file_path_for_lance = file_path.replace('oss://', 's3://')
+
+    return file_path_for_lance, storage_options
