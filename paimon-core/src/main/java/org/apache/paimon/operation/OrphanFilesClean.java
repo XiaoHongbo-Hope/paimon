@@ -106,7 +106,7 @@ public abstract class OrphanFilesClean implements Serializable {
         this.dryRun = dryRun;
     }
 
-    protected List<String> validBranches() {
+    public List<String> validBranches() {
         List<String> branches = table.branchManager().branches();
 
         List<String> abnormalBranches = new ArrayList<>();
@@ -216,7 +216,7 @@ public abstract class OrphanFilesClean implements Serializable {
         cleanFile(filePath);
     }
 
-    protected void cleanFile(Path path) {
+    public void cleanFile(Path path) {
         if (!dryRun) {
             try {
                 if (fileIO.isDir(path)) {
@@ -229,7 +229,7 @@ public abstract class OrphanFilesClean implements Serializable {
         }
     }
 
-    protected Set<Snapshot> safelyGetAllSnapshots(String branch) throws IOException {
+    public Set<Snapshot> safelyGetAllSnapshots(String branch) throws IOException {
         FileStoreTable branchTable = table.switchToBranch(branch);
         SnapshotManager snapshotManager = branchTable.snapshotManager();
         ChangelogManager changelogManager = branchTable.changelogManager();
@@ -240,7 +240,7 @@ public abstract class OrphanFilesClean implements Serializable {
         return readSnapshots;
     }
 
-    protected void collectWithoutDataFile(
+    public void collectWithoutDataFile(
             String branch,
             Snapshot snapshot,
             Consumer<String> usedFileConsumer,
@@ -341,9 +341,9 @@ public abstract class OrphanFilesClean implements Serializable {
         long start = System.currentTimeMillis();
         List<Path> paimonFileDirs = new ArrayList<>();
 
-        paimonFileDirs.add(new Path(manifestPath));
-        paimonFileDirs.add(new Path(indexPath));
-        paimonFileDirs.add(new Path(statisticsPath));
+        // paimonFileDirs.add(new Path(manifestPath));
+        // paimonFileDirs.add(new Path(indexPath));
+        // paimonFileDirs.add(new Path(statisticsPath));
         paimonFileDirs.addAll(listFileDirs(new Path(dataFilePath), partitionKeysNum));
 
         // add external data paths
@@ -364,7 +364,7 @@ public abstract class OrphanFilesClean implements Serializable {
      * List directories that contains data files. The argument level is used to control recursive
      * depth.
      */
-    private List<Path> listFileDirs(Path dir, int level) {
+    protected List<Path> listFileDirs(Path dir, int level) {
         List<FileStatus> dirs = tryBestListingDirs(dir);
 
         if (level == 0) {
@@ -381,7 +381,7 @@ public abstract class OrphanFilesClean implements Serializable {
         return result;
     }
 
-    private List<Path> filterDirs(List<FileStatus> statuses, Predicate<Path> filter) {
+    protected List<Path> filterDirs(List<FileStatus> statuses, Predicate<Path> filter) {
         List<Path> filtered = new ArrayList<>();
 
         for (FileStatus status : statuses) {
@@ -421,7 +421,7 @@ public abstract class OrphanFilesClean implements Serializable {
      * {@link FileNotFoundException}, return default value. Finally, if retry times reaches the
      * limits, rethrow the IOException.
      */
-    protected static <T> T retryReadingFiles(SupplierWithIOException<T> reader, T defaultValue)
+    public static <T> T retryReadingFiles(SupplierWithIOException<T> reader, T defaultValue)
             throws IOException {
         int retryNumber = 0;
         IOException caught = null;
