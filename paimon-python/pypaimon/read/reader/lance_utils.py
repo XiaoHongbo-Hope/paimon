@@ -18,6 +18,7 @@
 
 import os
 from typing import Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 from pypaimon.common.config import OssOptions
 from pypaimon.common.file_io import FileIO
@@ -38,12 +39,33 @@ def to_lance_specified(file_io: FileIO, file_path: str) -> Tuple[str, Optional[D
     if scheme == 'oss':
         storage_options = {}
         if hasattr(file_io, 'properties'):
+            # Extract bucket from file_path (same as Java: uri.getHost())
+            # Use FileIO's _extract_oss_bucket method for reliable bucket extraction
+            try:
+                bucket = file_io._extract_oss_bucket(file_path)
+            except (ValueError, AttributeError):
+                # Fallback: extract from URI
+                uri = urlparse(file_path)
+                bucket = uri.netloc or uri.hostname
+                if not bucket:
+                    # Extract from path (oss://bucket/path format)
+                    path_parts = uri.path.lstrip('/').split('/', 1)
+                    if path_parts:
+                        bucket = path_parts[0]
+                if bucket:
+                    # Remove endpoint suffix if present
+                    bucket = bucket.split('.', 1)[0]
+
             endpoint = file_io.properties.get(OssOptions.OSS_ENDPOINT)
-            if endpoint:
+            if endpoint and bucket:
+                # Construct endpoint as "https://{bucket}.{endpoint}" (same as Java implementation)
+                # Java: "https://" + uri.getHost() + "." + originOptions.get("fs.oss.endpoint")
                 if not endpoint.startswith('http://') and not endpoint.startswith('https://'):
-                    storage_options['endpoint'] = f"https://{endpoint}"
+                    storage_options['endpoint'] = f"https://{bucket}.{endpoint}"
                 else:
-                    storage_options['endpoint'] = endpoint
+                    # If endpoint already has protocol, extract the host part
+                    endpoint_host = endpoint.split('://', 1)[1] if '://' in endpoint else endpoint
+                    storage_options['endpoint'] = f"https://{bucket}.{endpoint_host}"
 
             if OssOptions.OSS_ACCESS_KEY_ID in file_io.properties:
                 storage_options['access_key_id'] = file_io.properties[OssOptions.OSS_ACCESS_KEY_ID]
