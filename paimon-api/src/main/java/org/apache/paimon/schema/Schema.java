@@ -57,8 +57,8 @@ public class Schema {
 
     private static final String FIELD_FIELDS = "fields";
     private static final String FIELD_PARTITION_KEYS = "partitionKeys";
-    private static final String FIELD_PRIMARY_KEYS = "primaryKeys";
-    private static final String FIELD_OPTIONS = "options";
+    public static final String FIELD_PRIMARY_KEYS = "primaryKeys";
+    public static final String FIELD_OPTIONS = "options";
     private static final String FIELD_COMMENT = "comment";
 
     @JsonProperty(FIELD_FIELDS)

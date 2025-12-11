@@ -35,6 +35,7 @@ public class ResourcePaths {
     protected static final String SNAPSHOTS = "snapshots";
     protected static final String VIEWS = "views";
     protected static final String TABLE_DETAILS = "table-details";
+    protected static final String TABLE_SUMMARY = "table-summary";
     protected static final String VIEW_DETAILS = "view-details";
     protected static final String ROLLBACK = "rollback";
     protected static final String REGISTER = "register";
@@ -71,6 +72,10 @@ public class ResourcePaths {
 
     public String tableDetails(String databaseName) {
         return SLASH.join(V1, prefix, DATABASES, encodeString(databaseName), TABLE_DETAILS);
+    }
+
+    public String tableSummary(String databaseName) {
+        return SLASH.join(V1, prefix, DATABASES, encodeString(databaseName), TABLE_SUMMARY);
     }
 
     public String tables() {

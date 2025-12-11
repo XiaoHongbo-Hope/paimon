@@ -115,13 +115,14 @@ public abstract class DelegateCatalog implements Catalog {
     @Override
     public PagedList<Table> listTableDetailsPaged(
             String databaseName,
-            Integer maxResults,
-            String pageToken,
-            String tableNamePattern,
-            String tableType)
+            @Nullable Integer maxResults,
+            @Nullable String pageToken,
+            @Nullable String tableNamePattern,
+            @Nullable String tableType,
+            boolean includeSchema)
             throws DatabaseNotExistException {
         return wrapped.listTableDetailsPaged(
-                databaseName, maxResults, pageToken, tableNamePattern, tableType);
+                databaseName, maxResults, pageToken, tableNamePattern, tableType, includeSchema);
     }
 
     @Override

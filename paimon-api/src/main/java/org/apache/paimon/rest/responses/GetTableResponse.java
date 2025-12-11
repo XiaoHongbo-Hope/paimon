@@ -18,6 +18,7 @@
 
 package org.apache.paimon.rest.responses;
 
+import org.apache.paimon.TableType;
 import org.apache.paimon.rest.RESTResponse;
 import org.apache.paimon.schema.Schema;
 
@@ -25,6 +26,13 @@ import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.annotation.JsonCre
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.annotation.JsonGetter;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.apache.paimon.shade.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
+
+import javax.annotation.Nullable;
+
+import java.util.List;
+import java.util.Map;
+
+import static org.apache.paimon.schema.Schema.FIELD_PRIMARY_KEYS;
 
 /** Response for getting table. */
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -36,6 +44,9 @@ public class GetTableResponse extends AuditRESTResponse implements RESTResponse 
     private static final String FIELD_IS_EXTERNAL = "isExternal";
     private static final String FIELD_SCHEMA_ID = "schemaId";
     private static final String FIELD_SCHEMA = "schema";
+    private static final String FIELD_OPTIONS = "options";
+    private static final String FIELD_TABLE_TYPE = "type";
+    private static final String FIELD_FILE_FORMAT = "fileFormat";
 
     @JsonProperty(FIELD_ID)
     private final String id;
@@ -52,8 +63,24 @@ public class GetTableResponse extends AuditRESTResponse implements RESTResponse 
     @JsonProperty(FIELD_SCHEMA_ID)
     private final long schemaId;
 
+    @Nullable
     @JsonProperty(FIELD_SCHEMA)
     private final Schema schema;
+
+    @JsonProperty(FIELD_OPTIONS)
+    private final Map<String, String> options;
+
+    @Nullable
+    @JsonProperty(FIELD_TABLE_TYPE)
+    private final TableType type;
+
+    @Nullable
+    @JsonProperty(FIELD_PRIMARY_KEYS)
+    private final List<String> primaryKeys;
+
+    @Nullable
+    @JsonProperty(FIELD_FILE_FORMAT)
+    private final String fileFormat;
 
     @JsonCreator
     public GetTableResponse(
@@ -75,6 +102,62 @@ public class GetTableResponse extends AuditRESTResponse implements RESTResponse 
         this.isExternal = isExternal;
         this.schemaId = schemaId;
         this.schema = schema;
+        this.type = null;
+        this.primaryKeys = null;
+        this.fileFormat = null;
+    }
+
+    @JsonCreator
+    public GetTableResponse(
+            @JsonProperty(FIELD_ID) String id,
+            @JsonProperty(FIELD_NAME) String name,
+            @JsonProperty(FIELD_PATH) String path,
+            @JsonProperty(FIELD_IS_EXTERNAL) boolean isExternal,
+            @JsonProperty(FIELD_SCHEMA_ID) long schemaId,
+            @JsonProperty(FIELD_OWNER) String owner,
+            @JsonProperty(FIELD_CREATED_AT) long createdAt,
+            @JsonProperty(FIELD_CREATED_BY) String createdBy,
+            @JsonProperty(FIELD_UPDATED_AT) long updatedAt,
+            @JsonProperty(FIELD_UPDATED_BY) String updatedBy,
+            @JsonProperty(FIELD_OPTIONS) Map<String, String> options) {
+        super(owner, createdAt, createdBy, updatedAt, updatedBy);
+        this.id = id;
+        this.name = name;
+        this.path = path;
+        this.isExternal = isExternal;
+        this.schemaId = schemaId;
+        this.schema = null;
+        this.type = null;
+        this.primaryKeys = null;
+        this.fileFormat = null;
+        this.options = options;
+    }
+
+    @JsonCreator
+    public GetTableResponse(
+            @JsonProperty(FIELD_ID) String id,
+            @JsonProperty(FIELD_NAME) String name,
+            @JsonProperty(FIELD_PATH) String path,
+            @JsonProperty(FIELD_IS_EXTERNAL) boolean isExternal,
+            @JsonProperty(FIELD_SCHEMA_ID) long schemaId,
+            @JsonProperty(FIELD_OWNER) String owner,
+            @JsonProperty(FIELD_CREATED_AT) long createdAt,
+            @JsonProperty(FIELD_CREATED_BY) String createdBy,
+            @JsonProperty(FIELD_UPDATED_AT) long updatedAt,
+            @JsonProperty(FIELD_UPDATED_BY) String updatedBy,
+            @JsonProperty(FIELD_TABLE_TYPE) @Nullable TableType type,
+            @JsonProperty(FIELD_PRIMARY_KEYS) @Nullable List<String> primaryKeys,
+            @JsonProperty(FIELD_FILE_FORMAT) @Nullable String fileFormat) {
+        super(owner, createdAt, createdBy, updatedAt, updatedBy);
+        this.id = id;
+        this.name = name;
+        this.path = path;
+        this.isExternal = isExternal;
+        this.schemaId = schemaId;
+        this.schema = null;
+        this.type = type;
+        this.primaryKeys = primaryKeys;
+        this.fileFormat = fileFormat;
     }
 
     @JsonGetter(FIELD_ID)
@@ -105,5 +188,23 @@ public class GetTableResponse extends AuditRESTResponse implements RESTResponse 
     @JsonGetter(FIELD_SCHEMA)
     public Schema getSchema() {
         return this.schema;
+    }
+
+    @JsonGetter(FIELD_TABLE_TYPE)
+    @Nullable
+    public TableType getType() {
+        return this.type;
+    }
+
+    @JsonGetter(FIELD_PRIMARY_KEYS)
+    @Nullable
+    public List<String> getPrimaryKeys() {
+        return this.primaryKeys;
+    }
+
+    @JsonGetter(FIELD_FILE_FORMAT)
+    @Nullable
+    public String getFileFormat() {
+        return this.fileFormat;
     }
 }

@@ -267,7 +267,8 @@ public abstract class AbstractCatalog implements Catalog {
             @Nullable Integer maxResults,
             @Nullable String pageToken,
             @Nullable String tableNamePattern,
-            @Nullable String tableType)
+            @Nullable String tableType,
+            boolean includeSchema)
             throws DatabaseNotExistException {
         CatalogUtils.validateNamePattern(this, tableNamePattern);
         CatalogUtils.validateTableType(this, tableType);
@@ -296,7 +297,7 @@ public abstract class AbstractCatalog implements Catalog {
         getDatabase(databaseName);
 
         return listTableDetailsPagedImpl(
-                databaseName, maxResults, pageToken, tableNamePattern, tableType);
+                databaseName, maxResults, pageToken, tableNamePattern, tableType, includeSchema);
     }
 
     protected abstract List<String> listTablesImpl(String databaseName);
@@ -306,7 +307,8 @@ public abstract class AbstractCatalog implements Catalog {
             @Nullable Integer maxResults,
             @Nullable String pageToken,
             @Nullable String tableNamePattern,
-            @Nullable String tableType)
+            @Nullable String tableType,
+            boolean includeSchema)
             throws DatabaseNotExistException {
         PagedList<String> pagedTableNames =
                 listTablesPaged(databaseName, maxResults, pageToken, tableNamePattern, tableType);

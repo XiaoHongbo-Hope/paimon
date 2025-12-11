@@ -206,6 +206,8 @@ public interface Catalog extends AutoCloseable {
      *     returned if not set or empty. Currently, only prefix matching is supported.
      * @param tableType Optional parameter to filter tables by table type. All table types will be
      *     returned if not set or empty.
+     * @param includeSchema Whether to include schema in the response of rest catalog. If false,
+     *     schema will be null * to reduce response size. Note other catalog will ignore this param.
      * @return a list of the table details with provided page size in this database and next page
      *     token, or a list of the details of all tables in this database if the catalog does not
      *     {@link #supportsListObjectsPaged()}.
@@ -217,8 +219,45 @@ public interface Catalog extends AutoCloseable {
             @Nullable Integer maxResults,
             @Nullable String pageToken,
             @Nullable String tableNamePattern,
-            @Nullable String tableType)
+            @Nullable String tableType,
+            boolean includeSchema)
             throws DatabaseNotExistException;
+
+    /**
+     * Get paged list of table summaries under this database. An empty list is returned if none
+     * exists.
+     *
+     * <p>This method returns lightweight table summary information (e.g., table type and format)
+     * without full schema details, optimized for UI display. This is primarily useful for REST
+     * catalogs. For non-REST catalogs, this method may throw UnsupportedOperationException.
+     *
+     * <p>NOTE: System tables will not be listed.
+     *
+     * @param databaseName Name of the database to list table summaries.
+     * @param maxResults Optional parameter indicating the maximum number of results to include in
+     *     the result. If maxResults is not specified or set to 0, will return the default number of
+     *     max results.
+     * @param pageToken Optional parameter indicating the next page token allows list to be start
+     *     from a specific point.
+     * @param tableNamePattern A sql LIKE pattern (%) for table names. All table summaries will be
+     *     returned if not set or empty. Currently, only prefix matching is supported.
+     * @param tableType Optional parameter to filter tables by table type. All table types will be
+     *     returned if not set or empty.
+     * @return a list of the table summaries with provided page size in this database and next page
+     *     token.
+     * @throws DatabaseNotExistException if the database does not exist
+     * @throws UnsupportedOperationException if the catalog does not support this operation
+     */
+    default PagedList<Map<String, Object>> listTableSummaryPaged(
+            String databaseName,
+            @Nullable Integer maxResults,
+            @Nullable String pageToken,
+            @Nullable String tableNamePattern,
+            @Nullable String tableType)
+            throws DatabaseNotExistException {
+        throw new UnsupportedOperationException(
+                "listTableSummaryPaged is not supported by " + this.getClass().getName());
+    }
 
     /**
      * Gets an array of tables for a catalog.

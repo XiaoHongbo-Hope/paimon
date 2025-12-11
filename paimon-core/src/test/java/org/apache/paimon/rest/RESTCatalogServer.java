@@ -77,11 +77,13 @@ import org.apache.paimon.rest.responses.ListFunctionsResponse;
 import org.apache.paimon.rest.responses.ListPartitionsResponse;
 import org.apache.paimon.rest.responses.ListSnapshotsResponse;
 import org.apache.paimon.rest.responses.ListTableDetailsResponse;
+import org.apache.paimon.rest.responses.ListTableSummaryResponse;
 import org.apache.paimon.rest.responses.ListTablesGloballyResponse;
 import org.apache.paimon.rest.responses.ListTablesResponse;
 import org.apache.paimon.rest.responses.ListViewDetailsResponse;
 import org.apache.paimon.rest.responses.ListViewsGloballyResponse;
 import org.apache.paimon.rest.responses.ListViewsResponse;
+import org.apache.paimon.rest.responses.TableSummary;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
@@ -147,6 +149,7 @@ import static org.apache.paimon.rest.RESTApi.VIEW_NAME_PATTERN;
 import static org.apache.paimon.rest.ResourcePaths.FUNCTIONS;
 import static org.apache.paimon.rest.ResourcePaths.FUNCTION_DETAILS;
 import static org.apache.paimon.rest.ResourcePaths.TABLE_DETAILS;
+import static org.apache.paimon.rest.ResourcePaths.TABLE_SUMMARY;
 import static org.apache.paimon.rest.ResourcePaths.VIEWS;
 import static org.apache.paimon.rest.ResourcePaths.VIEW_DETAILS;
 
@@ -337,6 +340,8 @@ public class RESTCatalogServer {
                                         && resources[1].startsWith(ResourcePaths.TABLES);
                         boolean isTableDetails =
                                 resources.length == 2 && resources[1].startsWith(TABLE_DETAILS);
+                        boolean isTableSummary =
+                                resources.length == 2 && resources[1].startsWith(TABLE_SUMMARY);
                         boolean isView =
                                 resources.length == 3
                                         && "views".equals(resources[1])
@@ -475,6 +480,8 @@ public class RESTCatalogServer {
                                     parameters);
                         } else if (isTableDetails) {
                             return tableDetailsHandle(parameters, databaseName);
+                        } else if (isTableSummary) {
+                            return tableSummaryHandle(parameters, databaseName);
                         } else if (isFunctions) {
                             return functionsApiHandler(
                                     databaseName, restAuthParameter.method(), data, parameters);
@@ -1401,6 +1408,10 @@ public class RESTCatalogServer {
             String databaseName, Map<String, String> parameters) {
         String tableNamePattern = parameters.get(TABLE_NAME_PATTERN);
         String tableType = parameters.get(TABLE_TYPE);
+        String includeSchemaParam = parameters.get("includeSchema");
+        // Default to true for backward compatibility
+        boolean includeSchema =
+                includeSchemaParam == null || "true".equalsIgnoreCase(includeSchemaParam);
         List<GetTableResponse> tableDetails = new ArrayList<>();
         for (Map.Entry<String, TableMetadata> entry : tableMetadataStore.entrySet()) {
             Identifier identifier = Identifier.fromString(entry.getKey());
@@ -1431,7 +1442,7 @@ public class RESTCatalogServer {
                                 entry.getValue().schema().options().get(PATH.key()),
                                 entry.getValue().isExternal(),
                                 entry.getValue().schema().id(),
-                                entry.getValue().schema().toSchema(),
+                                includeSchema ? entry.getValue().schema().toSchema() : null,
                                 "owner",
                                 1L,
                                 "created",
@@ -1441,6 +1452,86 @@ public class RESTCatalogServer {
             }
         }
         return tableDetails;
+    }
+
+    private MockResponse tableSummaryHandle(Map<String, String> parameters, String databaseName) {
+        List<TableSummary> tableSummaries = listTableSummary(databaseName, parameters);
+        if (!tableSummaries.isEmpty()) {
+            int maxResults;
+            try {
+                maxResults = getMaxResults(parameters);
+            } catch (NumberFormatException e) {
+                return handleInvalidMaxResults(parameters);
+            }
+            String pageToken = parameters.get(PAGE_TOKEN);
+            PagedList<TableSummary> pagedTableSummaries =
+                    buildPagedEntities(tableSummaries, maxResults, pageToken);
+            return new MockResponse()
+                    .setResponseCode(200)
+                    .setBody(
+                            new ListTableSummaryResponse(
+                                    pagedTableSummaries.getElements(),
+                                    pagedTableSummaries.getNextPageToken()));
+        }
+        return new MockResponse()
+                .setResponseCode(200)
+                .setBody(new ListTableSummaryResponse(Collections.emptyList(), null));
+    }
+
+    private List<TableSummary> listTableSummary(
+            String databaseName, Map<String, String> parameters) {
+        String tableNamePattern = parameters.get(TABLE_NAME_PATTERN);
+        String tableType = parameters.get(TABLE_TYPE);
+        List<TableSummary> tableSummaries = new ArrayList<>();
+        for (Map.Entry<String, TableMetadata> entry : tableMetadataStore.entrySet()) {
+            Identifier identifier = Identifier.fromString(entry.getKey());
+            if (databaseName.equals(identifier.getDatabaseName())
+                    && (Objects.isNull(tableNamePattern)
+                            || matchNamePattern(identifier.getTableName(), tableNamePattern))) {
+
+                // Check table type filter if specified
+                if (StringUtils.isNotEmpty(tableType)) {
+                    String actualTableType = entry.getValue().schema().options().get(TYPE.key());
+                    if (StringUtils.equals(tableType, "table")) {
+                        // When filtering by "table" type, return tables with null or "table" type
+                        if (actualTableType != null && !"table".equals(actualTableType)) {
+                            continue;
+                        }
+                    } else {
+                        // For other table types, return exact matches
+                        if (!StringUtils.equals(tableType, actualTableType)) {
+                            continue;
+                        }
+                    }
+                }
+
+                Map<String, String> options = entry.getValue().schema().options();
+                String tableTypeValue = options.get(TYPE.key());
+                String tableFormatValue = null;
+                if (TableType.FORMAT_TABLE.toString().equals(tableTypeValue)) {
+                    tableFormatValue =
+                            options.getOrDefault(
+                                    CoreOptions.FILE_FORMAT.key(),
+                                    CoreOptions.FILE_FORMAT.defaultValue());
+                }
+
+                TableSummary tableSummary =
+                        new TableSummary(
+                                entry.getValue().uuid(),
+                                identifier.getTableName(),
+                                options.get(PATH.key()),
+                                entry.getValue().isExternal(),
+                                tableTypeValue,
+                                tableFormatValue,
+                                "owner",
+                                1L,
+                                "created",
+                                1L,
+                                "updated");
+                tableSummaries.add(tableSummary);
+            }
+        }
+        return tableSummaries;
     }
 
     private MockResponse tablesHandle(Map<String, String> parameters) {

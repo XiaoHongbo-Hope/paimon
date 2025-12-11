@@ -48,6 +48,7 @@ import org.apache.paimon.rest.responses.GetDatabaseResponse;
 import org.apache.paimon.rest.responses.GetFunctionResponse;
 import org.apache.paimon.rest.responses.GetTableResponse;
 import org.apache.paimon.rest.responses.GetViewResponse;
+import org.apache.paimon.rest.responses.TableSummary;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
@@ -247,17 +248,55 @@ public class RESTCatalog implements Catalog {
             @Nullable Integer maxResults,
             @Nullable String pageToken,
             @Nullable String tableNamePattern,
-            @Nullable String tableType)
+            @Nullable String tableType,
+            boolean includeSchema)
             throws DatabaseNotExistException {
         try {
             PagedList<GetTableResponse> tables =
                     api.listTableDetailsPaged(
-                            db, maxResults, pageToken, tableNamePattern, tableType);
+                            db, maxResults, pageToken, tableNamePattern, tableType, includeSchema);
             return new PagedList<>(
                     tables.getElements().stream()
                             .map(t -> toTable(db, t))
                             .collect(Collectors.toList()),
                     tables.getNextPageToken());
+        } catch (NoSuchResourceException e) {
+            throw new DatabaseNotExistException(db);
+        }
+    }
+
+    @Override
+    public PagedList<Map<String, Object>> listTableSummaryPaged(
+            String db,
+            @Nullable Integer maxResults,
+            @Nullable String pageToken,
+            @Nullable String tableNamePattern,
+            @Nullable String tableType)
+            throws DatabaseNotExistException {
+        try {
+            PagedList<TableSummary> summaries =
+                    api.listTableSummaryPaged(
+                            db, maxResults, pageToken, tableNamePattern, tableType);
+            return new PagedList<>(
+                    summaries.getElements().stream()
+                            .map(
+                                    s -> {
+                                        Map<String, Object> map = new HashMap<>();
+                                        map.put("id", s.getId());
+                                        map.put("name", s.getName());
+                                        map.put("path", s.getPath());
+                                        map.put("isExternal", s.isExternal());
+                                        map.put("tableType", s.getTableType());
+                                        map.put("tableFormat", s.getTableFormat());
+                                        map.put("owner", s.getOwner());
+                                        map.put("createdAt", s.getCreatedAt());
+                                        map.put("createdBy", s.getCreatedBy());
+                                        map.put("updatedAt", s.getUpdatedAt());
+                                        map.put("updatedBy", s.getUpdatedBy());
+                                        return map;
+                                    })
+                            .collect(Collectors.toList()),
+                    summaries.getNextPageToken());
         } catch (NoSuchResourceException e) {
             throw new DatabaseNotExistException(db);
         }
@@ -413,15 +452,19 @@ public class RESTCatalog implements Catalog {
     }
 
     private TableMetadata toTableMetadata(String db, GetTableResponse response) {
-        TableSchema schema = TableSchema.create(response.getSchemaId(), response.getSchema());
-        Map<String, String> options = new HashMap<>(schema.options());
-        options.put(PATH.key(), response.getPath());
-        response.putAuditOptionsTo(options);
-        Identifier identifier = Identifier.create(db, response.getName());
-        if (identifier.getBranchName() != null) {
-            options.put(BRANCH.key(), identifier.getBranchName());
+        if (Objects.isNull(response.getSchema())) {
+            return new TableMetadata(null, response.isExternal(), response.getId());
+        } else {
+            TableSchema schema = TableSchema.create(response.getSchemaId(), response.getSchema());
+            Map<String, String> options = new HashMap<>(schema.options());
+            options.put(PATH.key(), response.getPath());
+            response.putAuditOptionsTo(options);
+            Identifier identifier = Identifier.create(db, response.getName());
+            if (identifier.getBranchName() != null) {
+                options.put(BRANCH.key(), identifier.getBranchName());
+            }
+            return new TableMetadata(schema.copy(options), response.isExternal(), response.getId());
         }
-        return new TableMetadata(schema.copy(options), response.isExternal(), response.getId());
     }
 
     private Table toTable(String db, GetTableResponse response) {

@@ -355,6 +355,12 @@ paths:
           in: query
           schema:
             type: string
+        - name: includeSchema
+          description: Whether to include schema in the response. If false, schema will be null to reduce response size and improve performance when only table metadata is needed. Default is true.
+          in: query
+          schema:
+            type: boolean
+            default: true
       responses:
         "200":
           description: OK
@@ -362,6 +368,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ListTableDetailsResponse'
+        "401":
+          $ref: '#/components/responses/UnauthorizedErrorResponse'
+        "404":
+          $ref: '#/components/responses/DatabaseNotExistErrorResponse'
+        "500":
+          $ref: '#/components/responses/ServerErrorResponse'
+  /v1/{prefix}/databases/{database}/table-summary:
+    get:
+      tags:
+        - table
+      summary: List table summaries
+      operationId: listTableSummary
+      description: List lightweight table summaries without full schema information. Optimized for UI display where only table type and format are needed.
+      parameters:
+        - name: prefix
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: database
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: maxResults
+          in: query
+          schema:
+            type: integer
+            format: int32
+        - name: pageToken
+          in: query
+          schema:
+            type: string
+        - name: tableNamePattern
+          description: A sql LIKE pattern (%) for table names. Currently, only prefix matching is supported.
+          in: query
+          schema:
+            type: string
+        - name: tableType
+          description: Filter tables by table type. All table types will be returned if not set or empty.
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListTableSummaryResponse'
         "401":
           $ref: '#/components/responses/UnauthorizedErrorResponse'
         "404":
@@ -2794,6 +2850,56 @@ components:
             $ref: '#/components/schemas/GetTableResponse'
         nextPageToken:
           type: string
+    ListTableSummaryResponse:
+      type: object
+      properties:
+        tableSummaries:
+          type: array
+          items:
+            $ref: '#/components/schemas/TableSummary'
+        nextPageToken:
+          type: string
+    TableSummary:
+      type: object
+      description: Lightweight table summary information without full schema details, optimized for UI display.
+      properties:
+        id:
+          type: string
+          description: Unique identifier of the table
+        name:
+          type: string
+          description: Name of the table
+        path:
+          type: string
+          description: Path of the table
+        isExternal:
+          type: boolean
+          description: Whether the table is external
+        tableType:
+          type: string
+          nullable: true
+          description: Type of the table (e.g., "table", "format-table", "materialized-table", "object-table", "lance-table", "iceberg-table")
+        tableFormat:
+          type: string
+          nullable: true
+          description: File format for format-table type (e.g., "csv", "parquet", "orc", "json"). Only applicable for format-table type.
+        owner:
+          type: string
+          description: Owner of the table
+        createdAt:
+          type: integer
+          format: int64
+          description: Creation timestamp
+        createdBy:
+          type: string
+          description: Creator of the table
+        updatedAt:
+          type: integer
+          format: int64
+          description: Last update timestamp
+        updatedBy:
+          type: string
+          description: Last updater of the table
     ListTablesGloballyResponse:
       type: object
       properties:

@@ -68,12 +68,14 @@ import org.apache.paimon.rest.responses.ListFunctionsResponse;
 import org.apache.paimon.rest.responses.ListPartitionsResponse;
 import org.apache.paimon.rest.responses.ListSnapshotsResponse;
 import org.apache.paimon.rest.responses.ListTableDetailsResponse;
+import org.apache.paimon.rest.responses.ListTableSummaryResponse;
 import org.apache.paimon.rest.responses.ListTablesGloballyResponse;
 import org.apache.paimon.rest.responses.ListTablesResponse;
 import org.apache.paimon.rest.responses.ListViewDetailsResponse;
 import org.apache.paimon.rest.responses.ListViewsGloballyResponse;
 import org.apache.paimon.rest.responses.ListViewsResponse;
 import org.apache.paimon.rest.responses.PagedResponse;
+import org.apache.paimon.rest.responses.TableSummary;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.table.Instant;
@@ -388,6 +390,8 @@ public class RESTApi {
      *     if not set or empty. Currently, only prefix matching is supported.
      * @param tableType Optional parameter to filter tables by table type. All table types will be
      *     returned if not set or empty.
+     * @param includeSchema Whether to include schema in the response. If false, schema will be null
+     *     * to reduce response size and improve performance when only table metadata is needed.
      * @return {@link PagedList}: elements and nextPageToken.
      * @throws NoSuchResourceException Exception thrown on HTTP 404 means the database not exists
      * @throws ForbiddenException Exception thrown on HTTP 403 means don't have the permission for
@@ -398,7 +402,8 @@ public class RESTApi {
             @Nullable Integer maxResults,
             @Nullable String pageToken,
             @Nullable String tableNamePattern,
-            @Nullable String tableType) {
+            @Nullable String tableType,
+            boolean includeSchema) {
         ListTableDetailsResponse response =
                 client.get(
                         resourcePaths.tableDetails(databaseName),
@@ -406,7 +411,8 @@ public class RESTApi {
                                 maxResults,
                                 pageToken,
                                 Pair.of(TABLE_NAME_PATTERN, tableNamePattern),
-                                Pair.of(TABLE_TYPE, tableType)),
+                                Pair.of(TABLE_TYPE, tableType),
+                                Pair.of("includeSchema", includeSchema ? "true" : "false")),
                         ListTableDetailsResponse.class,
                         restAuthFunction);
         List<GetTableResponse> tables = response.getTableDetails();
@@ -414,6 +420,51 @@ public class RESTApi {
             return new PagedList<>(emptyList(), null);
         }
         return new PagedList<>(tables, response.getNextPageToken());
+    }
+
+    /**
+     * List table summaries for a database.
+     *
+     * <p>Gets an array of lightweight table summaries for a database without full schema
+     * information. This is optimized for UI display where only table type and format are needed.
+     * There is no guarantee of a specific ordering of the elements in the array.
+     *
+     * @param databaseName name of database.
+     * @param maxResults Optional parameter indicating the maximum number of results to include in
+     *     the result. If maxResults is not specified or set to 0, will return the default number of
+     *     max results.
+     * @param pageToken Optional parameter indicating the next page token allows list to be start
+     *     from a specific point.
+     * @param tableNamePattern A sql LIKE pattern (%) for table names. All tables will be returned
+     *     if not set or empty. Currently, only prefix matching is supported.
+     * @param tableType Optional parameter to filter tables by table type. All table types will be
+     *     returned if not set or empty.
+     * @return {@link PagedList}: elements and nextPageToken.
+     * @throws NoSuchResourceException Exception thrown on HTTP 404 means the database not exists
+     * @throws ForbiddenException Exception thrown on HTTP 403 means don't have the permission for
+     *     this database
+     */
+    public PagedList<TableSummary> listTableSummaryPaged(
+            String databaseName,
+            @Nullable Integer maxResults,
+            @Nullable String pageToken,
+            @Nullable String tableNamePattern,
+            @Nullable String tableType) {
+        ListTableSummaryResponse response =
+                client.get(
+                        resourcePaths.tableSummary(databaseName),
+                        buildPagedQueryParams(
+                                maxResults,
+                                pageToken,
+                                Pair.of(TABLE_NAME_PATTERN, tableNamePattern),
+                                Pair.of(TABLE_TYPE, tableType)),
+                        ListTableSummaryResponse.class,
+                        restAuthFunction);
+        List<TableSummary> summaries = response.getTableSummaries();
+        if (summaries == null) {
+            return new PagedList<>(emptyList(), null);
+        }
+        return new PagedList<>(summaries, response.getNextPageToken());
     }
 
     /**
@@ -1318,7 +1369,7 @@ public class RESTApi {
     private final Map<String, String> buildPagedQueryParams(
             @Nullable Integer maxResults,
             @Nullable String pageToken,
-            Pair<String, String>... namePatternPairs) {
+            Pair<String, String>... queryParamPairs) {
         Map<String, String> queryParams = Maps.newHashMap();
         if (Objects.nonNull(maxResults) && maxResults > 0) {
             queryParams.put(MAX_RESULTS, maxResults.toString());
@@ -1326,7 +1377,7 @@ public class RESTApi {
         if (Objects.nonNull(pageToken)) {
             queryParams.put(PAGE_TOKEN, pageToken);
         }
-        for (Pair<String, String> namePatternPair : namePatternPairs) {
+        for (Pair<String, String> namePatternPair : queryParamPairs) {
             String namePatternKey = namePatternPair.getKey();
             String namePatternValue = namePatternPair.getValue();
             if (StringUtils.isNotEmpty(namePatternKey)

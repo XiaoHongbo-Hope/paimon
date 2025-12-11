@@ -25,7 +25,7 @@ import javax.annotation.Nullable;
 /** Metadata for table. */
 public class TableMetadata {
 
-    private final TableSchema schema;
+    @Nullable private final TableSchema schema;
     private final boolean isExternal;
     @Nullable private final String uuid;
 
