@@ -538,7 +538,7 @@ class RESTAOReadWritePy36Test(RESTBaseTest):
         actual = self._read_test_table(read_builder)
         # only records from 1st commit (1st split) will be read
         # might be split of "dt=1" or split of "dt=2"
-        self.assertEqual(actual.num_rows, 4)
+        self.assertEqual(actual.num_rows, 1)
 
     def test_write_wrong_schema(self):
         self.rest_catalog.create_table('default.test_wrong_schema',

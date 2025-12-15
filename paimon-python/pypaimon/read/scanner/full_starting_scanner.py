@@ -288,7 +288,7 @@ class FullStartingScanner(StartingScanner):
                 if scanned_row_count >= self.limit:
                     return limited_splits
 
-        return limited_splits
+        return splits
 
     def _filter_manifest_file(self, file: ManifestFileMeta) -> bool:
         if not self.partition_key_predicate:

@@ -33,12 +33,13 @@ from pypaimon.table.row.offset_row import OffsetRow
 class TableRead:
     """Implementation of TableRead for native Python reading."""
 
-    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField]):
+    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField], limit: Optional[int] = None):
         from pypaimon.table.file_store_table import FileStoreTable
 
         self.table: FileStoreTable = table
         self.predicate = predicate
         self.read_type = read_type
+        self.limit = limit
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
         def _record_generator():
@@ -91,19 +92,38 @@ class TableRead:
 
     def _arrow_batch_generator(self, splits: List[Split], schema: pyarrow.Schema) -> Iterator[pyarrow.RecordBatch]:
         chunk_size = 65536
+        record_count = 0
 
         for split in splits:
+            if self.limit is not None and record_count >= self.limit:
+                return
+
             reader = self._create_split_read(split).create_reader()
             try:
                 if isinstance(reader, RecordBatchReader):
-                    yield from iter(reader.read_arrow_batch, None)
+                    for batch in iter(reader.read_arrow_batch, None):
+                        if self.limit is not None:
+                            if record_count >= self.limit:
+                                return
+                            remaining = self.limit - record_count
+                            if batch.num_rows > remaining:
+                                batch = batch.slice(0, remaining)
+                            record_count += batch.num_rows
+                        yield batch
                 else:
                     row_tuple_chunk = []
                     for row_iterator in iter(reader.read_batch, None):
                         for row in iter(row_iterator.next, None):
+                            if self.limit is not None and record_count >= self.limit:
+                                if row_tuple_chunk:
+                                    batch = self.convert_rows_to_arrow_batch(row_tuple_chunk, schema)
+                                    yield batch
+                                return
+
                             if not isinstance(row, OffsetRow):
                                 raise TypeError(f"Expected OffsetRow, but got {type(row).__name__}")
                             row_tuple_chunk.append(row.row_tuple[row.offset: row.offset + row.arity])
+                            record_count += 1
 
                             if len(row_tuple_chunk) >= chunk_size:
                                 batch = self.convert_rows_to_arrow_batch(row_tuple_chunk, schema)
@@ -151,7 +171,8 @@ class TableRead:
             # Distributed read with specified parallelism
             from pypaimon.read.ray_datasource import PaimonDatasource
             datasource = PaimonDatasource(self, splits)
-            return ray.data.read_datasource(datasource, parallelism=parallelism)
+            # Use override_num_blocks instead of parallelism for Ray 2.10+
+            return ray.data.read_datasource(datasource, override_num_blocks=parallelism)
 
     def _create_split_read(self, split: Split) -> SplitRead:
         if self.table.is_primary_key_table and not split.raw_convertible:

@@ -242,7 +242,7 @@ class RESTTableReadWriteTest(RESTBaseTest):
         actual = self._read_test_table(read_builder)
         # only records from 1st commit (1st split) will be read
         # might be split of "dt=1" or split of "dt=2"
-        self.assertEqual(actual.num_rows, 4)
+        self.assertEqual(actual.num_rows, 1)
 
     def test_pk_parquet_reader(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema,
