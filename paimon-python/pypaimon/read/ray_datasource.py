@@ -54,6 +54,7 @@ class PaimonDatasource(Datasource):
         self.table_read = table_read
         self.splits = splits
         self._schema = None
+        self.limit = table_read.limit
 
     def get_name(self) -> str:
         identifier = self.table_read.table.identifier
@@ -70,7 +71,7 @@ class PaimonDatasource(Datasource):
 
     @staticmethod
     def _distribute_splits_into_equal_chunks(
-        splits: Iterable[Split], n_chunks: int
+            splits: Iterable[Split], n_chunks: int
     ) -> List[List[Split]]:
         """
         Implement a greedy knapsack algorithm to distribute the splits across tasks,
@@ -82,7 +83,7 @@ class PaimonDatasource(Datasource):
 
         # From largest to smallest, add the splits to the smallest chunk one at a time
         for split in sorted(
-            splits, key=lambda s: s.file_size if hasattr(s, 'file_size') and s.file_size > 0 else 0, reverse=True
+                splits, key=lambda s: s.file_size if hasattr(s, 'file_size') and s.file_size > 0 else 0, reverse=True
         ):
             smallest_chunk = heapq.heappop(chunk_sizes)
             chunks[smallest_chunk[1]].append(split)
@@ -120,41 +121,66 @@ class PaimonDatasource(Datasource):
         predicate = self.table_read.predicate
         read_type = self.table_read.read_type
         schema = self._schema
+        limit = self.limit
+
+        # When limit is set, we apply it at both ReadTask level (for optimization) and Ray Dataset level (for correctness)
+        # Strategy:
+        # 1. Each ReadTask applies limit to reduce data reading (optimization)
+        # 2. Ray Dataset's limit() is applied as final safeguard (ensures global correctness)
+        # This is similar to how Iceberg handles limit - optimization at read level, correctness at dataset level
+        # Note: Each ReadTask may read up to 'limit' rows, but Ray Dataset's limit() ensures total <= limit
+        if limit is not None:
+            logger.debug(
+                f"Limit is set to {limit}, will be applied at both ReadTask and Ray Dataset levels"
+            )
+            # Keep limit for ReadTask optimization, but Ray Dataset's limit() will ensure global correctness
 
         # Create a partial function to avoid capturing self in closure
         # This reduces serialization overhead (see https://github.com/ray-project/ray/issues/49107)
         def _get_read_task(
-            splits: List[Split],
-            table=table,
-            predicate=predicate,
-            read_type=read_type,
-            schema=schema,
+                splits: List[Split],
+                table,
+                predicate,
+                read_type,
+                schema,
+                limit,
         ) -> Iterable[pyarrow.Table]:
-            """Read function that will be executed by Ray workers."""
+            """
+            Read function that will be executed by Ray workers.
+            Each ReadTask applies limit for optimization (reduces data reading),
+            but Ray Dataset's limit() ensures global correctness.
+            """
             from pypaimon.read.table_read import TableRead
-            worker_table_read = TableRead(table, predicate, read_type)
-
-            # Read all splits in this chunk
-            arrow_table = worker_table_read.to_arrow(splits)
-
-            # Return as a list to allow Ray to split into multiple blocks if needed
-            if arrow_table is not None and arrow_table.num_rows > 0:
-                return [arrow_table]
-            else:
-                # Return empty table with correct schema
+            
+            # Apply limit at ReadTask level for optimization
+            # Note: Each ReadTask may read up to 'limit' rows, but Ray Dataset's limit() ensures total <= limit
+            worker_table_read = TableRead(table, predicate, read_type, limit)
+            batch_reader = worker_table_read.to_arrow_batch_reader(splits)
+            
+            has_data = False
+            try:
+                for batch in batch_reader:
+                    if batch.num_rows == 0:
+                        continue
+                    yield pyarrow.Table.from_batches([batch])
+                    has_data = True
+            finally:
+                batch_reader.close()
+            
+            if not has_data:
                 empty_table = pyarrow.Table.from_arrays(
                     [pyarrow.array([], type=field.type) for field in schema],
                     schema=schema
                 )
-                return [empty_table]
+                yield empty_table
 
-        # Use partial to create read function without capturing self
         get_read_task = partial(
             _get_read_task,
             table=table,
             predicate=predicate,
             read_type=read_type,
             schema=schema,
+            limit=limit,
         )
 
         read_tasks = []
@@ -187,6 +213,8 @@ class PaimonDatasource(Datasource):
                 num_rows = None  # Let Ray calculate actual row count after merge
             elif predicate is not None:
                 num_rows = None  # Can't estimate with predicate filtering
+            elif limit is not None:
+                num_rows = None
             else:
                 num_rows = total_rows if total_rows > 0 else None
             size_bytes = total_size if total_size > 0 else None
@@ -194,6 +222,7 @@ class PaimonDatasource(Datasource):
             metadata = BlockMetadata(
                 num_rows=num_rows,
                 size_bytes=size_bytes,
+                schema=schema,
                 input_files=input_files if input_files else None,
                 exec_stats=None,  # Will be populated by Ray during execution
             )
@@ -203,7 +232,6 @@ class PaimonDatasource(Datasource):
                 ReadTask(
                     read_fn=lambda splits=chunk_splits: get_read_task(splits),
                     metadata=metadata,
-                    schema=schema,
                 )
             )
 

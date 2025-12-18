@@ -172,7 +172,12 @@ class TableRead:
             from pypaimon.read.ray_datasource import PaimonDatasource
             datasource = PaimonDatasource(self, splits)
             # Use override_num_blocks instead of parallelism for Ray 2.10+
-            return ray.data.read_datasource(datasource, override_num_blocks=parallelism)
+            ray_dataset = ray.data.read_datasource(datasource, override_num_blocks=parallelism)
+            
+            if self.limit is not None:
+                ray_dataset = ray_dataset.limit(self.limit)
+            
+            return ray_dataset
 
     def _create_split_read(self, split: Split) -> SplitRead:
         if self.table.is_primary_key_table and not split.raw_convertible:

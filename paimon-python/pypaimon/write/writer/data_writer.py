@@ -283,8 +283,40 @@ class DataWriter(ABC):
                 "max_values": None,
                 "null_counts": column_array.null_count,
             }
-        min_values = pc.min(column_array).as_py()
-        max_values = pc.max(column_array).as_py()
+        
+        # Check if the column type supports min/max statistics
+        # Complex types like ARRAY, MAP, STRUCT don't support min/max
+        column_type = column_array.type
+        supports_minmax = (
+            pa.types.is_boolean(column_type) or
+            pa.types.is_integer(column_type) or
+            pa.types.is_floating(column_type) or
+            pa.types.is_date(column_type) or
+            pa.types.is_string(column_type) or
+            pa.types.is_binary(column_type)
+        )
+        
+        if not supports_minmax:
+            # For unsupported types (e.g., ARRAY, MAP, STRUCT), skip min/max
+            return {
+                "min_values": None,
+                "max_values": None,
+                "null_counts": column_array.null_count,
+            }
+        
+        # Try to compute min/max, but catch any errors for edge cases
+        try:
+            min_values = pc.min(column_array).as_py()
+            max_values = pc.max(column_array).as_py()
+        except (pa.lib.ArrowNotImplementedError, pa.lib.ArrowInvalid) as e:
+            # If min/max computation fails (e.g., for some unsupported types),
+            # return None for min/max but still return null_count
+            return {
+                "min_values": None,
+                "max_values": None,
+                "null_counts": column_array.null_count,
+            }
+        
         null_counts = column_array.null_count
         return {
             "min_values": min_values,
