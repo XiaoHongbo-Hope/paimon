@@ -107,8 +107,15 @@ class SplitRead(ABC):
             format_reader = FormatBlobReader(self.table.file_io, file_path, read_file_fields,
                                              self.read_fields, read_arrow_predicate, blob_as_descriptor)
         elif file_format == CoreOptions.FILE_FORMAT_LANCE:
-            format_reader = FormatLanceReader(self.table.file_io, file_path, read_file_fields,
-                                              read_arrow_predicate)
+            # Read batch_size from table options, default to 1024 (matching Java's CoreOptions.READ_BATCH_SIZE)
+            batch_size = CoreOptions.read_batch_size(self.table.options)
+            format_reader = FormatLanceReader(
+                self.table.file_io, 
+                file_path, 
+                read_file_fields,
+                read_arrow_predicate,
+                batch_size=batch_size
+            )
         elif file_format == CoreOptions.FILE_FORMAT_PARQUET or file_format == CoreOptions.FILE_FORMAT_ORC:
             format_reader = FormatPyArrowReader(self.table.file_io, file_format, file_path,
                                                 read_file_fields, read_arrow_predicate)

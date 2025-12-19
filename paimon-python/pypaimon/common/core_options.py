@@ -16,10 +16,13 @@
 # limitations under the License.
 ################################################################################
 
+import logging
 from enum import Enum
 from typing import List, Optional
 
 from pypaimon.common.memory_size import MemorySize
+
+logger = logging.getLogger(__name__)
 
 
 class CoreOptions(str, Enum):
@@ -57,6 +60,9 @@ class CoreOptions(str, Enum):
     INCREMENTAL_BETWEEN_TIMESTAMP = "incremental-between-timestamp"
     SOURCE_SPLIT_TARGET_SIZE = "source.split.target-size"
     SOURCE_SPLIT_OPEN_FILE_COST = "source.split.open-file-cost"
+    # Read/Write options
+    READ_BATCH_SIZE = "read.batch-size"
+    WRITE_BATCH_SIZE = "write.batch-size"
     # Commit options
     COMMIT_USER_PREFIX = "commit.user-prefix"
     ROW_TRACKING_ENABLED = "row-tracking.enabled"
@@ -150,6 +156,26 @@ class CoreOptions(str, Enum):
         if file_format is None:
             file_format = default
         return file_format.lower() if file_format else file_format
+
+    @staticmethod
+    def read_batch_size(options: dict, default: int = 1024) -> int:
+        batch_size_str = options.get(CoreOptions.READ_BATCH_SIZE)
+        if batch_size_str is None:
+            return default
+        
+        try:
+            batch_size = int(batch_size_str)
+            if batch_size <= 0:
+                logger.warning(
+                    f"Invalid batch size {batch_size}, must be > 0. Using default {default}"
+                )
+                return default
+            return batch_size
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"Could not parse batch size '{batch_size_str}': {e}. Using default {default}"
+            )
+            return default
 
 
 class ExternalPathStrategy(str, Enum):

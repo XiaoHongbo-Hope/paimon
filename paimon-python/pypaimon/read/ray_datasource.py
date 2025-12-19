@@ -219,15 +219,15 @@ class PaimonDatasource(Datasource):
                 num_rows = total_rows if total_rows > 0 else None
             size_bytes = total_size if total_size > 0 else None
 
+            # In Ray 2.44.0, BlockMetadata requires schema parameter
             metadata = BlockMetadata(
                 num_rows=num_rows,
                 size_bytes=size_bytes,
-                schema=schema,
+                schema=schema,  # Required in Ray 2.44.0
                 input_files=input_files if input_files else None,
                 exec_stats=None,  # Will be populated by Ray during execution
             )
 
-            # TODO: per_task_row_limit is not supported in Ray 2.48.0, will be added in future versions
             read_tasks.append(
                 ReadTask(
                     read_fn=lambda splits=chunk_splits: get_read_task(splits),

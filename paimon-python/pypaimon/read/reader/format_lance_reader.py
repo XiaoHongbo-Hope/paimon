@@ -39,7 +39,7 @@ class FormatLanceReader(RecordBatchReader):
     """
 
     def __init__(self, file_io: FileIO, file_path: str, read_fields: List[str],
-                 push_down_predicate: Any, batch_size: int = 4096):
+                 push_down_predicate: Any, batch_size: int = 1024):
         """Initialize Lance reader with lazy loading."""
 
         file_path_for_lance, storage_options = to_lance_specified(file_io, file_path)
