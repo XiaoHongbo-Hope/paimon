@@ -82,7 +82,4 @@ class PaimonDatasink(Datasink):
         table_commit = self.writer_builder.new_commit()
         table_commit.commit([commit_message for commit_messages in write_result.write_returns for commit_message in commit_messages])
         table_commit.close()
-        
-    def on_write_failed(self, error):
-        return super().on_write_failed(error)
-       
+    
