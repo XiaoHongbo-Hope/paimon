@@ -453,8 +453,14 @@ class FullStartingScanner(StartingScanner):
         for entry in file_entries:
             partitioned_files[(tuple(entry.partition.values), entry.bucket)].append(entry)
 
+        def weight_func_file(f: DataFileMeta) -> int:
+            return max(f.file_size, self.open_file_cost)
+        
         def weight_func(fl: List[DataFileMeta]) -> int:
             return max(sum(f.file_size for f in fl), self.open_file_cost)
+
+        merge_engine_str = self.table.options.get('merge-engine', 'deduplicate').lower()
+        merge_engine_first_row = merge_engine_str == 'first-row'
 
         splits = []
         for key, file_entries in partitioned_files.items():
@@ -462,19 +468,40 @@ class FullStartingScanner(StartingScanner):
                 return []
 
             data_files: List[DataFileMeta] = [e.file for e in file_entries]
-            partition_sort_runs: List[List[SortedRun]] = IntervalPartition(data_files).partition()
-            sections: List[List[DataFileMeta]] = [
-                [file for s in sl for file in s.files]
-                for sl in partition_sort_runs
-            ]
+            
+            raw_convertible = all(
+                f.level != 0 and (f.delete_row_count is None or f.delete_row_count == 0)
+                for f in data_files
+            )
+            
+            levels = {f.level for f in data_files}
+            one_level = len(levels) == 1
+            
+            use_optimized_path = (
+                raw_convertible and 
+                (self.deletion_vectors_enabled or merge_engine_first_row or one_level)
+            )
+            
+            if use_optimized_path:
+                packed_files: List[List[DataFileMeta]] = self._pack_for_ordered(
+                    data_files, weight_func_file, self.target_split_size
+                )
+                splits += self._build_split_from_pack(packed_files, file_entries, True, deletion_files_map)
+            else:
+                partition_sort_runs: List[List[SortedRun]] = IntervalPartition(data_files).partition()
+                sections: List[List[DataFileMeta]] = [
+                    [file for s in sl for file in s.files]
+                    for sl in partition_sort_runs
+                ]
 
-            packed_files: List[List[List[DataFileMeta]]] = self._pack_for_ordered(sections, weight_func,
-                                                                                  self.target_split_size)
-            flatten_packed_files: List[List[DataFileMeta]] = [
-                [file for sub_pack in pack for file in sub_pack]
-                for pack in packed_files
-            ]
-            splits += self._build_split_from_pack(flatten_packed_files, file_entries, True, deletion_files_map)
+                packed_files: List[List[List[DataFileMeta]]] = self._pack_for_ordered(sections, weight_func,
+                                                                                      self.target_split_size)
+                
+                flatten_packed_files: List[List[DataFileMeta]] = [
+                    [file for sub_pack in pack for file in sub_pack]
+                    for pack in packed_files
+                ]
+                splits += self._build_split_from_pack(flatten_packed_files, file_entries, True, deletion_files_map)
         return splits
 
     def _create_data_evolution_splits(

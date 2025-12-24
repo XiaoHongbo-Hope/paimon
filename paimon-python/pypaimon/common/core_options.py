@@ -21,6 +21,7 @@ from enum import Enum
 from typing import List, Optional
 
 from pypaimon.common.memory_size import MemorySize
+from pypaimon.common.time_utils import parse_duration
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,10 @@ class CoreOptions(str, Enum):
     WRITE_BATCH_SIZE = "write.batch-size"
     # Commit options
     COMMIT_USER_PREFIX = "commit.user-prefix"
+    COMMIT_MAX_RETRIES = "commit.max-retries"
+    COMMIT_TIMEOUT = "commit.timeout"
+    COMMIT_MIN_RETRY_WAIT = "commit.min-retry-wait"
+    COMMIT_MAX_RETRY_WAIT = "commit.max-retry-wait"
     ROW_TRACKING_ENABLED = "row-tracking.enabled"
     DATA_EVOLUTION_ENABLED = "data-evolution.enabled"
     # External paths options
@@ -174,6 +179,92 @@ class CoreOptions(str, Enum):
         except (ValueError, TypeError) as e:
             logger.warning(
                 f"Could not parse batch size '{batch_size_str}': {e}. Using default {default}"
+            )
+            return default
+
+    @staticmethod
+    def commit_max_retries(options: dict, default: int = 10) -> int:
+        """Get commit max retries from options, default to 10."""
+        retries_str = options.get(CoreOptions.COMMIT_MAX_RETRIES)
+        if retries_str is None:
+            return default
+        try:
+            retries = int(retries_str)
+            if retries < 0:
+                logger.warning(
+                    f"Invalid commit max retries {retries}, must be >= 0. Using default {default}"
+                )
+                return default
+            return retries
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"Could not parse commit max retries '{retries_str}': {e}. Using default {default}"
+            )
+            return default
+
+    @staticmethod
+    def commit_timeout(options: dict, default: Optional[int] = None) -> int:
+        """
+        Get commit timeout from options in milliseconds.
+        Returns sys.maxsize (effectively unlimited) if not set, matching Java's Long.MAX_VALUE behavior.
+        """
+        import sys
+        timeout_str = options.get(CoreOptions.COMMIT_TIMEOUT)
+        if timeout_str is None:
+            # Match Java: return Long.MAX_VALUE (effectively unlimited)
+            return sys.maxsize if default is None else default
+        try:
+            # Parse duration string like "10s", "5m", "100ms"
+            timeout_ms = parse_duration(timeout_str)
+            if timeout_ms <= 0:
+                logger.warning(
+                    f"Invalid commit timeout {timeout_str}, must be > 0. Using unlimited"
+                )
+                return sys.maxsize
+            return timeout_ms
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"Could not parse commit timeout '{timeout_str}': {e}. Using unlimited"
+            )
+            return sys.maxsize
+
+    @staticmethod
+    def commit_min_retry_wait(options: dict, default: int = 10) -> int:
+        """Get commit min retry wait from options in milliseconds, default to 10ms."""
+        wait_str = options.get(CoreOptions.COMMIT_MIN_RETRY_WAIT)
+        if wait_str is None:
+            return default
+        try:
+            wait_ms = parse_duration(wait_str)
+            if wait_ms < 0:
+                logger.warning(
+                    f"Invalid commit min retry wait {wait_str}, must be >= 0. Using default {default}ms"
+                )
+                return default
+            return wait_ms
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"Could not parse commit min retry wait '{wait_str}': {e}. Using default {default}ms"
+            )
+            return default
+
+    @staticmethod
+    def commit_max_retry_wait(options: dict, default: int = 10000) -> int:
+        """Get commit max retry wait from options in milliseconds, default to 10s (10000ms)."""
+        wait_str = options.get(CoreOptions.COMMIT_MAX_RETRY_WAIT)
+        if wait_str is None:
+            return default
+        try:
+            wait_ms = parse_duration(wait_str)
+            if wait_ms < 0:
+                logger.warning(
+                    f"Invalid commit max retry wait {wait_str}, must be >= 0. Using default {default}ms"
+                )
+                return default
+            return wait_ms
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"Could not parse commit max retry wait '{wait_str}': {e}. Using default {default}ms"
             )
             return default
 
