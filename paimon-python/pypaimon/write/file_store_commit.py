@@ -99,10 +99,10 @@ class FileStoreCommit:
         self.manifest_merge_min_count = 30
         
         # Retry configuration
-        self.commit_max_retries = CoreOptions.commit_max_retries(table.options.data)
-        self.commit_timeout = CoreOptions.commit_timeout(table.options.data)
-        self.commit_min_retry_wait = CoreOptions.commit_min_retry_wait(table.options.data)
-        self.commit_max_retry_wait = CoreOptions.commit_max_retry_wait(table.options.data)
+        self.commit_max_retries = CoreOptions.commit_max_retries(table.options)
+        self.commit_timeout = CoreOptions.commit_timeout(table.options)
+        self.commit_min_retry_wait = CoreOptions.commit_min_retry_wait(table.options)
+        self.commit_max_retry_wait = CoreOptions.commit_max_retry_wait(table.options)
 
     def commit(self, commit_messages: List[CommitMessage], commit_identifier: int):
         """Commit the given commit messages in normal append mode."""

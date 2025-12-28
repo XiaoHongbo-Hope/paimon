@@ -102,6 +102,12 @@ class FileIO:
             client_kwargs['endpoint_override'] = (oss_bucket + "." +
                                                   self.properties.get(OssOptions.OSS_ENDPOINT))
 
+        from pyarrow.fs import AwsStandardS3RetryStrategy
+        retry_strategy = AwsStandardS3RetryStrategy(max_attempts=10)
+        client_kwargs['retry_strategy'] = retry_strategy
+        client_kwargs['request_timeout'] = 60
+        client_kwargs['connect_timeout'] = 60
+
         return S3FileSystem(**client_kwargs)
 
     def _initialize_s3_fs(self) -> FileSystem:
@@ -115,6 +121,12 @@ class FileIO:
             "region": self.properties.get(S3Options.S3_REGION),
             "force_virtual_addressing": True,
         }
+
+        from pyarrow.fs import AwsStandardS3RetryStrategy
+        retry_strategy = AwsStandardS3RetryStrategy(max_attempts=10)
+        client_kwargs['retry_strategy'] = retry_strategy
+        client_kwargs['request_timeout'] = 60
+        client_kwargs['connect_timeout'] = 60
 
         return S3FileSystem(**client_kwargs)
 

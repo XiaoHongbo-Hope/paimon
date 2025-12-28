@@ -160,24 +160,25 @@ class TableRead:
             )
             return ray.data.from_arrow(empty_table)
 
-        # Validate parallelism parameter
-        if parallelism < 1:
-            raise ValueError(f"parallelism must be at least 1, got {parallelism}")
+        if concurrency is not None and concurrency < 1:
+            raise ValueError(f"concurrency must be at least 1 if provided, got {concurrency}")
 
-        if parallelism == 1:
-            # Single-task read (simple mode)
-            return ray.data.from_arrow(self.to_arrow(splits))
-        else:
-            # Distributed read with specified parallelism
-            from pypaimon.read.ray_datasource import PaimonDatasource
-            datasource = PaimonDatasource(self, splits)
-            # Use override_num_blocks instead of parallelism for Ray 2.10+
-            ray_dataset = ray.data.read_datasource(datasource, override_num_blocks=parallelism)
-            
-            if self.limit is not None:
-                ray_dataset = ray_dataset.limit(self.limit)
-            
-            return ray_dataset
+        from pypaimon.read.ray_datasource import PaimonDatasource
+        datasource = PaimonDatasource(self, splits)
+
+        read_args = {}
+        if concurrency is not None:
+            read_args["concurrency"] = concurrency
+
+        if parallelism >= 1:
+            read_args["override_num_blocks"] = parallelism
+
+        ray_dataset = ray.data.read_datasource(datasource, **read_args)
+
+        if self.limit is not None:
+            ray_dataset = ray_dataset.limit(self.limit)
+
+        return ray_dataset
 
     def _create_split_read(self, split: Split) -> SplitRead:
         if self.table.is_primary_key_table and not split.raw_convertible:
