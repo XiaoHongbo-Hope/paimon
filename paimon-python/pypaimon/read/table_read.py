@@ -148,7 +148,8 @@ class TableRead:
         con.register(table_name, self.to_arrow(splits))
         return con
 
-    def to_ray(self, splits: List[Split], parallelism: int = 1) -> "ray.data.dataset.Dataset":
+    def to_ray(self, splits: List[Split], parallelism: int = -1,
+               concurrency: Optional[int] = None) -> "ray.data.dataset.Dataset":
         """Convert Paimon table data to Ray Dataset."""
         import ray
 

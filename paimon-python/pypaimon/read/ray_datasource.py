@@ -25,6 +25,8 @@ from functools import partial
 from typing import List, Optional, Iterable
 
 import pyarrow
+from packaging.version import parse
+import ray
 
 from pypaimon.read.split import Split
 from pypaimon.read.table_read import TableRead
@@ -95,10 +97,15 @@ class PaimonDatasource(Datasource):
 
         return chunks
 
-    def get_read_tasks(self, parallelism: int) -> List:
+    def get_read_tasks(self, parallelism: int, **kwargs) -> List:
         """Return a list of read tasks that can be executed in parallel."""
         from ray.data.datasource import ReadTask
         from ray.data.block import BlockMetadata
+
+        per_task_row_limit = kwargs.get('per_task_row_limit', None)
+        if per_task_row_limit is not None:
+            logger.debug(f"per_task_row_limit={per_task_row_limit} provided by Ray, "
+                        f"but using self.limit={self.limit} instead")
 
         # Validate parallelism parameter
         if parallelism < 1:
@@ -219,14 +226,17 @@ class PaimonDatasource(Datasource):
                 num_rows = total_rows if total_rows > 0 else None
             size_bytes = total_size if total_size > 0 else None
 
-            # In Ray 2.44.0, BlockMetadata requires schema parameter
-            metadata = BlockMetadata(
-                num_rows=num_rows,
-                size_bytes=size_bytes,
-                schema=schema,  # Required in Ray 2.44.0
-                input_files=input_files if input_files else None,
-                exec_stats=None,  # Will be populated by Ray during execution
-            )
+            metadata_kwargs = {
+                'num_rows': num_rows,
+                'size_bytes': size_bytes,
+                'input_files': input_files if input_files else None,
+                'exec_stats': None,  # Will be populated by Ray during execution
+            }
+
+            if parse(ray.__version__) < parse("2.48.0"):
+                metadata_kwargs['schema'] = schema
+
+            metadata = BlockMetadata(**metadata_kwargs)
 
             read_tasks.append(
                 ReadTask(
