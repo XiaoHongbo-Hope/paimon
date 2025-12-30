@@ -30,11 +30,7 @@ def to_lance_specified(file_io: FileIO, file_path: str) -> Tuple[str, Optional[D
     if hasattr(file_io, 'try_to_refresh_token'):
         file_io.try_to_refresh_token()
         if hasattr(file_io, 'token') and file_io.token:
-            if hasattr(file_io, '_merge_token_with_catalog_options'):
-                merged_token = file_io._merge_token_with_catalog_options(file_io.token.token)
-                file_io.properties.update(merged_token)
-            else:
-                file_io.properties.update(file_io.token.token)
+            file_io.properties.update(file_io.token.token)
     
     scheme, _, _ = file_io.parse_location(file_path)
     storage_options = None
