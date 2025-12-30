@@ -24,10 +24,10 @@ from pypaimon.common.config import OssOptions
 from pypaimon.common.file_io import FileIO
 
 
-def to_lance_specified(file_io: FileIO, file_path: str, refresh_token: bool = False) -> Tuple[str, Optional[Dict[str, str]]]:
+def to_lance_specified(file_io: FileIO, file_path: str) -> Tuple[str, Optional[Dict[str, str]]]:
     """Convert path and extract storage options for Lance format.
     """
-    if refresh_token and hasattr(file_io, 'try_to_refresh_token'):
+    if hasattr(file_io, 'try_to_refresh_token'):
         file_io.try_to_refresh_token()
         if hasattr(file_io, 'token') and file_io.token:
             file_io.properties.update(file_io.token.token)

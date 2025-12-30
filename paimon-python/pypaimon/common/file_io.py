@@ -399,7 +399,7 @@ class FileIO:
         try:
             import lance
             from pypaimon.read.reader.lance_utils import to_lance_specified
-            file_path_for_lance, storage_options = to_lance_specified(self, path, refresh_token=True)
+            file_path_for_lance, storage_options = to_lance_specified(self, path)
 
             writer = lance.file.LanceFileWriter(
                 file_path_for_lance, data.schema, storage_options=storage_options, **kwargs)

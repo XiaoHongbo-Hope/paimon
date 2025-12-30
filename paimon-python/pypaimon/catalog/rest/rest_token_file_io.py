@@ -202,6 +202,11 @@ class RESTTokenFileIO(FileIO):
 
     def try_to_refresh_token(self):
         identifier_str = str(self.identifier)
+        
+        if self.token is not None and not self._is_token_expired(self.token):
+            self.log.debug(f"Using instance token (fast path), identifier: {identifier_str}")
+            return
+        
         cached_token = self._get_cached_token(identifier_str)
         if cached_token and not self._is_token_expired(cached_token):
             self.token = cached_token
