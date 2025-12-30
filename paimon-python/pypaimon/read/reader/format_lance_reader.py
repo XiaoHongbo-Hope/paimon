@@ -44,6 +44,8 @@ class FormatLanceReader(RecordBatchReader):
 
         file_path_for_lance, storage_options = to_lance_specified(file_io, file_path)
 
+        self._file_io = file_io
+        self._file_path = file_path
         self._file_path_for_lance = file_path_for_lance
         self._storage_options = storage_options
         self._read_fields = read_fields
@@ -58,6 +60,15 @@ class FormatLanceReader(RecordBatchReader):
         """Lazy initialization: create reader only when needed."""
         if self._initialized:
             return
+        
+        if hasattr(self, '_file_io') and hasattr(self._file_io, 'try_to_refresh_token'):
+            self._file_io.try_to_refresh_token()
+            if hasattr(self._file_io, 'token') and self._file_io.token:
+                self._file_io.properties.update(self._file_io.token.token)
+            if hasattr(self, '_file_path'):
+                self._file_path_for_lance, self._storage_options = to_lance_specified(
+                    self._file_io, self._file_path
+                )
         
         import lance
         
