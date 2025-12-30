@@ -103,9 +103,6 @@ class PaimonDatasource(Datasource):
         from ray.data.block import BlockMetadata
 
         per_task_row_limit = kwargs.get('per_task_row_limit', None)
-        if per_task_row_limit is not None:
-            logger.debug(f"per_task_row_limit={per_task_row_limit} provided by Ray, "
-                        f"but using self.limit={self.limit} instead")
 
         # Validate parallelism parameter
         if parallelism < 1:
@@ -238,11 +235,14 @@ class PaimonDatasource(Datasource):
 
             metadata = BlockMetadata(**metadata_kwargs)
 
-            read_tasks.append(
-                ReadTask(
-                    read_fn=lambda splits=chunk_splits: get_read_task(splits),
-                    metadata=metadata,
-                )
-            )
+            # per_task_row_limit parameter was introduced in Ray 2.52.0
+            read_task_kwargs = {
+                'read_fn': lambda splits=chunk_splits: get_read_task(splits),
+                'metadata': metadata,
+            }
+            if parse(ray.__version__) >= parse("2.52.0") and per_task_row_limit is not None:
+                read_task_kwargs['per_task_row_limit'] = per_task_row_limit
+
+            read_tasks.append(ReadTask(**read_task_kwargs))
 
         return read_tasks
