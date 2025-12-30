@@ -228,17 +228,6 @@ class RESTTokenFileIO(FileIO):
             
             token_to_check = cached_token if cached_token else self.token
             if token_to_check is None or self._is_token_expired(token_to_check):
-                import traceback
-                import os
-                import threading
-                self.log.warning(
-                    f"REFRESHING TOKEN for identifier [{identifier_str}]. "
-                    f"This should only happen once per worker per token expiration period. "
-                    f"Cache size: {len(self._TOKEN_CACHE)}, "
-                    f"Process ID: {os.getpid()}, "
-                    f"Thread ID: {threading.get_ident()}, "
-                    f"Call stack: {''.join(traceback.format_stack()[-5:-1])}"
-                )
                 self.refresh_token()
                 self._set_cached_token(identifier_str, self.token)
                 self.log.debug(f"Token refreshed and cached, identifier: {identifier_str}, cache size: {len(self._TOKEN_CACHE)}")
@@ -286,12 +275,6 @@ class RESTTokenFileIO(FileIO):
         return (self.token.expire_at_millis - current_time) < RESTApi.TOKEN_EXPIRATION_SAFE_TIME_MILLIS
 
     def refresh_token(self):
-        import traceback
-        self.log.warning(
-            f"REFRESHING TOKEN for identifier [{self.identifier}] - "
-            f"This should only happen once per worker per token expiration period. "
-            f"Call stack: {''.join(traceback.format_stack()[-5:-1])}"
-        )
         self.log.info(f"begin refresh data token for identifier [{self.identifier}]")
         if self.api_instance is None:
             if not self.properties:
