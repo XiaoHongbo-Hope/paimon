@@ -36,6 +36,9 @@ from pypaimon.common.identifier import Identifier
 class RESTTokenFileIO(FileIO):
     _FILESYSTEM_CACHE: LRUCache = LRUCache(maxsize=1000)
     _CACHE_LOCK = threading.Lock()
+    _TOKEN_CACHE: dict = {}
+    _TOKEN_LOCKS: dict = {}
+    _TOKEN_LOCKS_LOCK = threading.Lock()
 
     def __init__(self, identifier: Identifier, path: str,
                  catalog_options: Optional[dict] = None):
@@ -198,11 +201,79 @@ class RESTTokenFileIO(FileIO):
         filesystem.copy_file(source_str, target_str)
 
     def try_to_refresh_token(self):
-        if self.should_refresh():
-            with self.lock:
-                if self.should_refresh():
-                    self.refresh_token()
+        identifier_str = str(self.identifier)
+        cached_token = self._get_cached_token(identifier_str)
+        if cached_token and not self._is_token_expired(cached_token):
+            self.token = cached_token
+            self.log.debug(f"Using cached token (fast path), identifier: {identifier_str}")
+            return
+        
+        self.log.debug(
+            f"Cache miss, acquiring lock for token refresh, identifier: {identifier_str}, "
+            f"cache size: {len(self._TOKEN_CACHE)}, instance token: {self.token is not None}"
+        )
+        global_lock = self._get_global_token_lock()
+        
+        with global_lock:
+            cached_token = self._get_cached_token(identifier_str)
+            if cached_token and not self._is_token_expired(cached_token):
+                self.token = cached_token
+                self.log.debug(f"Using cached token after acquiring lock, identifier: {identifier_str}")
+                return
+            
+            token_to_check = cached_token if cached_token else self.token
+            if token_to_check is None or self._is_token_expired(token_to_check):
+                import traceback
+                import os
+                import threading
+                self.log.warning(
+                    f"REFRESHING TOKEN for identifier [{identifier_str}]. "
+                    f"This should only happen once per worker per token expiration period. "
+                    f"Cache size: {len(self._TOKEN_CACHE)}, "
+                    f"Process ID: {os.getpid()}, "
+                    f"Thread ID: {threading.get_ident()}, "
+                    f"Call stack: {''.join(traceback.format_stack()[-5:-1])}"
+                )
+                self.refresh_token()
+                self._set_cached_token(identifier_str, self.token)
+                self.log.debug(f"Token refreshed and cached, identifier: {identifier_str}, cache size: {len(self._TOKEN_CACHE)}")
+            else:
+                self.token = cached_token if cached_token else self.token
+                self.log.debug(f"Token refresh not needed after acquiring lock, identifier: {identifier_str}")
+    
+    def _get_cached_token(self, identifier_str: str):
+        with self._TOKEN_LOCKS_LOCK:
+            return self._TOKEN_CACHE.get(identifier_str)
+    
+    def _set_cached_token(self, identifier_str: str, token):
+        with self._TOKEN_LOCKS_LOCK:
+            self._TOKEN_CACHE[identifier_str] = token
+    
+    def _is_token_expired(self, token) -> bool:
+        if token is None:
+            return True
+        current_time = int(time.time() * 1000)
+        return (token.expire_at_millis - current_time) < RESTApi.TOKEN_EXPIRATION_SAFE_TIME_MILLIS
+    
+    def _get_global_token_lock(self):
+        identifier_str = str(self.identifier)
+        with self._TOKEN_LOCKS_LOCK:
+            if identifier_str not in self._TOKEN_LOCKS:
+                self._TOKEN_LOCKS[identifier_str] = threading.Lock()
+            return self._TOKEN_LOCKS[identifier_str]
 
+    def _should_refresh_considering_cache(self):
+        identifier_str = str(self.identifier)
+        cached_token = self._get_cached_token(identifier_str)
+        if cached_token and not self._is_token_expired(cached_token):
+            return False
+        
+        token_to_check = cached_token if cached_token else self.token
+        if token_to_check is None:
+            return True
+        current_time = int(time.time() * 1000)
+        return (token_to_check.expire_at_millis - current_time) < RESTApi.TOKEN_EXPIRATION_SAFE_TIME_MILLIS
+    
     def should_refresh(self):
         if self.token is None:
             return True
@@ -210,6 +281,12 @@ class RESTTokenFileIO(FileIO):
         return (self.token.expire_at_millis - current_time) < RESTApi.TOKEN_EXPIRATION_SAFE_TIME_MILLIS
 
     def refresh_token(self):
+        import traceback
+        self.log.warning(
+            f"REFRESHING TOKEN for identifier [{self.identifier}] - "
+            f"This should only happen once per worker per token expiration period. "
+            f"Call stack: {''.join(traceback.format_stack()[-5:-1])}"
+        )
         self.log.info(f"begin refresh data token for identifier [{self.identifier}]")
         if self.api_instance is None:
             if not self.properties:

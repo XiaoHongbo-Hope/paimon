@@ -41,8 +41,7 @@ class FormatLanceReader(RecordBatchReader):
     def __init__(self, file_io: FileIO, file_path: str, read_fields: List[str],
                  push_down_predicate: Any, batch_size: int = 1024):
         """Initialize Lance reader with lazy loading."""
-
-        file_path_for_lance, storage_options = to_lance_specified(file_io, file_path)
+        file_path_for_lance, storage_options = to_lance_specified(file_io, file_path, refresh_token=False)
 
         self._file_io = file_io
         self._file_path = file_path
@@ -63,7 +62,7 @@ class FormatLanceReader(RecordBatchReader):
         
         if hasattr(self, '_file_io') and hasattr(self, '_file_path'):
             self._file_path_for_lance, self._storage_options = to_lance_specified(
-                self._file_io, self._file_path
+                self._file_io, self._file_path, refresh_token=True
             )
         
         import lance
@@ -81,7 +80,8 @@ class FormatLanceReader(RecordBatchReader):
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         """Read next batch, with lazy initialization."""
-        self._ensure_initialized()
+        if not self._initialized:
+            self._ensure_initialized()
         
         while True:
             try:
