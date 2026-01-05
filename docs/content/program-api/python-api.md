@@ -164,6 +164,33 @@ catalog.create_table(
 table = catalog.get_table('database_name.table_name')
 ```
 
+## Alter Table
+
+You can use the catalog to alter a table, but you need to pay attention to the following points.
+
+- Column cannot specify NOT NULL in the table.
+- Cannot update partition column type in the table.
+- Cannot change nullability of primary key.
+- Cannot rename or drop partition key columns.
+- Cannot rename or drop primary key columns.
+
+```python
+from pypaimon.schema.schema_change import SchemaChange
+from pypaimon.schema.data_types import AtomicType
+
+# add column
+add_column = SchemaChange.add_column("new_col", AtomicType("STRING"))
+# rename column
+rename_column = SchemaChange.rename_column("old_col", "new_col")
+# drop column
+drop_column = SchemaChange.drop_column("col_to_drop")
+# update column type
+update_column_type = SchemaChange.update_column_type("col1", AtomicType("BIGINT"), keep_nullability=False)
+
+schema_changes = [add_column, rename_column, drop_column, update_column_type]
+catalog.alter_table('database_name.table_name', schema_changes, ignore_if_not_exists=False)
+```
+
 ## Batch Write
 
 Paimon table write is Two-Phase Commit, you can write many times, but once committed, no more data can be written.
@@ -683,6 +710,15 @@ The following shows the supported features of Python Paimon compared to Java Pai
      - `bucket = -2` (postpone)
      - `bucket > 0` (fixed)
      - read with deletion vectors enabled
+   - Schema Evolution
+     - Alter table schema
+     - Add column
+     - Rename column
+     - Drop column
+     - Update column type
+     - Update column nullability
+     - Update column comment
+     - Set/Remove table options
    - Read/Write Operations
      - Batch read and write for append tables and primary key tables
      - Predicate filtering
