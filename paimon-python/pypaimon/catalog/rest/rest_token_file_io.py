@@ -18,19 +18,27 @@ limitations under the License.
 import logging
 import threading
 import time
+from datetime import timedelta
+from pathlib import Path
 from typing import Optional
 
+import pyarrow
+import pyarrow.fs
+from pypaimon.common.options.config import CatalogOptions, OssOptions
+from theine import Cache
 from pyarrow._fs import FileSystem
 
 from pypaimon.api.rest_api import RESTApi
+from pypaimon.common.options import Options
+from pypaimon.api.rest_util import RESTUtil
 from pypaimon.catalog.rest.rest_token import RESTToken
 from pypaimon.common.file_io import FileIO
 from pypaimon.common.identifier import Identifier
-from pypaimon.common.options import Options
-from pypaimon.common.options.config import CatalogOptions, OssOptions
 
 
 class RESTTokenFileIO(FileIO):
+    _FILESYSTEM_CACHE: Cache = Cache(1000)
+    _CACHE_LOCK = threading.Lock()
 
     def __init__(self, identifier: Identifier, path: str,
                  catalog_options: Optional[Options] = None):
@@ -44,24 +52,26 @@ class RESTTokenFileIO(FileIO):
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        # Remove non-serializable objects
         state.pop('lock', None)
         state.pop('api_instance', None)
-        # token can be serialized, but we'll refresh it on deserialization
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
-        # Recreate lock after deserialization
         self.lock = threading.Lock()
-        # api_instance will be recreated when needed
         self.api_instance = None
 
     def _initialize_oss_fs(self, path) -> FileSystem:
         self.try_to_refresh_token()
-        merged_token = self._merge_token_with_catalog_options(self.token.token)
-        self.properties.data.update(merged_token)
+        if self.token is None:
+            raise RuntimeError("Token is None after refresh, cannot initialize OSS filesystem")
         return super()._initialize_oss_fs(path)
+
+    def _initialize_s3_fs(self) -> FileSystem:
+        self.try_to_refresh_token()
+        if self.token is None:
+            raise RuntimeError("Token is None after refresh, cannot initialize S3 filesystem")
+        return super()._initialize_s3_fs()
 
     def _merge_token_with_catalog_options(self, token: dict) -> dict:
         """Merge token with catalog options, DLF OSS endpoint should override the standard OSS endpoint."""
@@ -71,9 +81,139 @@ class RESTTokenFileIO(FileIO):
             merged_token[OssOptions.OSS_ENDPOINT.key()] = dlf_oss_endpoint
         return merged_token
 
+    def _get_filesystem(self) -> FileSystem:
+        self.try_to_refresh_token()
+
+        if self.token is None:
+            return self.filesystem
+
+        filesystem, ok = self._FILESYSTEM_CACHE.get(self.token)
+        if ok and filesystem is not None:
+            return filesystem
+
+        with self._CACHE_LOCK:
+            filesystem, ok = self._FILESYSTEM_CACHE.get(self.token)
+            if ok and filesystem is not None:
+                return filesystem
+
+            merged_properties = RESTUtil.merge(
+                self.properties.to_map() if self.properties else {},
+                self.token.token
+            )
+            merged_options = Options(merged_properties)
+
+            scheme, netloc, _ = self.parse_location(self.path)
+            if scheme in {"oss"}:
+                original_properties = self.properties
+                self.properties = merged_options
+                try:
+                    filesystem = self._initialize_oss_fs(self.path)
+                finally:
+                    self.properties = original_properties
+            elif scheme in {"s3", "s3a", "s3n"}:
+                original_properties = self.properties
+                self.properties = merged_options
+                try:
+                    filesystem = self._initialize_s3_fs()
+                finally:
+                    self.properties = original_properties
+            else:
+                filesystem = self.filesystem
+
+            self._FILESYSTEM_CACHE.set(self.token, filesystem, timedelta(hours=10))
+            return filesystem
+
+    def new_input_stream(self, path: str):
+        filesystem = self._get_filesystem()
+        path_str = self.to_filesystem_path(path)
+        return filesystem.open_input_file(path_str)
+
     def new_output_stream(self, path: str):
-        # Call parent class method to ensure path conversion and parent directory creation
-        return super().new_output_stream(path)
+        filesystem = self._get_filesystem()
+        path_str = self.to_filesystem_path(path)
+        parent_dir = Path(path_str).parent
+        if str(parent_dir) and not self.exists(str(parent_dir)):
+            self.mkdirs(str(parent_dir))
+        return filesystem.open_output_stream(path_str)
+
+    def get_file_status(self, path: str):
+        filesystem = self._get_filesystem()
+        path_str = self.to_filesystem_path(path)
+        file_infos = filesystem.get_file_info([path_str])
+        return file_infos[0]
+
+    def list_status(self, path: str):
+        filesystem = self._get_filesystem()
+        path_str = self.to_filesystem_path(path)
+        selector = pyarrow.fs.FileSelector(path_str, recursive=False, allow_not_found=True)
+        return filesystem.get_file_info(selector)
+
+    def exists(self, path: str) -> bool:
+        try:
+            filesystem = self._get_filesystem()
+            path_str = self.to_filesystem_path(path)
+            file_info = filesystem.get_file_info([path_str])[0]
+            result = file_info.type != pyarrow.fs.FileType.NotFound
+            return result
+        except Exception:
+            return False
+
+    def delete(self, path: str, recursive: bool = False) -> bool:
+        try:
+            filesystem = self._get_filesystem()
+            path_str = self.to_filesystem_path(path)
+            file_info = filesystem.get_file_info([path_str])[0]
+            if file_info.type == pyarrow.fs.FileType.Directory:
+                if recursive:
+                    filesystem.delete_dir_contents(path_str)
+                else:
+                    filesystem.delete_dir(path_str)
+            else:
+                filesystem.delete_file(path_str)
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to delete {path}: {e}")
+            return False
+
+    def mkdirs(self, path: str) -> bool:
+        try:
+            filesystem = self._get_filesystem()
+            path_str = self.to_filesystem_path(path)
+            filesystem.create_dir(path_str, recursive=True)
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to create directory {path}: {e}")
+            return False
+
+    def rename(self, src: str, dst: str) -> bool:
+        try:
+            filesystem = self._get_filesystem()
+            dst_str = self.to_filesystem_path(dst)
+            dst_parent = Path(dst_str).parent
+            if str(dst_parent) and not self.exists(str(dst_parent)):
+                self.mkdirs(str(dst_parent))
+
+            src_str = self.to_filesystem_path(src)
+            filesystem.move(src_str, dst_str)
+            return True
+        except Exception as e:
+            self.logger.warning(f"Failed to rename {src} to {dst}: {e}")
+            return False
+
+    def copy_file(self, source_path: str, target_path: str, overwrite: bool = False):
+        if not overwrite and self.exists(target_path):
+            raise FileExistsError(f"Target file {target_path} already exists and overwrite=False")
+
+        filesystem = self._get_filesystem()
+        source_str = self.to_filesystem_path(source_path)
+        target_str = self.to_filesystem_path(target_path)
+        filesystem.copy_file(source_str, target_str)
+
+    def _is_token_expired(self, token) -> bool:
+        if token is None:
+            return True
+        current_time = int(time.time() * 1000)
+        return (token.expire_at_millis - current_time) < RESTApi.TOKEN_EXPIRATION_SAFE_TIME_MILLIS
 
     def try_to_refresh_token(self):
         if self.should_refresh():
@@ -90,13 +230,50 @@ class RESTTokenFileIO(FileIO):
     def refresh_token(self):
         self.log.info(f"begin refresh data token for identifier [{self.identifier}]")
         if self.api_instance is None:
-            self.api_instance = RESTApi(self.properties, False)
+            if not self.properties:
+                raise RuntimeError(
+                    f"Cannot refresh token: properties is None or empty. "
+                    f"This may indicate a serialization issue when passing RESTTokenFileIO to Ray workers."
+                )
 
-        response = self.api_instance.load_table_token(self.identifier)
+            if not self.properties.contains(CatalogOptions.URI):
+                available_keys = list(self.properties.data.keys()) if self.properties else []
+                raise RuntimeError(
+                    f"Cannot refresh token: missing required configuration '{CatalogOptions.URI}' in properties. "
+                    f"This is required to create RESTApi for token refresh. "
+                    f"Available configuration keys: {available_keys}. "
+                    f"This may indicate that catalog options were not properly serialized when passing to Ray workers."
+                )
+
+            uri = self.properties.get(CatalogOptions.URI)
+            if not uri or not uri.strip():
+                raise RuntimeError(
+                    f"Cannot refresh token: '{CatalogOptions.URI}' is empty or whitespace. "
+                    f"Value: '{uri}'. Please ensure the REST catalog URI is properly configured."
+                )
+
+            try:
+                self.api_instance = RESTApi(self.properties, False)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to create RESTApi for token refresh: {e}. "
+                    f"Please check that all required catalog options are properly configured. "
+                    f"Identifier: {self.identifier}"
+                ) from e
+
+        try:
+            response = self.api_instance.load_table_token(self.identifier)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load table token from REST API: {e}. "
+                f"Identifier: {self.identifier}, URI: {self.properties.get(CatalogOptions.URI)}"
+            ) from e
+
         self.log.info(
             f"end refresh data token for identifier [{self.identifier}] expiresAtMillis [{response.expires_at_millis}]"
         )
-        self.token = RESTToken(response.token, response.expires_at_millis)
+        merged_token = self._merge_token_with_catalog_options(response.token)
+        self.token = RESTToken(merged_token, response.expires_at_millis)
 
     def valid_token(self):
         self.try_to_refresh_token()

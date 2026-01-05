@@ -20,12 +20,24 @@ import os
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
+from pypaimon.api.rest_util import RESTUtil
+
 from pypaimon.common.file_io import FileIO
 from pypaimon.common.options.config import OssOptions
 
 
 def to_lance_specified(file_io: FileIO, file_path: str) -> Tuple[str, Optional[Dict[str, str]]]:
-    """Convert path and extract storage options for Lance format."""
+    """Convert path and extract storage options for Lance format.
+    """
+    if hasattr(file_io, 'try_to_refresh_token'):
+        file_io.try_to_refresh_token()
+        if hasattr(file_io, 'token') and file_io.token:
+            merged_properties = RESTUtil.merge(
+                file_io.properties.to_map() if file_io.properties else {},
+                file_io.token.token
+            )
+            file_io.properties.data.update(merged_properties)
+
     scheme, _, _ = file_io.parse_location(file_path)
     storage_options = None
     file_path_for_lance = file_io.to_filesystem_path(file_path)
