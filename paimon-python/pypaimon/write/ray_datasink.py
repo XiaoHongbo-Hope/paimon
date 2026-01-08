@@ -18,74 +18,136 @@
 Module to reawrited a Paimon table from a Ray Dataset, by using the Ray Datasink API.
 """
 
-from typing import Iterable
-from ray.data.datasource.datasink import Datasink, WriteResult, WriteReturnType
-from pypaimon.table.table import Table
-from pypaimon.write.write_builder import WriteBuilder
-from ray.data.block import BlockAccessor
-from ray.data.block import Block
+import logging
+from typing import TYPE_CHECKING, Iterable, List, Optional
+
+from ray.data.datasource.datasink import Datasink, WriteResult
+from ray.util.annotations import DeveloperAPI
+from ray.data.block import BlockAccessor, Block
 from ray.data._internal.execution.interfaces import TaskContext
 import pyarrow as pa
 
+if TYPE_CHECKING:
+    from pypaimon.table.table import Table
+    from pypaimon.write.write_builder import WriteBuilder
+    from pypaimon.write.commit_message import CommitMessage
 
-class PaimonDatasink(Datasink):
-    
-    def __init__(self, table: Table, overwrite=False):
+logger = logging.getLogger(__name__)
+
+
+@DeveloperAPI
+class PaimonDatasink(Datasink[List["CommitMessage"]]):
+    def __init__(
+        self,
+        table: "Table",
+        overwrite: bool = False,
+    ):
         self.table = table
         self.overwrite = overwrite
+        self._writer_builder: Optional["WriteBuilder"] = None
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        if self._writer_builder is not None and not hasattr(self._writer_builder, 'table'):
+            self._writer_builder = None
 
     def on_write_start(self, schema=None) -> None:
-        """Callback for when a write job starts.
+        table_name = self._get_table_name()
+        logger.info(f"Starting write job for table {table_name}")
 
-        Use this method to perform setup for write tasks. For example, creating a
-        staging bucket in S3.
-
-        Args:
-            schema: Optional schema information passed by Ray Data.
-        """
-        self.writer_builder: WriteBuilder = self.table.new_batch_write_builder()
+        self._writer_builder = self.table.new_batch_write_builder()
         if self.overwrite:
-            self.writer_builder = self.writer_builder.overwrite()
+            self._writer_builder = self._writer_builder.overwrite()
 
     def write(
         self,
         blocks: Iterable[Block],
         ctx: TaskContext,
-    ) -> WriteReturnType:
-        """Write blocks. This is used by a single write task.
+    ) -> List["CommitMessage"]:
+        commit_messages_list: List["CommitMessage"] = []
+        table_write = None
 
-        Args:
-            blocks: Generator of data blocks.
-            ctx: ``TaskContext`` for the write task.
+        try:
+            writer_builder = self.table.new_batch_write_builder()
+            if self.overwrite:
+                writer_builder = writer_builder.overwrite()
+            
+            table_write = writer_builder.new_write()
 
-        Returns:
-            Result of this write task. When the entire write operator finishes,
-            All returned values will be passed as `WriteResult.write_returns`
-            to `Datasink.on_write_complete`.
-        """
-        table_write = self.writer_builder.new_write()
-        for block in blocks:
-            block_arrow: pa.Table = BlockAccessor.for_block(block).to_arrow()
-            table_write.write_arrow(block_arrow)
-        commit_messages = table_write.prepare_commit()
-        table_write.close()
-        return commit_messages
+            for block in blocks:
+                block_arrow: pa.Table = BlockAccessor.for_block(block).to_arrow()
 
-    def on_write_complete(self, write_result: WriteResult[WriteReturnType]):
-        """Callback for when a write job completes.
+                if block_arrow.num_rows == 0:
+                    continue
 
-        This can be used to `commit` a write output. This method must
-        succeed prior to ``write_datasink()`` returning to the user. If this
-        method fails, then ``on_write_failed()`` is called.
+                table_write.write_arrow(block_arrow)
 
-        Args:
-            write_result: Aggregated result of the
-            Write operator, containing write results and stats.
-        """
-        table_commit = self.writer_builder.new_commit()
-        table_commit.commit([
-            commit_message
-            for commit_messages in write_result.write_returns
-            for commit_message in commit_messages
-        ])
-        table_commit.close()
+            commit_messages = table_write.prepare_commit()
+            commit_messages_list.extend(commit_messages)
+
+        finally:
+            if table_write is not None:
+                try:
+                    table_write.close()
+                except Exception as e:
+                    logger.warning(
+                        f"Error closing table_write: {e}",
+                        exc_info=e
+                    )
+
+        return commit_messages_list
+
+    def on_write_complete(
+        self, write_result: WriteResult[List["CommitMessage"]]
+    ):
+        table_commit = None
+        try:
+            all_commit_messages = [
+                commit_message
+                for commit_messages in write_result.write_returns
+                for commit_message in commit_messages
+            ]
+
+            non_empty_messages = [
+                msg for msg in all_commit_messages if not msg.is_empty()
+            ]
+
+            if not non_empty_messages:
+                logger.info("No data to commit (all commit messages are empty)")
+                return
+
+            table_name = self._get_table_name()
+            logger.info(
+                f"Committing {len(non_empty_messages)} commit messages "
+                f"for table {table_name}"
+            )
+
+            table_commit = self._writer_builder.new_commit()
+            table_commit.commit(non_empty_messages)
+
+            logger.info(f"Successfully committed write job for table {table_name}")
+        finally:
+            if table_commit is not None:
+                try:
+                    table_commit.close()
+                except Exception as e:
+                    logger.warning(
+                        f"Error closing table_commit: {e}",
+                        exc_info=e
+                    )
+
+    def on_write_failed(self, error: Exception) -> None:
+        table_name = self._get_table_name()
+        logger.warning(
+            f"Write job failed for table {table_name}. Error: {error}",
+            exc_info=error
+        )
+    
+    def _get_table_name(self) -> str:
+        if hasattr(self.table, 'identifier'):
+            return self.table.identifier.get_full_name()
+        return 'unknown'
