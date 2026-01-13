@@ -1,3 +1,4 @@
+################################################################################
 #  Licensed to the Apache Software Foundation (ASF) under one
 #  or more contributor license agreements.  See the NOTICE file
 #  distributed with this work for additional information
@@ -15,7 +16,7 @@
 # limitations under the License.
 ################################################################################
 """
-Module to reawrited a Paimon table from a Ray Dataset, by using the Ray Datasink API.
+Module to write a Paimon table from a Ray Dataset, by using the Ray Datasink API.
 """
 
 import logging
