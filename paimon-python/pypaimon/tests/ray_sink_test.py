@@ -70,7 +70,7 @@ class RaySinkTest(unittest.TestCase):
         self.assertEqual(datasink.table, self.table)
         self.assertFalse(datasink.overwrite)
         self.assertIsNone(datasink._writer_builder)
-        self.assertEqual(datasink._get_table_name(), "test_db.test_table")
+        self.assertEqual(datasink._table_name, "test_db.test_table")
 
         datasink_overwrite = PaimonDatasink(self.table, overwrite=True)
         self.assertTrue(datasink_overwrite.overwrite)

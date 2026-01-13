@@ -44,6 +44,7 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
     ):
         self.table = table
         self.overwrite = overwrite
+        self._table_name = table.identifier.get_full_name()
         self._writer_builder: Optional["WriteBuilder"] = None
         self._pending_commit_messages: List["CommitMessage"] = []
 
@@ -55,10 +56,11 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
         self.__dict__.update(state)
         if self._writer_builder is not None and not hasattr(self._writer_builder, 'table'):
             self._writer_builder = None
+        if not hasattr(self, '_table_name'):
+            self._table_name = self.table.identifier.get_full_name()
 
     def on_write_start(self, schema=None) -> None:
-        table_name = self._get_table_name()
-        logger.info(f"Starting write job for table {table_name}")
+        logger.info(f"Starting write job for table {self._table_name}")
 
         self._writer_builder = self.table.new_batch_write_builder()
         if self.overwrite:
@@ -89,22 +91,9 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
 
             commit_messages = table_write.prepare_commit()
             commit_messages_list.extend(commit_messages)
-
-        except Exception as e:
-            logger.error(
-                f"Error writing data to table {self._get_table_name()}: {e}",
-                exc_info=e
-            )
-            raise
         finally:
             if table_write is not None:
-                try:
-                    table_write.close()
-                except Exception as e:
-                    logger.warning(
-                        f"Error closing table_write: {e}",
-                        exc_info=e
-                    )
+                table_write.close()
 
         return commit_messages_list
 
@@ -128,26 +117,24 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
 
             if not non_empty_messages:
                 logger.info("No data to commit (all commit messages are empty)")
-                self._pending_commit_messages = []  # Clear after successful check
+                self._pending_commit_messages = []
                 return
 
-            table_name = self._get_table_name()
             logger.info(
                 f"Committing {len(non_empty_messages)} commit messages "
-                f"for table {table_name}"
+                f"for table {self._table_name}"
             )
 
             table_commit = self._writer_builder.new_commit()
             commit_messages_to_abort = non_empty_messages
             table_commit.commit(non_empty_messages)
 
-            logger.info(f"Successfully committed write job for table {table_name}")
-            commit_messages_to_abort = []  # Clear after successful commit
-            self._pending_commit_messages = []  # Clear after successful commit
+            logger.info(f"Successfully committed write job for table {self._table_name}")
+            commit_messages_to_abort = []
+            self._pending_commit_messages = []
         except Exception as e:
-            table_name = self._get_table_name()
             logger.error(
-                f"Error committing write job for table {table_name}: {e}",
+                f"Error committing write job for table {self._table_name}: {e}",
                 exc_info=e
             )
             if table_commit is not None and commit_messages_to_abort:
@@ -155,7 +142,7 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
                     table_commit.abort(commit_messages_to_abort)
                     logger.info(
                         f"Aborted {len(commit_messages_to_abort)} commit messages "
-                        f"for table {table_name}"
+                        f"for table {self._table_name}"
                     )
                 except Exception as abort_error:
                     logger.error(
@@ -174,9 +161,8 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
                     )
 
     def on_write_failed(self, error: Exception) -> None:
-        table_name = self._get_table_name()
         logger.error(
-            f"Write job failed for table {table_name}. Error: {error}",
+            f"Write job failed for table {self._table_name}. Error: {error}",
             exc_info=error
         )
         
@@ -187,7 +173,7 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
                     table_commit.abort(self._pending_commit_messages)
                     logger.info(
                         f"Aborted {len(self._pending_commit_messages)} commit messages "
-                        f"for table {table_name} in on_write_failed()"
+                        f"for table {self._table_name} in on_write_failed()"
                     )
                 finally:
                     table_commit.close()
@@ -197,9 +183,4 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
                     exc_info=abort_error
                 )
             finally:
-                self._pending_commit_messages = []  # Clear after abort attempt
-    
-    def _get_table_name(self) -> str:
-        if hasattr(self.table, 'identifier'):
-            return self.table.identifier.get_full_name()
-        return 'unknown'
+                self._pending_commit_messages = []
