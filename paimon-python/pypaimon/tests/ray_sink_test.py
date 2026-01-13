@@ -87,6 +87,39 @@ class RaySinkTest(unittest.TestCase):
         self.assertEqual(new_datasink.table, self.table)
         self.assertFalse(new_datasink.overwrite)
 
+    def test_table_and_writer_builder_serializable(self):
+        import pickle
+        try:
+            pickled_table = pickle.dumps(self.table)
+            unpickled_table = pickle.loads(pickled_table)
+            self.assertIsNotNone(unpickled_table)
+            builder = unpickled_table.new_batch_write_builder()
+            self.assertIsNotNone(builder)
+        except Exception as e:
+            self.fail(f"Table object is not serializable: {e}")
+        
+        writer_builder = self.table.new_batch_write_builder()
+        try:
+            pickled_builder = pickle.dumps(writer_builder)
+            unpickled_builder = pickle.loads(pickled_builder)
+            self.assertIsNotNone(unpickled_builder)
+            table_write = unpickled_builder.new_write()
+            self.assertIsNotNone(table_write)
+            table_write.close()
+        except Exception as e:
+            self.fail(f"WriterBuilder is not serializable: {e}")
+        
+        overwrite_builder = self.table.new_batch_write_builder().overwrite()
+        try:
+            pickled_overwrite = pickle.dumps(overwrite_builder)
+            unpickled_overwrite = pickle.loads(pickled_overwrite)
+            self.assertIsNotNone(unpickled_overwrite)
+            # static_partition is a dict, empty dict {} means overwrite all partitions
+            self.assertIsNotNone(unpickled_overwrite.static_partition)
+            self.assertIsInstance(unpickled_overwrite.static_partition, dict)
+        except Exception as e:
+            self.fail(f"Overwrite WriterBuilder is not serializable: {e}")
+
     def test_on_write_start(self):
         """Test on_write_start with normal and overwrite modes."""
         datasink = PaimonDatasink(self.table, overwrite=False)

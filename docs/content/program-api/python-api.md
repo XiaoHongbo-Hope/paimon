@@ -180,7 +180,7 @@ write_builder = table.new_batch_write_builder()
 table_write = write_builder.new_write()
 table_commit = write_builder.new_commit()
 
-# 2. Write data. Support 3 methods:
+# 2. Write data. Support 4 methods:
 # 2.1 Write pandas.DataFrame
 dataframe = ...
 table_write.write_pandas(dataframe)
@@ -192,6 +192,16 @@ table_write.write_arrow(pa_table)
 # 2.3 Write pyarrow.RecordBatch
 record_batch = ...
 table_write.write_arrow_batch(record_batch)
+
+# 2.4 Write Ray Dataset (requires ray to be installed)
+import ray
+ray_dataset = ray.data.read_json("/path/to/data.jsonl")
+table_write.write_ray(ray_dataset, overwrite=False, concurrency=2)
+# Parameters:
+#   - dataset: Ray Dataset to write
+#   - overwrite: Whether to overwrite existing data (default: False)
+#   - concurrency: Optional max number of concurrent Ray tasks
+#   - ray_remote_args: Optional kwargs passed to ray.remote() (e.g., {"num_cpus": 2})
 
 # 3. Commit data
 commit_messages = table_write.prepare_commit()
