@@ -98,8 +98,8 @@ class RaySinkTest(unittest.TestCase):
         datasink_overwrite.on_write_start()
         self.assertIsNotNone(datasink_overwrite._writer_builder.static_partition)
 
-    def test_write_blocks(self):
-        """Test write method with empty, single, and multiple blocks."""
+    def test_write(self):
+        """Test write method: empty blocks, multiple blocks, error handling, and resource cleanup."""
         datasink = PaimonDatasink(self.table, overwrite=False)
         datasink.on_write_start()
         ctx = Mock(spec=TaskContext)
@@ -113,7 +113,7 @@ class RaySinkTest(unittest.TestCase):
         result = datasink.write([empty_table], ctx)
         self.assertEqual(result, [])
 
-        # Test single block
+        # Test single and multiple blocks
         single_block = pa.table({
             'id': [1, 2, 3],
             'name': ['Alice', 'Bob', 'Charlie'],
@@ -124,7 +124,6 @@ class RaySinkTest(unittest.TestCase):
         if result:
             self.assertTrue(all(isinstance(msg, CommitMessage) for msg in result))
 
-        # Test multiple blocks
         block1 = pa.table({
             'id': [4, 5],
             'name': ['David', 'Eve'],
@@ -140,11 +139,7 @@ class RaySinkTest(unittest.TestCase):
         if result:
             self.assertTrue(all(isinstance(msg, CommitMessage) for msg in result))
 
-    def test_write_creates_writer_builder_on_worker(self):
-        """Test that write method creates WriteBuilder on worker (not using driver's builder)."""
-        datasink = PaimonDatasink(self.table, overwrite=False)
-        datasink.on_write_start()
-
+        # Test that write creates WriteBuilder on worker (not using driver's builder)
         with patch.object(self.table, 'new_batch_write_builder') as mock_builder:
             mock_write_builder = Mock()
             mock_write_builder.overwrite.return_value = mock_write_builder
@@ -158,14 +153,33 @@ class RaySinkTest(unittest.TestCase):
                 'name': ['Alice'],
                 'value': [1.1]
             })
-            ctx = Mock(spec=TaskContext)
-
             datasink.write([data_table], ctx)
-
             mock_builder.assert_called_once()
 
+        invalid_table = pa.table({
+            'wrong_column': [1, 2, 3]
+        })
+        with self.assertRaises(Exception):
+            datasink.write([invalid_table], ctx)
+
+        with patch.object(self.table, 'new_batch_write_builder') as mock_builder:
+            mock_write_builder = Mock()
+            mock_write_builder.overwrite.return_value = mock_write_builder
+            mock_write = Mock()
+            mock_write.write_arrow.side_effect = Exception("Write error")
+            mock_write_builder.new_write.return_value = mock_write
+            mock_builder.return_value = mock_write_builder
+
+            data_table = pa.table({
+                'id': [1],
+                'name': ['Alice'],
+                'value': [1.1]
+            })
+            with self.assertRaises(Exception):
+                datasink.write([data_table], ctx)
+            mock_write.close.assert_called_once()
+
     def test_on_write_complete(self):
-        """Test on_write_complete with empty messages, normal messages, and filtering."""
         from ray.data.datasource.datasink import WriteResult
 
         # Test empty messages
@@ -174,11 +188,36 @@ class RaySinkTest(unittest.TestCase):
         write_result = WriteResult(
             num_rows=0,
             size_bytes=0,
-            write_returns=[[], []]  # Empty commit messages from workers
+            write_returns=[[], []]
         )
         datasink.on_write_complete(write_result)
 
-        # Test with messages
+        # Test with messages and filtering empty messages
+        datasink = PaimonDatasink(self.table, overwrite=False)
+        datasink.on_write_start()
+        commit_msg1 = Mock(spec=CommitMessage)
+        commit_msg1.is_empty.return_value = False
+        commit_msg2 = Mock(spec=CommitMessage)
+        commit_msg2.is_empty.return_value = False
+        empty_msg = Mock(spec=CommitMessage)
+        empty_msg.is_empty.return_value = True
+
+        write_result = WriteResult(
+            num_rows=0,
+            size_bytes=0,
+            write_returns=[[commit_msg1], [commit_msg2], [empty_msg]]
+        )
+
+        mock_commit = Mock()
+        datasink._writer_builder.new_commit = Mock(return_value=mock_commit)
+        datasink.on_write_complete(write_result)
+
+        mock_commit.commit.assert_called_once()
+        commit_args = mock_commit.commit.call_args[0][0]
+        self.assertEqual(len(commit_args), 2)  # Empty message filtered out
+        mock_commit.close.assert_called_once()
+
+        # Test commit failure: abort should be called
         datasink = PaimonDatasink(self.table, overwrite=False)
         datasink.on_write_start()
         commit_msg1 = Mock(spec=CommitMessage)
@@ -193,74 +232,78 @@ class RaySinkTest(unittest.TestCase):
         )
 
         mock_commit = Mock()
+        mock_commit.commit.side_effect = Exception("Commit failed")
         datasink._writer_builder.new_commit = Mock(return_value=mock_commit)
-        datasink.on_write_complete(write_result)
 
-        mock_commit.commit.assert_called_once()
-        commit_args = mock_commit.commit.call_args[0][0]
-        self.assertEqual(len(commit_args), 2)
+        with self.assertRaises(Exception):
+            datasink.on_write_complete(write_result)
 
-        # Test filtering empty messages
+        mock_commit.abort.assert_called_once()
+        abort_args = mock_commit.abort.call_args[0][0]
+        self.assertEqual(len(abort_args), 2)
+        mock_commit.close.assert_called_once()
+
+        # Test table_commit creation failure
         datasink = PaimonDatasink(self.table, overwrite=False)
         datasink.on_write_start()
-        empty_msg = Mock(spec=CommitMessage)
-        empty_msg.is_empty.return_value = True
-        non_empty_msg = Mock(spec=CommitMessage)
-        non_empty_msg.is_empty.return_value = False
+        commit_msg1 = Mock(spec=CommitMessage)
+        commit_msg1.is_empty.return_value = False
 
         write_result = WriteResult(
             num_rows=0,
             size_bytes=0,
-            write_returns=[[empty_msg], [non_empty_msg]]
+            write_returns=[[commit_msg1]]
         )
+
+        mock_new_commit = Mock(side_effect=Exception("Failed to create table_commit"))
+        datasink._writer_builder.new_commit = mock_new_commit
+        with self.assertRaises(Exception):
+            datasink.on_write_complete(write_result)
+        self.assertEqual(len(datasink._pending_commit_messages), 1)
+
+    def test_on_write_failed(self):
+        # Test without pending messages (on_write_complete() never called)
+        datasink = PaimonDatasink(self.table, overwrite=False)
+        datasink.on_write_start()
+        self.assertEqual(datasink._pending_commit_messages, [])
+        error = Exception("Write job failed")
+        datasink.on_write_failed(error)  # Should not raise exception
+
+        # Test with pending messages (on_write_complete() was called but failed)
+        datasink = PaimonDatasink(self.table, overwrite=False)
+        datasink.on_write_start()
+        commit_msg1 = Mock(spec=CommitMessage)
+        commit_msg2 = Mock(spec=CommitMessage)
+        datasink._pending_commit_messages = [commit_msg1, commit_msg2]
 
         mock_commit = Mock()
         datasink._writer_builder.new_commit = Mock(return_value=mock_commit)
-        datasink.on_write_complete(write_result)
+        error = Exception("Write job failed")
+        datasink.on_write_failed(error)
 
-        mock_commit.commit.assert_called_once()
-        commit_args = mock_commit.commit.call_args[0][0]
-        self.assertEqual(len(commit_args), 1)
-        self.assertEqual(commit_args[0], non_empty_msg)
+        mock_commit.abort.assert_called_once()
+        abort_args = mock_commit.abort.call_args[0][0]
+        self.assertEqual(len(abort_args), 2)
+        self.assertEqual(abort_args[0], commit_msg1)
+        self.assertEqual(abort_args[1], commit_msg2)
+        mock_commit.close.assert_called_once()
+        self.assertEqual(datasink._pending_commit_messages, [])
 
-    def test_error_handling(self):
-        """Test error handling in write method and on_write_failed."""
+        # Test abort failure handling (should not raise exception)
         datasink = PaimonDatasink(self.table, overwrite=False)
         datasink.on_write_start()
+        commit_msg1 = Mock(spec=CommitMessage)
+        datasink._pending_commit_messages = [commit_msg1]
 
-        # Test write error handling
-        invalid_table = pa.table({
-            'wrong_column': [1, 2, 3]  # Wrong schema
-        })
-        ctx = Mock(spec=TaskContext)
+        mock_commit = Mock()
+        mock_commit.abort.side_effect = Exception("Abort failed")
+        datasink._writer_builder.new_commit = Mock(return_value=mock_commit)
+        error = Exception("Write job failed")
+        datasink.on_write_failed(error)
 
-        with self.assertRaises(Exception):
-            datasink.write([invalid_table], ctx)
-
-        # Test that table_write is closed on error
-        with patch.object(self.table, 'new_batch_write_builder') as mock_builder:
-            mock_write_builder = Mock()
-            mock_write_builder.overwrite.return_value = mock_write_builder
-            mock_write = Mock()
-            mock_write.write_arrow.side_effect = Exception("Write error")
-            mock_write_builder.new_write.return_value = mock_write
-            mock_builder.return_value = mock_write_builder
-
-            data_table = pa.table({
-                'id': [1],
-                'name': ['Alice'],
-                'value': [1.1]
-            })
-
-            with self.assertRaises(Exception):
-                datasink.write([data_table], ctx)
-
-            mock_write.close.assert_called_once()
-
-        # Test on_write_failed
-        datasink = PaimonDatasink(self.table, overwrite=False)
-        error = Exception("Test error")
-        datasink.on_write_failed(error)  # Should not raise exception
+        mock_commit.abort.assert_called_once()
+        mock_commit.close.assert_called_once()
+        self.assertEqual(datasink._pending_commit_messages, [])
 
 
 if __name__ == '__main__':

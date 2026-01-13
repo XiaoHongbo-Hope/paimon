@@ -45,6 +45,7 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
         self.table = table
         self.overwrite = overwrite
         self._writer_builder: Optional["WriteBuilder"] = None
+        self._pending_commit_messages: List["CommitMessage"] = []
 
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
@@ -89,6 +90,12 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
             commit_messages = table_write.prepare_commit()
             commit_messages_list.extend(commit_messages)
 
+        except Exception as e:
+            logger.error(
+                f"Error writing data to table {self._get_table_name()}: {e}",
+                exc_info=e
+            )
+            raise
         finally:
             if table_write is not None:
                 try:
@@ -105,6 +112,7 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
         self, write_result: WriteResult[List["CommitMessage"]]
     ):
         table_commit = None
+        commit_messages_to_abort = []
         try:
             all_commit_messages = [
                 commit_message
@@ -116,8 +124,11 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
                 msg for msg in all_commit_messages if not msg.is_empty()
             ]
 
+            self._pending_commit_messages = non_empty_messages
+
             if not non_empty_messages:
                 logger.info("No data to commit (all commit messages are empty)")
+                self._pending_commit_messages = []  # Clear after successful check
                 return
 
             table_name = self._get_table_name()
@@ -127,9 +138,31 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
             )
 
             table_commit = self._writer_builder.new_commit()
+            commit_messages_to_abort = non_empty_messages
             table_commit.commit(non_empty_messages)
 
             logger.info(f"Successfully committed write job for table {table_name}")
+            commit_messages_to_abort = []  # Clear after successful commit
+            self._pending_commit_messages = []  # Clear after successful commit
+        except Exception as e:
+            table_name = self._get_table_name()
+            logger.error(
+                f"Error committing write job for table {table_name}: {e}",
+                exc_info=e
+            )
+            if table_commit is not None and commit_messages_to_abort:
+                try:
+                    table_commit.abort(commit_messages_to_abort)
+                    logger.info(
+                        f"Aborted {len(commit_messages_to_abort)} commit messages "
+                        f"for table {table_name}"
+                    )
+                except Exception as abort_error:
+                    logger.error(
+                        f"Error aborting commit messages: {abort_error}",
+                        exc_info=abort_error
+                    )
+            raise
         finally:
             if table_commit is not None:
                 try:
@@ -142,10 +175,29 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
 
     def on_write_failed(self, error: Exception) -> None:
         table_name = self._get_table_name()
-        logger.warning(
+        logger.error(
             f"Write job failed for table {table_name}. Error: {error}",
             exc_info=error
         )
+        
+        if self._pending_commit_messages:
+            try:
+                table_commit = self._writer_builder.new_commit()
+                try:
+                    table_commit.abort(self._pending_commit_messages)
+                    logger.info(
+                        f"Aborted {len(self._pending_commit_messages)} commit messages "
+                        f"for table {table_name} in on_write_failed()"
+                    )
+                finally:
+                    table_commit.close()
+            except Exception as abort_error:
+                logger.error(
+                    f"Error aborting commit messages in on_write_failed(): {abort_error}",
+                    exc_info=abort_error
+                )
+            finally:
+                self._pending_commit_messages = []  # Clear after abort attempt
     
     def _get_table_name(self) -> str:
         if hasattr(self.table, 'identifier'):
