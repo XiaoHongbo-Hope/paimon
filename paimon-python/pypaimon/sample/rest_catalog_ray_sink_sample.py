@@ -122,11 +122,8 @@ def main():
             ray_remote_args={"num_cpus": 1}
         )
         
-        table_commit = write_builder.new_commit()
-        commit_messages = table_write.prepare_commit()
-        table_commit.commit(commit_messages)
+        # write_ray() has already committed the data, just close the writer
         table_write.close()
-        table_commit.close()
         
         print(f"Successfully wrote {ray_dataset.count()} rows to table")
         

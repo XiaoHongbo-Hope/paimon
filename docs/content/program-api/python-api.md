@@ -202,8 +202,10 @@ table_write.write_ray(ray_dataset, overwrite=False, concurrency=2)
 #   - overwrite: Whether to overwrite existing data (default: False)
 #   - concurrency: Optional max number of concurrent Ray tasks
 #   - ray_remote_args: Optional kwargs passed to ray.remote() (e.g., {"num_cpus": 2})
+# Note: write_ray() handles commit internally through Ray Datasink API.
+#       Skip steps 3-4 if using write_ray() - just close the writer.
 
-# 3. Commit data
+# 3. Commit data (required for write_pandas/write_arrow/write_arrow_batch only)
 commit_messages = table_write.prepare_commit()
 table_commit.commit(commit_messages)
 
