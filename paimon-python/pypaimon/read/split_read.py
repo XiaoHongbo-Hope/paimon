@@ -48,7 +48,7 @@ from pypaimon.read.reader.iface.record_reader import RecordReader
 from pypaimon.read.reader.key_value_unwrap_reader import \
     KeyValueUnwrapRecordReader
 from pypaimon.read.reader.key_value_wrap_reader import KeyValueWrapReader
-from pypaimon.read.reader.shard_batch_reader import ShardBatchReader
+from pypaimon.read.reader.shard_batch_reader import ShardBatchReader, SampleBatchReader
 from pypaimon.read.reader.sort_merge_reader import SortMergeReaderWithMinHeap
 from pypaimon.read.split import Split
 from pypaimon.schema.data_types import DataField
@@ -343,6 +343,13 @@ class RawFileSplitRead(SplitRead):
                     for_merge_read=False,
                     read_fields=read_fields,
                     row_tracking_enabled=True), start_pos, end_pos)
+        elif file.file_name in self.split.sample_file_idx_map:
+            sample_indexes = self.split.sample_file_idx_map[file.file_name]
+            file_batch_reader = SampleBatchReader(self.file_reader_supplier(
+                file=file,
+                for_merge_read=False,
+                read_fields=read_fields,
+                row_tracking_enabled=True), sample_indexes)
         else:
             file_batch_reader = self.file_reader_supplier(
                 file=file,
@@ -491,18 +498,6 @@ class DataEvolutionSplitRead(SplitRead):
         # Split field bunches
         fields_files = self._split_field_bunches(need_merge_files)
 
-        # Validate row counts and first row IDs
-        row_count = fields_files[0].row_count()
-        first_row_id = fields_files[0].files()[0].first_row_id
-
-        for bunch in fields_files:
-            if bunch.row_count() != row_count:
-                raise ValueError("All files in a field merge split should have the same row count.")
-            if bunch.files()[0].first_row_id != first_row_id:
-                raise ValueError(
-                    "All files in a field merge split should have the same first row id and could not be null."
-                )
-
         # Create the union reader
         all_read_fields = self.read_fields
         file_record_readers = [None] * len(fields_files)
@@ -577,6 +572,13 @@ class DataEvolutionSplitRead(SplitRead):
                     for_merge_read=False,
                     read_fields=read_fields,
                     row_tracking_enabled=True), begin_pos, end_pos)
+        elif file.file_name in self.split.sample_file_idx_map:
+            sample_indexes = self.split.sample_file_idx_map[file.file_name]
+            return SampleBatchReader(self.file_reader_supplier(
+                file=file,
+                for_merge_read=False,
+                read_fields=read_fields,
+                row_tracking_enabled=True), sample_indexes)
         else:
             return self.file_reader_supplier(
                 file=file,

@@ -34,6 +34,7 @@ class Split:
     _row_count: int
     _file_size: int
     shard_file_idx_map: Dict[str, Tuple[int, int]] = field(default_factory=dict)  # file_name -> (start_idx, end_idx)
+    sample_file_idx_map: Dict[str, List[int]] = field(default_factory=dict)  # file_name -> [sample_indexes]
     raw_convertible: bool = False
     data_deletion_files: Optional[List[DeletionFile]] = None
 
