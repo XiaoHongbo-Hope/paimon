@@ -149,6 +149,8 @@ class PaimonDatasink(Datasink[List["CommitMessage"]]):
                         f"Error aborting commit messages: {abort_error}",
                         exc_info=abort_error
                     )
+                finally:
+                    self._pending_commit_messages = []
             raise
         finally:
             if table_commit is not None:
