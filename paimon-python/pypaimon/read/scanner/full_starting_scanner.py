@@ -700,7 +700,7 @@ class PartialStartingScanner(FullStartingScanner):
         # Map each sample index to its corresponding file and local index
         filtered_partitioned_files = defaultdict(list)
         file_positions = {}  # {file_name: [local_indexes]}
-        self._generate_split_sample_idx_map(partitioned_files, filtered_partitioned_files, file_positions,
+        self._generate_file_sample_idx_map(partitioned_files, filtered_partitioned_files, file_positions,
                                             sample_indexes, is_blob=False)
         return filtered_partitioned_files, file_positions
 
@@ -788,10 +788,10 @@ class PartialStartingScanner(FullStartingScanner):
         # Map each sample index to its corresponding file and local index
         filtered_partitioned_files = defaultdict(list)
         file_positions = {}  # {file_name: [local_indexes]}
-        self._generate_split_sample_idx_map(partitioned_files, filtered_partitioned_files, file_positions,
+        self._generate_file_sample_idx_map(partitioned_files, filtered_partitioned_files, file_positions,
                                             sample_indexes, is_blob=False)
         if self.data_evolution:
-            self._generate_split_sample_idx_map(partitioned_files, filtered_partitioned_files, file_positions,
+            self._generate_file_sample_idx_map(partitioned_files, filtered_partitioned_files, file_positions,
                                                 sample_indexes, is_blob=True)
 
         return filtered_partitioned_files, file_positions
@@ -803,7 +803,7 @@ class PartialStartingScanner(FullStartingScanner):
                 filtered_entries.append(entry)
         return filtered_entries
 
-    def _generate_split_sample_idx_map(self, partitioned_files, filtered_partitioned_files, file_positions,
+    def _generate_file_sample_idx_map(self, partitioned_files, filtered_partitioned_files, file_positions,
                                        sample_indexes, is_blob):
         current_row = 0
         sample_idx = 0
