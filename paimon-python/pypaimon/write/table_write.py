@@ -16,7 +16,7 @@
 # limitations under the License.
 ################################################################################
 from collections import defaultdict
-from typing import List
+from typing import List, Optional, Dict, Any
 
 import pyarrow as pa
 
@@ -67,6 +67,33 @@ class TableWrite:
             write_cols = None
         self.file_store_write.write_cols = write_cols
         return self
+
+    def write_ray(
+            self,
+            dataset: "Dataset",
+            overwrite: bool = False,
+            concurrency: Optional[int] = None,
+            ray_remote_args: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Write a Ray Dataset to Paimon table.
+
+        Args:
+            dataset: Ray Dataset to write. This is a distributed data collection
+                from Ray Data (ray.data.Dataset).
+            overwrite: Whether to overwrite existing data. Defaults to False.
+            concurrency: Optional max number of Ray tasks to run concurrently.
+                By default, dynamically decided based on available resources.
+            ray_remote_args: Optional kwargs passed to :func:`ray.remote` in write tasks.
+                For example, ``{"num_cpus": 2, "max_retries": 3}``.
+        """
+        from pypaimon.write.ray_datasink import PaimonDatasink
+        datasink = PaimonDatasink(self.table, overwrite=overwrite)
+        dataset.write_datasink(
+            datasink,
+            concurrency=concurrency,
+            ray_remote_args=ray_remote_args,
+        )
 
     def close(self):
         self.file_store_write.close()
