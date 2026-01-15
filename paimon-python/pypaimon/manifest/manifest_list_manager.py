@@ -79,6 +79,12 @@ class ManifestListManager:
                 num_deleted_files=record['_NUM_DELETED_FILES'],
                 partition_stats=partition_stats,
                 schema_id=record['_SCHEMA_ID'],
+                min_bucket=record.get('_MIN_BUCKET'),
+                max_bucket=record.get('_MAX_BUCKET'),
+                min_level=record.get('_MIN_LEVEL'),
+                max_level=record.get('_MAX_LEVEL'),
+                min_row_id=record.get('_MIN_ROW_ID'),
+                max_row_id=record.get('_MAX_ROW_ID'),
             )
             manifest_files.append(manifest_file_meta)
 
@@ -99,6 +105,12 @@ class ManifestListManager:
                     "_NULL_COUNTS": meta.partition_stats.null_counts,
                 },
                 "_SCHEMA_ID": meta.schema_id,
+                "_MIN_BUCKET": meta.min_bucket,
+                "_MAX_BUCKET": meta.max_bucket,
+                "_MIN_LEVEL": meta.min_level,
+                "_MAX_LEVEL": meta.max_level,
+                "_MIN_ROW_ID": meta.min_row_id,
+                "_MAX_ROW_ID": meta.max_row_id,
             }
             avro_records.append(avro_record)
 

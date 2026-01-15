@@ -83,8 +83,15 @@ class FullStartingScanner(StartingScanner):
             schema_fields_func,
             self.table.table_schema.id
         )
+        
+        self.row_ranges = None
 
     def scan(self) -> Plan:
+        if self.data_evolution:
+            global_index_result = self._eval_global_index()
+            if global_index_result is not None:
+                self.row_ranges = global_index_result.results().to_range_list()
+        
         file_entries = self.plan_files()
         if not file_entries:
             return Plan([])
@@ -109,10 +116,9 @@ class FullStartingScanner(StartingScanner):
             )
         elif self.data_evolution:
             global_index_result = self._eval_global_index()
-            row_ranges = None
+            row_ranges = self.row_ranges
             score_getter = None
             if global_index_result is not None:
-                row_ranges = global_index_result.results().to_range_list()
                 if isinstance(global_index_result, VectorSearchGlobalIndexResult):
                     score_getter = global_index_result.score_getter()
             split_generator = DataEvolutionSplitGenerator(
@@ -256,11 +262,28 @@ class FullStartingScanner(StartingScanner):
         return limited_splits
 
     def _filter_manifest_file(self, file: ManifestFileMeta) -> bool:
-        if not self.partition_key_predicate:
-            return True
-        return self.partition_key_predicate.test_by_simple_stats(
-            file.partition_stats,
-            file.num_added_files + file.num_deleted_files)
+        if self.partition_key_predicate:
+            if not self.partition_key_predicate.test_by_simple_stats(
+                file.partition_stats,
+                file.num_added_files + file.num_deleted_files):
+                return False
+        
+        if self.row_ranges is not None:
+            min_row_id = file.min_row_id
+            max_row_id = file.max_row_id
+            if min_row_id is None or max_row_id is None:
+                return True
+            
+            from pypaimon.globalindex.range import Range
+            manifest_row_range = Range(min_row_id, max_row_id)
+            
+            for expected_range in self.row_ranges:
+                if manifest_row_range.overlaps(expected_range):
+                    return True
+            
+            return False
+        
+        return True
 
     def _filter_manifest_entry(self, entry: ManifestEntry) -> bool:
         if self.only_read_real_buckets and entry.bucket < 0:
