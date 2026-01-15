@@ -85,12 +85,14 @@ class FullStartingScanner(StartingScanner):
         )
         
         self.row_ranges = None
+        self.global_index_result = None
 
     def scan(self) -> Plan:
         if self.data_evolution:
-            global_index_result = self._eval_global_index()
-            if global_index_result is not None:
-                self.row_ranges = global_index_result.results().to_range_list()
+            if self.global_index_result is None:
+                self.global_index_result = self._eval_global_index()
+            if self.global_index_result is not None:
+                self.row_ranges = self.global_index_result.results().to_range_list()
         
         file_entries = self.plan_files()
         if not file_entries:
@@ -115,7 +117,7 @@ class FullStartingScanner(StartingScanner):
                 deletion_files_map
             )
         elif self.data_evolution:
-            global_index_result = self._eval_global_index()
+            global_index_result = self.global_index_result
             row_ranges = self.row_ranges
             score_getter = None
             if global_index_result is not None:
@@ -264,8 +266,8 @@ class FullStartingScanner(StartingScanner):
     def _filter_manifest_file(self, file: ManifestFileMeta) -> bool:
         if self.partition_key_predicate:
             if not self.partition_key_predicate.test_by_simple_stats(
-                file.partition_stats,
-                file.num_added_files + file.num_deleted_files):
+                    file.partition_stats,
+                    file.num_added_files + file.num_deleted_files):
                 return False
         
         if self.row_ranges is not None:
@@ -273,6 +275,9 @@ class FullStartingScanner(StartingScanner):
             max_row_id = file.max_row_id
             if min_row_id is None or max_row_id is None:
                 return True
+            
+            if min_row_id > max_row_id:
+                return True  
             
             from pypaimon.globalindex.range import Range
             manifest_row_range = Range(min_row_id, max_row_id)

@@ -251,13 +251,14 @@ class FileStoreCommit:
                     max_row_id = None
                 else:
                     row_count = entry.file.row_count
-                    end_row_id = first_row_id + row_count - 1
-                    if min_row_id is None:
-                        min_row_id = first_row_id
-                        max_row_id = end_row_id
-                    else:
-                        min_row_id = min(min_row_id, first_row_id)
-                        max_row_id = max(max_row_id, end_row_id)
+                    if row_count > 0:
+                        end_row_id = first_row_id + row_count - 1
+                        if min_row_id is None:
+                            min_row_id = first_row_id
+                            max_row_id = end_row_id
+                        else:
+                            min_row_id = min(min_row_id, first_row_id)
+                            max_row_id = max(max_row_id, end_row_id)
         
         try:
             self.manifest_file_manager.write(new_manifest_file, commit_entries)
