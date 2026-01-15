@@ -339,7 +339,7 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
             file_ranges = []
             for file in split.files:
                 first_row_id = file.first_row_id
-                if first_row_id is not None:
+                if first_row_id is not None and file.row_count > 0:
                     file_ranges.append(Range(
                         first_row_id,
                         first_row_id + file.row_count - 1

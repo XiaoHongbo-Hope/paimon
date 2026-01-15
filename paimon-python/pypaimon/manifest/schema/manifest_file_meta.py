@@ -17,6 +17,7 @@
 ################################################################################
 
 from dataclasses import dataclass
+from typing import Optional
 
 from pypaimon.manifest.schema.simple_stats import (PARTITION_STATS_SCHEMA,
                                                    SimpleStats)
@@ -30,6 +31,12 @@ class ManifestFileMeta:
     num_deleted_files: int
     partition_stats: SimpleStats
     schema_id: int
+    min_bucket: Optional[int] = None
+    max_bucket: Optional[int] = None
+    min_level: Optional[int] = None
+    max_level: Optional[int] = None
+    min_row_id: Optional[int] = None
+    max_row_id: Optional[int] = None
 
 
 MANIFEST_FILE_META_SCHEMA = {
@@ -43,5 +50,11 @@ MANIFEST_FILE_META_SCHEMA = {
         {"name": "_NUM_DELETED_FILES", "type": "long"},
         {"name": "_PARTITION_STATS", "type": PARTITION_STATS_SCHEMA},
         {"name": "_SCHEMA_ID", "type": "long"},
+        {"name": "_MIN_BUCKET", "type": ["null", "int"], "default": None},
+        {"name": "_MAX_BUCKET", "type": ["null", "int"], "default": None},
+        {"name": "_MIN_LEVEL", "type": ["null", "int"], "default": None},
+        {"name": "_MAX_LEVEL", "type": ["null", "int"], "default": None},
+        {"name": "_MIN_ROW_ID", "type": ["null", "long"], "default": None},
+        {"name": "_MAX_ROW_ID", "type": ["null", "long"], "default": None},
     ]
 }

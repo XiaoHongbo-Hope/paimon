@@ -37,7 +37,7 @@ class ManifestEntryIdentifierTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tempdir = tempfile.mkdtemp()
-        cls.catalog = FileSystemCatalog(Options({CatalogOptions.WAREHOUSE.key(): cls.tempdir}))
+        cls.catalog: FileSystemCatalog = FileSystemCatalog(Options({CatalogOptions.WAREHOUSE.key(): cls.tempdir}))
         cls.catalog.create_database('default', False)
 
     def setUp(self):

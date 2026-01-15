@@ -216,6 +216,14 @@ class FileStoreCommit:
             # Assign row IDs to new files and get the next row ID for the snapshot
             commit_entries, next_row_id = self._assign_row_tracking_meta(first_row_id_start, commit_entries)
 
+        min_bucket = None
+        max_bucket = None
+        min_level = None
+        max_level = None
+        min_row_id = None
+        max_row_id = None
+        row_id_stats_valid = True
+        
         for entry in commit_entries:
             if entry.kind == 0:
                 added_file_count += 1
@@ -223,6 +231,35 @@ class FileStoreCommit:
             else:
                 deleted_file_count += 1
                 delta_record_count -= entry.file.row_count
+            
+            if min_bucket is None:
+                min_bucket = entry.bucket
+                max_bucket = entry.bucket
+                min_level = entry.file.level
+                max_level = entry.file.level
+            else:
+                min_bucket = min(min_bucket, entry.bucket)
+                max_bucket = max(max_bucket, entry.bucket)
+                min_level = min(min_level, entry.file.level)
+                max_level = max(max_level, entry.file.level)
+            
+            if row_id_stats_valid:
+                first_row_id = entry.file.first_row_id
+                if first_row_id is None:
+                    row_id_stats_valid = False
+                    min_row_id = None
+                    max_row_id = None
+                else:
+                    row_count = entry.file.row_count
+                    if row_count > 0:
+                        end_row_id = first_row_id + row_count - 1
+                        if min_row_id is None:
+                            min_row_id = first_row_id
+                            max_row_id = end_row_id
+                        else:
+                            min_row_id = min(min_row_id, first_row_id)
+                            max_row_id = max(max_row_id, end_row_id)
+        
         try:
             self.manifest_file_manager.write(new_manifest_file, commit_entries)
             # TODO: implement noConflictsOrFail logic
@@ -250,6 +287,12 @@ class FileStoreCommit:
                     null_counts=partition_null_counts,
                 ),
                 schema_id=self.table.table_schema.id,
+                min_bucket=min_bucket,
+                max_bucket=max_bucket,
+                min_level=min_level,
+                max_level=max_level,
+                min_row_id=min_row_id,
+                max_row_id=max_row_id,
             )
             self.manifest_list_manager.write(delta_manifest_list, [new_manifest_file_meta])
 

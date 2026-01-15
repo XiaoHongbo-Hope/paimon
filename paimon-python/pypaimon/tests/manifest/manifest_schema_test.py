@@ -103,7 +103,9 @@ class ManifestSchemaTest(unittest.TestCase):
         # Check that all expected fields are present
         expected_fields = [
             "_VERSION", "_FILE_NAME", "_FILE_SIZE", "_NUM_ADDED_FILES",
-            "_NUM_DELETED_FILES", "_PARTITION_STATS", "_SCHEMA_ID"
+            "_NUM_DELETED_FILES", "_PARTITION_STATS", "_SCHEMA_ID",
+            "_MIN_BUCKET", "_MAX_BUCKET", "_MIN_LEVEL", "_MAX_LEVEL",
+            "_MIN_ROW_ID", "_MAX_ROW_ID"
         ]
 
         for field_name in expected_fields:
@@ -117,6 +119,13 @@ class ManifestSchemaTest(unittest.TestCase):
         self.assertEqual(field_map["_NUM_DELETED_FILES"]["type"], "long")
         self.assertEqual(field_map["_PARTITION_STATS"]["type"], PARTITION_STATS_SCHEMA)
         self.assertEqual(field_map["_SCHEMA_ID"]["type"], "long")
+        # New fields added in PR 6661
+        self.assertEqual(field_map["_MIN_BUCKET"]["type"], ["null", "int"])
+        self.assertEqual(field_map["_MAX_BUCKET"]["type"], ["null", "int"])
+        self.assertEqual(field_map["_MIN_LEVEL"]["type"], ["null", "int"])
+        self.assertEqual(field_map["_MAX_LEVEL"]["type"], ["null", "int"])
+        self.assertEqual(field_map["_MIN_ROW_ID"]["type"], ["null", "long"])
+        self.assertEqual(field_map["_MAX_ROW_ID"]["type"], ["null", "long"])
 
     def test_schema_references(self):
         """Test that schema references are correctly used."""
