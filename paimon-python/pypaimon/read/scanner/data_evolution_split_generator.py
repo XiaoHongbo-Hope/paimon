@@ -84,8 +84,17 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
         def weight_func(file_list: List[DataFileMeta]) -> int:
             return max(sum(f.file_size for f in file_list), self.open_file_cost)
 
+        # When using with_slice, iterate keys in global row order (min first_row_id per key)
+        # so that _wrap_to_sliced_splits gets splits in the same order as entry_end_pos.
+        def key_min_first_row_id(k):
+            entries = partitioned_files[k]
+            ids = [e.file.first_row_id for e in entries if e.file.first_row_id is not None]
+            return min(ids) if ids else float('inf')
+        keys_order = sorted(partitioned_files.keys(), key=key_min_first_row_id)
+
         splits = []
-        for key, sorted_entries_list in partitioned_files.items():
+        for key in keys_order:
+            sorted_entries_list = partitioned_files[key]
             if not sorted_entries_list:
                 continue
 
@@ -110,7 +119,15 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
             )
 
         if self.start_pos_of_this_subtask is not None:
-            splits = self._wrap_to_sliced_splits(splits, plan_start_pos, plan_end_pos)
+            # Slice [start,end) is in SCAN ORDER (row index). Sort splits by min first_row_id
+            # so file_end_pos in _wrap_to_sliced_splits accumulates in scan order.
+            def split_scan_start(s):
+                ids = [f.first_row_id for f in s.files if f.first_row_id is not None]
+                return min(ids) if ids else float('inf')
+            splits = sorted(splits, key=split_scan_start)
+            slice_start = self.start_pos_of_this_subtask
+            slice_end = self.end_pos_of_this_subtask
+            splits = self._wrap_to_sliced_splits(splits, slice_start, slice_end)
         # Wrap splits with IndexedSplit if row_ranges is provided
         if self.row_ranges:
             splits = self._wrap_to_indexed_splits(splits)
@@ -230,15 +247,27 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
                     continue
                 if entry_begin_pos <= start_pos < entry_end_pos:
                     splits_start_pos = entry_begin_pos
-                    plan_start_pos = start_pos - entry_begin_pos
-                # If shard end position is within current file, record relative end position
+                    # plan_start_pos must be absolute so _compute_file_range gets correct range
+                    plan_start_pos = start_pos
+                # If shard end position is within current file, record absolute end position.
+                # plan_end_pos is absolute (same as end_pos) so _compute_file_range gets correct range.
                 if entry_begin_pos < end_pos <= entry_end_pos:
-                    plan_end_pos = end_pos - splits_start_pos
+                    plan_end_pos = max(plan_end_pos, end_pos)
                 # Add files that overlap with shard range to result
                 filtered_entries.append(entry)
                 blob_added = True
             if filtered_entries:
                 filtered_partitioned_files[key] = filtered_entries
+            # When slice [start_pos, end_pos) extends beyond the last file in this partition,
+            # plan_end_pos may never be set; set it so _wrap_to_sliced_splits gets the correct range.
+            # plan_end_pos is absolute (same as end_pos).
+            if filtered_entries and start_pos < end_pos:
+                plan_end_pos = max(plan_end_pos, end_pos)
+
+        # Final fallback: ensure plan_end_pos is set so second file is not skipped as (-1,-1).
+        if (plan_end_pos == 0 and start_pos < end_pos and
+                any(filtered_partitioned_files[k] for k in filtered_partitioned_files)):
+            plan_end_pos = end_pos
 
         return filtered_partitioned_files, plan_start_pos, plan_end_pos
 
@@ -351,12 +380,13 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
     ) -> Dict[str, Tuple[int, int]]:
         """
         Compute file index map for a split, determining which rows to read from each file.
-        For data files, the range is calculated based on the file's position in the cumulative row space.
+        Slice [plan_start_pos, plan_end_pos) is in SCAN ORDER (row index 5 = 5th row in table),
+        not row_id. So we use cumulative file_end_pos (scan order), not first_row_id.
         For blob files (which may be rolled), the range is calculated based on each file's first_row_id.
         """
         shard_file_idx_map = {}
-        
-        # First pass: data files only. Compute range and apply directly to avoid second-pass lookup.
+
+        # First pass: data files only. Use cumulative position (scan order), not first_row_id.
         current_pos = file_end_pos
         data_file_infos = []
         for file in split.files:
