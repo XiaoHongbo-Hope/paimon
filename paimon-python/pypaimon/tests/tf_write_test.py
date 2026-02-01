@@ -80,15 +80,16 @@ def _tf_import_ok(timeout_sec=15):
     if _tf_import_ok_cache is not None:
         return _tf_import_ok_cache
     try:
-        subprocess.run(
+        result = subprocess.run(
             [sys.executable, "-c", "import tensorflow"],
             env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
             timeout=timeout_sec,
             capture_output=True,
             cwd=_tf_test_cwd(),
         )
-        _tf_import_ok_cache = True
-        return True
+        ok = result.returncode == 0
+        _tf_import_ok_cache = ok
+        return ok
     except subprocess.TimeoutExpired:
         _tf_import_ok_cache = False
         return False
@@ -176,6 +177,7 @@ class TfWriteTest(unittest.TestCase):
         _tf_diag("subprocess: write_tf (batched)")
         table_write2.write_tf(ds_batch)
         table_write2.close()
+        splits = read_builder.new_scan().plan().splits()  # re-plan after second write
         actual2 = table_read.to_arrow(splits)
         self.assertEqual(actual2.num_rows, 8)
         actual2_sorted = actual2.sort_by("id")

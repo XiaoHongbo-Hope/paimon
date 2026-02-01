@@ -114,6 +114,8 @@ def write_tf_dataset(
         """Each replica returns its own commit messages (prepare_commit); chief will merge and commit once."""
         ctx = tf.distribute.get_replica_context()
         rid = _replica_id(ctx)
+        if rid not in replica_writes:
+            return []
         tw = replica_writes[rid]
         msgs = tw.prepare_commit()
         tw.close()
@@ -121,21 +123,28 @@ def write_tf_dataset(
 
     dist_dataset = strategy.experimental_distribute_dataset(dataset)
 
-    for batch in dist_dataset:
-        strategy.run(write_batch_fn, args=(batch,))
-
-    per_replica_messages = strategy.run(prepare_commit_per_replica)
-    local_results = strategy.experimental_local_results(per_replica_messages)
-    merged: List[CommitMessage] = []
-    for lst in local_results:
-        merged.extend(lst)
-
-    builder = table.new_batch_write_builder()
-    if overwrite:
-        builder = builder.overwrite()
-    table_commit = builder.new_commit()
     try:
-        table_commit.commit(merged)
+        for batch in dist_dataset:
+            strategy.run(write_batch_fn, args=(batch,))
+
+        per_replica_messages = strategy.run(prepare_commit_per_replica)
+        local_results = strategy.experimental_local_results(per_replica_messages)
+        merged: List[CommitMessage] = []
+        for lst in local_results:
+            merged.extend(lst)
+
+        builder = table.new_batch_write_builder()
+        if overwrite:
+            builder = builder.overwrite()
+        table_commit = builder.new_commit()
+        try:
+            table_commit.commit(merged)
+        finally:
+            # On commit failure, TableCommit._commit already calls file_store_commit.abort(merged)
+            table_commit.close()
     finally:
-        # On commit failure, TableCommit._commit already calls file_store_commit.abort(merged)
-        table_commit.close()
+        for tw in replica_writes.values():
+            try:
+                tw.close()
+            except Exception:
+                pass
