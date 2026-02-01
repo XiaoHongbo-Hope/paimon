@@ -104,8 +104,6 @@ def write_tf_dataset(
         rid = _replica_id(ctx)
         if rid not in replica_writes:
             builder = table.new_batch_write_builder()
-            if overwrite:
-                builder = builder.overwrite()
             replica_writes[rid] = builder.new_write()
         pa_batch = _tf_batch_to_arrow(batch, pa_schema)
         replica_writes[rid].write_arrow_batch(pa_batch)
