@@ -80,7 +80,7 @@ class TableWrite:
     ) -> None:
         """
         Write a Ray Dataset to Paimon table.
-        
+
         Args:
             dataset: Ray Dataset to write. This is a distributed data collection
                 from Ray Data (ray.data.Dataset).
@@ -101,17 +101,6 @@ class TableWrite:
     def write_tf(self, dataset, *, overwrite: bool = False) -> None:
         """
         Write a TensorFlow Dataset to this Paimon table.
-
-        Use this API instead of manual multi-process write to avoid Paimon commit
-        conflicts: each replica writes its shard; the chief collects commit messages
-        from all replicas and runs a single commit (no concurrent commits).
-
-        Uses the current TF distribution strategy (e.g. get_strategy(), MirroredStrategy).
-        The first batch may be slow (several seconds) due to TensorFlow initialization;
-        if you do not need GPU for this write, set env CUDA_VISIBLE_DEVICES="" to avoid
-        GPU init and potential stalls. For better performance: keep the dataset on CPU
-        (GPU .numpy() triggers device-to-host copy); use larger batch_size (e.g. 4096).
-
         Args:
             dataset: tf.data.Dataset (dict of column name -> Tensor per batch).
             overwrite: Whether to overwrite existing data. Defaults to False.

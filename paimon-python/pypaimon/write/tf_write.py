@@ -81,12 +81,7 @@ def write_tf_dataset(
     Write a TensorFlow Dataset to a Paimon table.
 
     Each replica writes its shard via write_arrow_batch. The chief collects
-    commit messages from all replicas and runs a single commit. Works with
-    single process (1 replica) or multi-replica (e.g. MirroredStrategy).
-
-    On commit failure, TableCommit aborts the commit messages (same as write_ray);
-    table_commit is always closed in finally.
-
+    commit messages from all replicas and runs a single commit.
     Args:
         table: Paimon table (from catalog.get_table(...)).
         dataset: tf.data.Dataset whose elements are dicts of column name -> Tensor,
