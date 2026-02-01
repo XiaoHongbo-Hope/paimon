@@ -57,6 +57,9 @@ setup(
         'torch': [
             'torch',
         ],
+        'tensorflow': [
+            'tensorflow>=2.0',
+        ],
         # faiss-cpu: optional for vector ANN index. 1.7.x has no wheel for 3.12+; 3.12+ use 1.10+.
         'faiss': [
             'faiss-cpu==1.7.2; python_version >= "3.6" and python_version < "3.7"',
@@ -66,6 +69,7 @@ setup(
         'all': [
             'ray>=2.10,<3; python_version>="3.7"',
             'torch',
+            'tensorflow>=2.0',
             'faiss-cpu==1.7.2; python_version >= "3.6" and python_version < "3.7"',
             'faiss-cpu==1.7.4; python_version >= "3.7" and python_version < "3.12"',
             'faiss-cpu>=1.10,<2; python_version >= "3.12"',
