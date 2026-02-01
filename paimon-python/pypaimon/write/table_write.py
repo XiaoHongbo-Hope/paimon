@@ -98,6 +98,29 @@ class TableWrite:
             ray_remote_args=ray_remote_args,
         )
 
+    def write_tf(self, dataset, *, overwrite: bool = False) -> None:
+        """
+        Write a TensorFlow Dataset to this Paimon table.
+
+        Use this API instead of manual multi-process write to avoid Paimon commit
+        conflicts: each replica writes its shard; the chief collects commit messages
+        from all replicas and runs a single commit (no concurrent commits).
+
+        Uses the current TF distribution strategy (e.g. get_strategy(), MirroredStrategy).
+        The first batch may be slow (several seconds) due to TensorFlow initialization;
+        if you do not need GPU for this write, set env CUDA_VISIBLE_DEVICES="" to avoid
+        GPU init and potential stalls. For better performance: keep the dataset on CPU
+        (GPU .numpy() triggers device-to-host copy); use larger batch_size (e.g. 4096).
+
+        Args:
+            dataset: tf.data.Dataset (dict of column name -> Tensor per batch).
+            overwrite: Whether to overwrite existing data. Defaults to False.
+        """
+        import tensorflow as tf
+        from pypaimon.write.tf_write import write_tf_dataset
+        strategy = tf.distribute.get_strategy()
+        write_tf_dataset(self.table, dataset, strategy, overwrite=overwrite)
+
     def close(self):
         self.file_store_write.close()
 
