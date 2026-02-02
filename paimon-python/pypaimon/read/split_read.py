@@ -195,7 +195,16 @@ class SplitRead(ABC):
         for field_name in read_file_fields:
             if field_name in field_map:
                 actual_read_fields_for_partition.append(field_map[field_name])
-        
+
+        if (
+            not for_merge_read
+            and self.table.partition_keys
+            and actual_read_fields_for_partition
+            and fields is table_schema_fields
+        ):
+            partition_row = self.split.partition
+            fields = list(partition_row.fields) + actual_read_fields_for_partition
+
         partition_info = self._create_partition_info(
             actual_read_fields=actual_read_fields_for_partition if actual_read_fields_for_partition else None,
             output_fields=fields

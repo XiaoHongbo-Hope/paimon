@@ -250,6 +250,14 @@ class DataFileBatchReader(RecordBatchReader):
                 )
                 inter_names.append(name)
 
+        for i, name in enumerate(inter_names):
+            target_field = self.schema_map.get(name)
+            if target_field is not None and inter_arrays[i].type != target_field.type:
+                try:
+                    inter_arrays[i] = inter_arrays[i].cast(target_field.type)
+                except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+                    inter_arrays[i] = pa.nulls(num_rows, type=target_field.type)
+
         # to contains 'not null' property
         final_fields = []
         for i, name in enumerate(inter_names):

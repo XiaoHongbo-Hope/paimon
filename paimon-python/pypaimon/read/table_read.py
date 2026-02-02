@@ -67,6 +67,9 @@ class TableRead:
 
     @staticmethod
     def _try_to_pad_batch_by_schema(batch: pyarrow.RecordBatch, target_schema):
+        if batch.schema.names == target_schema.names and len(batch.schema.names) == len(target_schema.names):
+            return batch
+
         num_rows = batch.num_rows
         columns = []
 
@@ -75,10 +78,10 @@ class TableRead:
             if field.name in batch_column_names:
                 col = batch.column(field.name)
                 if col.type != field.type:
-                    col = (
-                        col.cast(field.type) if col.type.id == field.type.id
-                        else pyarrow.nulls(num_rows, type=field.type)
-                    )
+                    try:
+                        col = col.cast(field.type)
+                    except (pyarrow.ArrowInvalid, pyarrow.ArrowNotImplementedError):
+                        col = pyarrow.nulls(num_rows, type=field.type)
             else:
                 col = pyarrow.nulls(num_rows, type=field.type)
             columns.append(col)
