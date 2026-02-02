@@ -148,7 +148,7 @@ class DataFileBatchReader(RecordBatchReader):
                 for i in range(len(inter_names)):
                     field_name = inter_names[i]
                     if field_name in partition_names or (self.partition_info and any(
-                        self.partition_info.partition_fields[j].name == field_name 
+                        self.partition_info.partition_fields[j].name == field_name
                         for j in range(len(self.partition_info.partition_fields))
                     )):
                         partition_names.add(field_name)
@@ -214,7 +214,9 @@ class DataFileBatchReader(RecordBatchReader):
         if SpecialFields.ROW_ID.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.ROW_ID.name]
             if idx < num_cols:
-                arrays[idx] = pa.array(range(self.first_row_id, self.first_row_id + record_batch.num_rows), type=pa.int64())
+                arrays[idx] = pa.array(
+                    range(self.first_row_id, self.first_row_id + record_batch.num_rows),
+                    type=pa.int64())
 
         if SpecialFields.SEQUENCE_NUMBER.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.SEQUENCE_NUMBER.name]
@@ -222,7 +224,6 @@ class DataFileBatchReader(RecordBatchReader):
                 arrays[idx] = pa.repeat(self.max_sequence_number, record_batch.num_rows)
 
         names = record_batch.schema.names
-<<<<<<< HEAD
         table = None
         for i, name in enumerate(names):
             field = pa.field(
@@ -234,15 +235,6 @@ class DataFileBatchReader(RecordBatchReader):
             else:
                 table = table.append_column(field, arrays[i])
         return table.to_batches()[0]
-=======
-        fields = []
-        for i, name in enumerate(names):
-            input_field = record_batch.schema.field(name)
-            fields.append(pa.field(name, arrays[i].type, nullable=input_field.nullable))
-        if fields:
-            return pa.RecordBatch.from_arrays(arrays, schema=pa.schema(fields))
-        return pa.RecordBatch.from_arrays(arrays, names=names)
->>>>>>> 72ffd9919 ([python] Fix data-evolution read after partial shard update)
 
     def close(self) -> None:
         self.format_reader.close()
