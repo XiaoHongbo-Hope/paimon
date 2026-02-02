@@ -169,7 +169,9 @@ class SplitRead(ABC):
             SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
             if row_tracking_enabled else self.table.table_schema.fields
         )
-        if is_blob_file:
+        if for_merge_read:
+            fields = self._get_all_data_fields()
+        elif is_blob_file:
             field_map = {field.name: field for field in table_schema_fields}
             requested_fields = []
             for field_name in read_file_fields:
@@ -185,8 +187,6 @@ class SplitRead(ABC):
             fields = requested_fields if requested_fields else table_schema_fields
         else:
             fields = table_schema_fields
-        if for_merge_read:
-            fields = self.read_fields
 
         system_fields = SpecialFields.find_system_fields(fields)
         

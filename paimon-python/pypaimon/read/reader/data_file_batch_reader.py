@@ -63,6 +63,27 @@ class DataFileBatchReader(RecordBatchReader):
         if self.partition_info is None and self.index_mapping is None:
             if self.row_tracking_enabled and self.system_fields:
                 record_batch = self._assign_row_tracking(record_batch)
+            if self.requested_field_names is not None:
+                batch_names = record_batch.schema.names
+                if batch_names != self.requested_field_names or len(batch_names) != len(self.requested_field_names):
+                    inter_arrays = list(record_batch.columns)
+                    inter_names = list(record_batch.schema.names)
+                    ordered_arrays = []
+                    ordered_names = []
+                    for name in self.requested_field_names:
+                        if name in inter_names:
+                            ordered_arrays.append(inter_arrays[inter_names.index(name)])
+                            ordered_names.append(name)
+                        elif name.startswith("_KEY_") and name[5:] in inter_names:
+                            ordered_arrays.append(inter_arrays[inter_names.index(name[5:])])
+                            ordered_names.append(name)
+                        else:
+                            field = self.schema_map.get(name)
+                            ordered_arrays.append(
+                                pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
+                            )
+                            ordered_names.append(name)
+                    record_batch = pa.RecordBatch.from_arrays(ordered_arrays, ordered_names)
             return record_batch
 
         if (self.partition_info is None and self.index_mapping is not None
@@ -132,6 +153,9 @@ class DataFileBatchReader(RecordBatchReader):
                 for name in self.requested_field_names:
                     if name in inter_names:
                         ordered_arrays.append(inter_arrays[inter_names.index(name)])
+                        ordered_names.append(name)
+                    elif name.startswith("_KEY_") and name[5:] in inter_names:
+                        ordered_arrays.append(inter_arrays[inter_names.index(name[5:])])
                         ordered_names.append(name)
                     else:
                         field = self.schema_map.get(name)
@@ -217,6 +241,14 @@ class DataFileBatchReader(RecordBatchReader):
                 for i in range(len(self.system_primary_key)):
                     if i < len(inter_names) and not inter_names[i].startswith("_KEY_"):
                         inter_names[i] = f"_KEY_{inter_names[i]}"
+
+        if self.requested_field_names is not None and len(inter_arrays) < len(self.requested_field_names):
+            for name in self.requested_field_names[len(inter_arrays):]:
+                field = self.schema_map.get(name)
+                inter_arrays.append(
+                    pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
+                )
+                inter_names.append(name)
 
         # to contains 'not null' property
         final_fields = []
