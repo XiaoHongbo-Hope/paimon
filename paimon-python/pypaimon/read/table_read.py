@@ -121,7 +121,6 @@ class TableRead:
             empty_arrays = [pyarrow.array([], type=field.type) for field in output_schema]
             return pyarrow.Table.from_arrays(empty_arrays, schema=output_schema)
         
-        # Concatenate arrays for fields in output_schema
         concat_arrays = [
             pyarrow.concat_arrays([b.column(field.name) for b in table_list])
             for field in output_schema
@@ -173,7 +172,6 @@ class TableRead:
 
         try:
             if self.table.options.data_evolution_enabled():
-                # Call for side effect: release internal state so subsequent table ops don't block.
                 self.table.new_read_builder().new_scan().starting_scanner.plan_files()
         except Exception as e:
             logger.debug(
