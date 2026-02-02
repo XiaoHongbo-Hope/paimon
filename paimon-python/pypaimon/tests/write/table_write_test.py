@@ -79,6 +79,40 @@ class TableWriteTest(unittest.TestCase):
         self.assertEquals(True, snapshot_json.__contains__("baseManifestList"))
         self.assertEquals(False, snapshot_json.__contains__("nextRowId"))
 
+    def test_copy_paimon_to_paimon_with_arrow(self):
+        schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'])
+        self.catalog.create_table('default.test_copy_source', schema, False)
+        source = self.catalog.get_table('default.test_copy_source')
+        write_builder = source.new_batch_write_builder()
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        table_write.write_arrow(self.expected)
+        table_commit.commit(table_write.prepare_commit())
+        table_write.close()
+        table_commit.close()
+
+        read_builder = source.new_read_builder()
+        table_read = read_builder.new_read()
+        splits = read_builder.new_scan().plan().splits()
+        arrow_table = table_read.to_arrow(splits)
+        arrow_table = arrow_table.combine_chunks()
+
+        self.catalog.create_table('default.test_copy_target', schema, False)
+        target = self.catalog.get_table('default.test_copy_target')
+        write_builder = target.new_batch_write_builder()
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        table_write.write_arrow(arrow_table)
+        table_commit.commit(table_write.prepare_commit())
+        table_write.close()
+        table_commit.close()
+
+        read_builder = target.new_read_builder()
+        table_read = read_builder.new_read()
+        splits = read_builder.new_scan().plan().splits()
+        actual = table_read.to_arrow(splits).sort_by('user_id')
+        self.assertEqual(self.expected, actual)
+
     def test_multi_prepare_commit_ao(self):
         schema = Schema.from_pyarrow_schema(self.pa_schema, partition_keys=['dt'])
         self.catalog.create_table('default.test_append_only_parquet', schema, False)
