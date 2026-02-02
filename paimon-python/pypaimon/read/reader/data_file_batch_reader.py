@@ -138,9 +138,15 @@ class DataFileBatchReader(RecordBatchReader):
                     mapped_arrays.append(inter_arrays[actual_index])
                     mapped_names.append(inter_names[actual_index])
                 else:
-                    null_array = pa.nulls(num_rows)
+                    name = (
+                        self.requested_field_names[i]
+                        if self.requested_field_names and i < len(self.requested_field_names)
+                        else f"null_col_{i}"
+                    )
+                    field = self.schema_map.get(name)
+                    null_array = pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
                     mapped_arrays.append(null_array)
-                    mapped_names.append(f"null_col_{i}")
+                    mapped_names.append(name)
 
             if self.partition_info:
                 partition_names = set()
@@ -158,13 +164,19 @@ class DataFileBatchReader(RecordBatchReader):
                     final_arrays = []
                     final_names = []
                     mapped_name_to_array = {name: arr for name, arr in zip(mapped_names, mapped_arrays)}
-                    
+
                     for name in self.requested_field_names:
                         if name in mapped_name_to_array:
                             final_arrays.append(mapped_name_to_array[name])
                             final_names.append(name)
                         elif name in partition_arrays_map:
                             final_arrays.append(partition_arrays_map[name])
+                            final_names.append(name)
+                        else:
+                            # Field not in file (e.g. index_mapping -1): output null column
+                            field = self.schema_map.get(name)
+                            null_arr = pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
+                            final_arrays.append(null_arr)
                             final_names.append(name)
 
                     inter_arrays = final_arrays

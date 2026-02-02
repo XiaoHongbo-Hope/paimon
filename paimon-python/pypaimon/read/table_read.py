@@ -70,15 +70,15 @@ class TableRead:
         num_rows = batch.num_rows
         columns = []
 
-        batch_column_names = batch.schema.names  # pyarrow 0.17+; RecordBatch.column_names not in py36
+        batch_column_names = batch.schema.names  # py36: use schema.names (no RecordBatch.column_names)
         for field in target_schema:
             if field.name in batch_column_names:
                 col = batch.column(field.name)
                 if col.type != field.type:
-                    if col.type.id == field.type.id:
-                        col = col.cast(field.type)
-                    else:
-                        col = pyarrow.nulls(num_rows, type=field.type)
+                    col = (
+                        col.cast(field.type) if col.type.id == field.type.id
+                        else pyarrow.nulls(num_rows, type=field.type)
+                    )
             else:
                 col = pyarrow.nulls(num_rows, type=field.type)
             columns.append(col)
@@ -118,7 +118,8 @@ class TableRead:
             table_list.append(self._try_to_pad_batch_by_schema(batch, schema))
 
         if not table_list:
-            return pyarrow.Table.from_arrays([pyarrow.array([], type=field.type) for field in output_schema], schema=output_schema)
+            empty_arrays = [pyarrow.array([], type=field.type) for field in output_schema]
+            return pyarrow.Table.from_arrays(empty_arrays, schema=output_schema)
         
         # Concatenate arrays for fields in output_schema
         concat_arrays = [

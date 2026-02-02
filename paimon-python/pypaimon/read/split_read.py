@@ -358,7 +358,10 @@ class SplitRead(ABC):
 
         return trimmed_mapping, trimmed_fields
 
-    def _create_partition_info(self, actual_read_fields: Optional[List[DataField]] = None, output_fields: Optional[List[DataField]] = None):
+    def _create_partition_info(
+            self,
+            actual_read_fields: Optional[List[DataField]] = None,
+            output_fields: Optional[List[DataField]] = None):
         if not self.table.partition_keys:
             return None
         partition_mapping = self._construct_partition_mapping(actual_read_fields, output_fields)
@@ -366,7 +369,10 @@ class SplitRead(ABC):
             return None
         return PartitionInfo(partition_mapping, self.split.partition)
 
-    def _construct_partition_mapping(self, actual_read_fields: Optional[List[DataField]] = None, output_fields: Optional[List[DataField]] = None) -> List[int]:
+    def _construct_partition_mapping(
+            self,
+            actual_read_fields: Optional[List[DataField]] = None,
+            output_fields: Optional[List[DataField]] = None) -> List[int]:
         if actual_read_fields is not None:
             read_data_fields = actual_read_fields
         else:
@@ -699,10 +705,11 @@ class DataEvolutionSplitRead(SplitRead):
                 self.read_fields = read_fields
                 batch_size = self.table.options.read_batch_size()
                 if len(bunch.files()) == 1:
-                    suppliers = [lambda r=self._create_file_reader(
-                        bunch.files()[0], read_field_names,
-                        use_requested_field_names=use_requested_field_names
-                    ): r]
+                    suppliers = [
+                        partial(self._create_file_reader, file=bunch.files()[0],
+                                read_fields=read_field_names,
+                                use_requested_field_names=use_requested_field_names)
+                    ]
                     file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 else:
                     suppliers = [

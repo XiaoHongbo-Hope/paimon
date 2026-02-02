@@ -84,6 +84,54 @@ class DataEvolutionTest(unittest.TestCase):
             ('f1', pa.int16()),
         ]))
         self.assertEqual(actual_data, expect_data)
+        self.assertEqual(
+            len(actual_data.schema), len(expect_data.schema),
+            'Read output column count must match schema')
+        self.assertEqual(
+            actual_data.schema.names, expect_data.schema.names,
+            'Read output column names must match schema')
+
+    def test_partitioned_read_requested_column_missing_in_file(self):
+        pa_schema = pa.schema([('f0', pa.int32()), ('f1', pa.string()), ('dt', pa.string())])
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            partition_keys=['dt'],
+            options={'row-tracking.enabled': 'true', 'data-evolution.enabled': 'true'}
+        )
+        self.catalog.create_table('default.test_partition_missing_col', schema, False)
+        table = self.catalog.get_table('default.test_partition_missing_col')
+        wb = table.new_batch_write_builder()
+
+        tw1 = wb.new_write()
+        tc1 = wb.new_commit()
+        tw1.write_arrow(pa.Table.from_pydict(
+            {'f0': [1, 2], 'f1': ['a', 'b'], 'dt': ['p1', 'p1']},
+            schema=pa_schema
+        ))
+        tc1.commit(tw1.prepare_commit())
+        tw1.close()
+        tc1.close()
+
+        tw2 = wb.new_write().with_write_type(['f0', 'dt'])
+        tc2 = wb.new_commit()
+        # Row key extractor uses table column indices; pass table-ordered data with null for f1
+        tw2.write_arrow(pa.Table.from_pydict(
+            {'f0': [3, 4], 'f1': [None, None], 'dt': ['p1', 'p1']},
+            schema=pa_schema
+        ))
+        tc2.commit(tw2.prepare_commit())
+        tw2.close()
+        tc2.close()
+
+        actual = table.new_read_builder().new_read().to_arrow(table.new_read_builder().new_scan().plan().splits())
+        self.assertEqual(len(actual.schema), 3, 'Must have f0, f1, dt (no silent drop when f1 missing in file)')
+        self.assertEqual(actual.schema.names, ['f0', 'f1', 'dt'])
+        self.assertEqual(actual.num_rows, 4)
+        f1_col = actual.column('f1')
+        self.assertEqual(f1_col[0].as_py(), 'a')
+        self.assertEqual(f1_col[1].as_py(), 'b')
+        self.assertIsNone(f1_col[2].as_py())
+        self.assertIsNone(f1_col[3].as_py())
 
     def test_with_slice(self):
         pa_schema = pa.schema([
@@ -230,6 +278,8 @@ class DataEvolutionTest(unittest.TestCase):
             'f2': ['b'] * 100 + ['y'] + ['d'],
         }, schema=simple_pa_schema)
         self.assertEqual(actual, expect)
+        self.assertEqual(len(actual.schema), len(expect.schema), 'Merge read output column count must match schema')
+        self.assertEqual(actual.schema.names, expect.schema.names, 'Merge read output column names must match schema')
 
     def test_disorder_cols_append(self):
         simple_pa_schema = pa.schema([
@@ -599,6 +649,7 @@ class DataEvolutionTest(unittest.TestCase):
             pa.field('_SEQUENCE_NUMBER', pa.int64(), nullable=False),
         ]))
         self.assertEqual(actual_data, expect_data)
+        self.assertEqual(len(actual_data.schema), len(expect_data.schema), 'Read output column count must match schema')
 
         # write 2
         table_write = write_builder.new_write().with_write_type(['f0'])
@@ -634,6 +685,7 @@ class DataEvolutionTest(unittest.TestCase):
             pa.field('_SEQUENCE_NUMBER', pa.int64(), nullable=False),
         ]))
         self.assertEqual(actual_data, expect_data)
+        self.assertEqual(len(actual_data.schema), len(expect_data.schema), 'Read output column count must match schema')
 
     def test_from_arrays_without_schema(self):
         schema = pa.schema([

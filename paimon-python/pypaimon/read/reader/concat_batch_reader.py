@@ -215,7 +215,11 @@ class DataEvolutionMergeReader(RecordBatchReader):
 
             if column is not None and out_name is not None:
                 columns.append(column)
-        if columns:
+            elif self.schema is not None and i < len(self.schema):
+                # row_offsets[i] == -1 or no batch has this field: output null column per schema
+                num_rows = next(b.num_rows for b in batches if b is not None)
+                columns.append(pa.nulls(num_rows, type=self.schema.field(i).type))
+        if columns and len(columns) == len(self.schema):
             return pa.RecordBatch.from_arrays(columns, schema=self.schema)
         return None
 
