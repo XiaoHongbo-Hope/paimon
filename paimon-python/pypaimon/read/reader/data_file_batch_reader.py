@@ -86,9 +86,29 @@ class DataFileBatchReader(RecordBatchReader):
                     inter_names.append(partition_field.name)
                 else:
                     real_index = self.partition_info.get_real_index(i)
-                    if real_index < record_batch.num_columns:
+                    name = (
+                        self.requested_field_names[i]
+                        if self.requested_field_names and i < len(self.requested_field_names)
+                        else f"_col_{i}"
+                    )
+                    batch_names = record_batch.schema.names
+                    col_idx = None
+                    if name in batch_names:
+                        col_idx = record_batch.schema.get_field_index(name)
+                    elif name.startswith("_KEY_") and name[5:] in batch_names:
+                        col_idx = record_batch.schema.get_field_index(name[5:])
+                    if col_idx is not None:
+                        inter_arrays.append(record_batch.column(col_idx))
+                        inter_names.append(name)
+                    elif real_index < record_batch.num_columns:
                         inter_arrays.append(record_batch.column(real_index))
-                        inter_names.append(record_batch.schema.field(real_index).name)
+                        inter_names.append(name)
+                    else:
+                        field = self.schema_map.get(name)
+                        inter_arrays.append(
+                            pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
+                        )
+                        inter_names.append(name)
         else:
             inter_arrays = list(record_batch.columns)
             inter_names = list(record_batch.schema.names)

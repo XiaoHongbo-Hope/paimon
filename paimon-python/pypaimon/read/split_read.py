@@ -185,7 +185,9 @@ class SplitRead(ABC):
             fields = requested_fields if requested_fields else table_schema_fields
         else:
             fields = table_schema_fields
-        
+        if for_merge_read:
+            fields = self.read_fields
+
         system_fields = SpecialFields.find_system_fields(fields)
         
         field_map = {field.name: field for field in table_schema_fields}
@@ -468,8 +470,12 @@ class RawFileSplitRead(SplitRead):
 
 
 class MergeFileSplitRead(SplitRead):
+    def create_index_mapping(self):
+        return None
+
     def kv_reader_supplier(self, file: DataFileMeta, dv_factory: Optional[Callable] = None) -> RecordReader:
-        file_batch_reader = self.file_reader_supplier(file, True, self._get_final_read_data_fields(), False)
+        merge_read_fields = [f.name for f in self._get_read_data_fields()]
+        file_batch_reader = self.file_reader_supplier(file, True, merge_read_fields, False)
         dv = dv_factory() if dv_factory else None
         if dv:
             return ApplyDeletionVectorReader(
