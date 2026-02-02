@@ -78,8 +78,6 @@ class ReadBuilder:
         table_fields = self.table.fields
 
         if not self._projection:
-            if self.table.options.row_tracking_enabled():
-                table_fields = SpecialFields.row_type_with_row_tracking(table_fields)
             return table_fields
         else:
             if self.table.options.row_tracking_enabled():
