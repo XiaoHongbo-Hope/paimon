@@ -139,6 +139,8 @@ class DataEvolutionMergeReader(RecordBatchReader):
      - The fourth field comes from batch1, and it is at offset 1 in batch1.
      - The fifth field comes from batch2, and it is at offset 1 in batch2.
      - The sixth field comes from batch1, and it is at offset 0 in batch1.
+
+    When row_offsets[i] == -1 (no file provides that field), output a column of nulls using schema.
     """
 
     def __init__(
@@ -146,7 +148,11 @@ class DataEvolutionMergeReader(RecordBatchReader):
         row_offsets: List[int],
         field_offsets: List[int],
         readers: List[Optional[RecordBatchReader]],
+<<<<<<< HEAD
         schema: pa.Schema,
+=======
+        schema: Optional[pa.Schema] = None,
+>>>>>>> 72ffd9919 ([python] Fix data-evolution read after partial shard update)
     ):
         if row_offsets is None:
             raise ValueError("Row offsets must not be null")
@@ -172,16 +178,80 @@ class DataEvolutionMergeReader(RecordBatchReader):
                     # all readers are aligned, as long as one returns null, the others will also have no data
                     return None
                 batches[i] = batch
-        # Assemble record batches from batches based on row_offsets and field_offsets
+        # All readers may be None (e.g. all bunches had empty read_fields_per_bunch)
+        if not any(b is not None for b in batches):
+            return None
+        num_rows = next(b.num_rows for b in batches if b is not None)
         columns = []
         for i in range(len(self.row_offsets)):
             batch_index = self.row_offsets[i]
             field_index = self.field_offsets[i]
-            if batches[batch_index] is not None:
-                column = batches[batch_index].column(field_index)
+            field_name = self.schema.field(i).name if self.schema else None
+            column = None
+            out_name = None
+
+            if batch_index >= 0 and batches[batch_index] is not None:
+                src_batch = batches[batch_index]
+                if field_name is not None and field_name in src_batch.schema.names:
+                    column = src_batch.column(src_batch.schema.get_field_index(field_name))
+                    out_name = (
+                        self.schema.field(i).name
+                        if self.schema is not None and i < len(self.schema)
+                        else field_name
+                    )
+                elif field_index < src_batch.num_columns:
+                    column = src_batch.column(field_index)
+                    out_name = (
+                        self.schema.field(i).name
+                        if self.schema is not None and i < len(self.schema)
+                        else src_batch.schema.names[field_index]
+                    )
+
+            if column is None and field_name is not None:
+                for b in batches:
+                    if b is not None and field_name in b.schema.names:
+                        column = b.column(b.schema.get_field_index(field_name))
+                        out_name = (
+                            self.schema.field(i).name
+                            if self.schema is not None and i < len(self.schema)
+                            else field_name
+                        )
+                        break
+
+            if column is not None and out_name is not None:
                 columns.append(column)
+<<<<<<< HEAD
         if columns:
             return pa.RecordBatch.from_arrays(columns, schema=self.schema)
+=======
+                names.append(out_name)
+            elif self.schema is not None and i < len(self.schema):
+                field = self.schema.field(i)
+                columns.append(pa.nulls(num_rows, type=field.type))
+                names.append(field.name)
+            else:
+                if batch_index >= 0 and batches[batch_index] is not None:
+                    src_batch = batches[batch_index]
+                    raise ValueError(
+                        f"Field index {field_index} out of bounds for batch with "
+                        f"{src_batch.num_columns} columns and no schema for null column"
+                    )
+                raise ValueError(
+                    f"Row offset {batch_index} for field index {i} is invalid and no schema provided for null column"
+                )
+        if columns:
+            if self.schema is not None:
+                schema_fields = []
+                for i, name in enumerate(names):
+                    if name in self.schema.names:
+                        field_idx = self.schema.get_field_index(name)
+                        schema_fields.append(self.schema.field(field_idx))
+                    else:
+                        schema_fields.append(pa.field(name, columns[i].type))
+                return pa.RecordBatch.from_arrays(columns, schema=pa.schema(schema_fields))
+            else:
+                return pa.RecordBatch.from_arrays(columns, names)
+>>>>>>> 72ffd9919 ([python] Fix data-evolution read after partial shard update)
         return None
 
     def close(self) -> None:

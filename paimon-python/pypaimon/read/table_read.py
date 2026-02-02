@@ -15,6 +15,7 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
+import logging
 from typing import Any, Dict, Iterator, List, Optional
 
 import pandas
@@ -29,17 +30,22 @@ from pypaimon.read.split_read import (DataEvolutionSplitRead,
                                       SplitRead)
 from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 from pypaimon.table.row.offset_row import OffsetRow
+from pypaimon.table.special_fields import SpecialFields
+
+logger = logging.getLogger(__name__)
 
 
 class TableRead:
     """Implementation of TableRead for native Python reading."""
 
-    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField]):
+    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField],
+                 projection: Optional[List[str]] = None):
         from pypaimon.table.file_store_table import FileStoreTable
 
         self.table: FileStoreTable = table
         self.predicate = predicate
         self.read_type = read_type
+        self.projection = projection
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
         def _record_generator():
@@ -55,30 +61,56 @@ class TableRead:
 
     def to_arrow_batch_reader(self, splits: List[Split]) -> pyarrow.ipc.RecordBatchReader:
         schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
+        schema = self._schema_with_row_tracking_not_null(schema)
         batch_iterator = self._arrow_batch_generator(splits, schema)
         return pyarrow.ipc.RecordBatchReader.from_batches(schema, batch_iterator)
 
     @staticmethod
     def _try_to_pad_batch_by_schema(batch: pyarrow.RecordBatch, target_schema):
-        if batch.schema.names == target_schema.names:
-            return batch
-
-        columns = []
         num_rows = batch.num_rows
+        columns = []
 
+        batch_column_names = batch.schema.names  # pyarrow 0.17+; RecordBatch.column_names not in py36
         for field in target_schema:
-            if field.name in batch.column_names:
+            if field.name in batch_column_names:
                 col = batch.column(field.name)
+                if col.type != field.type:
+                    if col.type.id == field.type.id:
+                        col = col.cast(field.type)
+                    else:
+                        col = pyarrow.nulls(num_rows, type=field.type)
             else:
                 col = pyarrow.nulls(num_rows, type=field.type)
             columns.append(col)
 
         return pyarrow.RecordBatch.from_arrays(columns, schema=target_schema)
 
+    @staticmethod
+    def _schema_with_row_tracking_not_null(schema: pyarrow.Schema) -> pyarrow.Schema:
+        """Ensure _ROW_ID and _SEQUENCE_NUMBER are not null (per SpecialFields)."""
+        fields = []
+        for field in schema:
+            if field.name == SpecialFields.ROW_ID.name or field.name == SpecialFields.SEQUENCE_NUMBER.name:
+                fields.append(pyarrow.field(field.name, field.type, nullable=False))
+            else:
+                fields.append(field)
+        return pyarrow.schema(fields)
+
     def to_arrow(self, splits: List[Split]) -> Optional[pyarrow.Table]:
         batch_reader = self.to_arrow_batch_reader(splits)
 
         schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
+        
+        if self.projection is None:
+            table_field_names = set(f.name for f in self.table.fields)
+            output_schema_fields = [
+                field for field in schema
+                if not SpecialFields.is_system_field(field.name) or field.name in table_field_names
+            ]
+            output_schema = pyarrow.schema(output_schema_fields)
+        else:
+            output_schema = schema
+        
         table_list = []
         for batch in iter(batch_reader.read_next_batch, None):
             if batch.num_rows == 0:
@@ -86,9 +118,15 @@ class TableRead:
             table_list.append(self._try_to_pad_batch_by_schema(batch, schema))
 
         if not table_list:
-            return pyarrow.Table.from_arrays([pyarrow.array([], type=field.type) for field in schema], schema=schema)
-        else:
-            return pyarrow.Table.from_batches(table_list)
+            return pyarrow.Table.from_arrays([pyarrow.array([], type=field.type) for field in output_schema], schema=output_schema)
+        
+        # Concatenate arrays for fields in output_schema
+        concat_arrays = [
+            pyarrow.concat_arrays([b.column(field.name) for b in table_list])
+            for field in output_schema
+        ]
+        single_batch = pyarrow.RecordBatch.from_arrays(concat_arrays, schema=output_schema)
+        return pyarrow.Table.from_batches([single_batch], schema=output_schema)
 
     def _arrow_batch_generator(self, splits: List[Split], schema: pyarrow.Schema) -> Iterator[pyarrow.RecordBatch]:
         chunk_size = 65536
@@ -131,6 +169,15 @@ class TableRead:
                         yield batch
             finally:
                 reader.close()
+
+        try:
+            if self.table.options.data_evolution_enabled():
+                # Call for side effect: release internal state so subsequent table ops don't block.
+                self.table.new_read_builder().new_scan().starting_scanner.plan_files()
+        except Exception as e:
+            logger.debug(
+                "plan_files() at end of read session failed (read already complete): %s", e
+            )
 
     def _filter_batches_by_row_ranges(
         self,
