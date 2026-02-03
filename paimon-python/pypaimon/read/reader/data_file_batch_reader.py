@@ -16,7 +16,7 @@
 # limitations under the License.
 ################################################################################
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pyarrow as pa
 from pyarrow import RecordBatch
@@ -51,6 +51,31 @@ class DataFileBatchReader(RecordBatchReader):
         self.requested_field_names = [field.name for field in fields] if fields else None
         self.fields = fields
 
+    def _align_to_requested_names(
+        self,
+        inter_arrays: List,
+        inter_names: List,
+        requested_field_names: List[str],
+        num_rows: int,
+    ) -> Tuple[List, List]:
+        name_to_idx = {n: i for i, n in enumerate(inter_names)}
+        ordered_arrays = []
+        ordered_names = []
+        for name in requested_field_names:
+            idx = name_to_idx.get(name)
+            if idx is None and name.startswith("_KEY_") and name[5:] in name_to_idx:
+                idx = name_to_idx[name[5:]]
+            if idx is not None:
+                ordered_arrays.append(inter_arrays[idx])
+                ordered_names.append(name)
+            else:
+                field = self.schema_map.get(name)
+                ordered_arrays.append(
+                    pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
+                )
+                ordered_names.append(name)
+        return ordered_arrays, ordered_names
+
     def read_arrow_batch(self, start_idx=None, end_idx=None) -> Optional[RecordBatch]:
         if isinstance(self.format_reader, FormatBlobReader):
             record_batch = self.format_reader.read_arrow_batch(start_idx, end_idx)
@@ -64,26 +89,12 @@ class DataFileBatchReader(RecordBatchReader):
             if self.row_tracking_enabled and self.system_fields:
                 record_batch = self._assign_row_tracking(record_batch)
             if self.requested_field_names is not None:
-                batch_names = record_batch.schema.names
-                if batch_names != self.requested_field_names or len(batch_names) != len(self.requested_field_names):
-                    inter_arrays = list(record_batch.columns)
-                    inter_names = list(record_batch.schema.names)
-                    ordered_arrays = []
-                    ordered_names = []
-                    for name in self.requested_field_names:
-                        if name in inter_names:
-                            ordered_arrays.append(inter_arrays[inter_names.index(name)])
-                            ordered_names.append(name)
-                        elif name.startswith("_KEY_") and name[5:] in inter_names:
-                            ordered_arrays.append(inter_arrays[inter_names.index(name[5:])])
-                            ordered_names.append(name)
-                        else:
-                            field = self.schema_map.get(name)
-                            ordered_arrays.append(
-                                pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
-                            )
-                            ordered_names.append(name)
-                    record_batch = pa.RecordBatch.from_arrays(ordered_arrays, ordered_names)
+                inter_arrays = list(record_batch.columns)
+                inter_names = list(record_batch.schema.names)
+                ordered_arrays, ordered_names = self._align_to_requested_names(
+                    inter_arrays, inter_names, self.requested_field_names, num_rows
+                )
+                record_batch = pa.RecordBatch.from_arrays(ordered_arrays, ordered_names)
             return record_batch
 
         if (self.partition_info is None and self.index_mapping is not None
@@ -135,46 +146,18 @@ class DataFileBatchReader(RecordBatchReader):
             inter_names = list(record_batch.schema.names)
 
         if self.requested_field_names is not None:
-            if (len(inter_names) <= len(self.requested_field_names)
-                    and inter_names == self.requested_field_names[:len(inter_names)]):
-                ordered_arrays = list(inter_arrays)
-                ordered_names = list(inter_names)
-                for name in self.requested_field_names[len(inter_names):]:
-                    field = self.schema_map.get(name)
-                    ordered_arrays.append(
-                        pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
-                    )
-                    ordered_names.append(name)
-                inter_arrays = ordered_arrays
-                inter_names = ordered_names
-            else:
-                ordered_arrays = []
-                ordered_names = []
-                for name in self.requested_field_names:
-                    if name in inter_names:
-                        ordered_arrays.append(inter_arrays[inter_names.index(name)])
-                        ordered_names.append(name)
-                    elif name.startswith("_KEY_") and name[5:] in inter_names:
-                        ordered_arrays.append(inter_arrays[inter_names.index(name[5:])])
-                        ordered_names.append(name)
-                    else:
-                        field = self.schema_map.get(name)
-                        ordered_arrays.append(
-                            pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
-                        )
-                        ordered_names.append(name)
-                inter_arrays = ordered_arrays
-                inter_names = ordered_names
+            inter_arrays, inter_names = self._align_to_requested_names(
+                inter_arrays, inter_names, self.requested_field_names, num_rows
+            )
 
         if self.index_mapping is not None and not (
                 self.requested_field_names is not None and inter_names == self.requested_field_names):
             mapped_arrays = []
             mapped_names = []
-            partition_names = set()
-            if self.partition_info:
-                for i in range(len(self.partition_info.partition_fields)):
-                    partition_names.add(self.partition_info.partition_fields[i].name)
-            
+            partition_names = (
+                set(pf.name for pf in self.partition_info.partition_fields)
+                if self.partition_info else set()
+            )
             non_partition_indices = [idx for idx, name in enumerate(inter_names) if name not in partition_names]
             for i, real_index in enumerate(self.index_mapping):
                 if 0 <= real_index < len(non_partition_indices):
@@ -193,17 +176,12 @@ class DataFileBatchReader(RecordBatchReader):
                     mapped_names.append(name)
 
             if self.partition_info:
-                partition_names = set()
-                partition_arrays_map = {}
-                for i in range(len(inter_names)):
-                    field_name = inter_names[i]
-                    if field_name in partition_names or (self.partition_info and any(
-                        self.partition_info.partition_fields[j].name == field_name
-                        for j in range(len(self.partition_info.partition_fields))
-                    )):
-                        partition_names.add(field_name)
-                        partition_arrays_map[field_name] = inter_arrays[i]
-                
+                partition_arrays_map = {
+                    inter_names[i]: inter_arrays[i]
+                    for i in range(len(inter_names))
+                    if inter_names[i] in partition_names
+                }
+
                 if self.requested_field_names:
                     final_arrays = []
                     final_names = []
@@ -236,7 +214,7 @@ class DataFileBatchReader(RecordBatchReader):
             else:
                 inter_arrays = mapped_arrays
                 inter_names = mapped_names
-            
+
             if self.system_primary_key:
                 for i in range(len(self.system_primary_key)):
                     if i < len(inter_names) and not inter_names[i].startswith("_KEY_"):

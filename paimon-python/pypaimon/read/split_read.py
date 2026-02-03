@@ -20,7 +20,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from functools import partial
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,13 @@ class SplitRead(ABC):
     def create_reader(self) -> RecordReader:
         """Create a record reader for the given split."""
 
+    def _get_blob_column_names(self) -> Set[str]:
+        out = set()
+        for field in self.table.table_schema.fields:
+            if 'blob' in str(field.type).lower():
+                out.add(field.name)
+        return out
+
     def file_reader_supplier(self, file: DataFileMeta, for_merge_read: bool,
                              read_fields: List[str], row_tracking_enabled: bool,
                              use_requested_field_names: bool = True) -> RecordBatchReader:
@@ -112,17 +119,11 @@ class SplitRead(ABC):
         file_path = file.external_path if file.external_path else file.file_path
         _, extension = os.path.splitext(file_path)
         file_format = extension[1:]
-        
-        blob_column_names = set()
-        for field in self.table.table_schema.fields:
-            type_str = str(field.type).lower()
-            if 'blob' in type_str:
-                blob_column_names.add(field.name)
-        
+        blob_column_names = self._get_blob_column_names()
         is_blob_file = file_format == CoreOptions.FILE_FORMAT_BLOB
         if not is_blob_file and blob_column_names:
             read_file_fields = [f for f in read_file_fields if f not in blob_column_names]
-        
+
         if getattr(file, "write_cols", None):
             read_file_fields = list(read_file_fields)
             for col in file.write_cols:
@@ -164,7 +165,7 @@ class SplitRead(ABC):
                 index_mapping = None
         else:
             index_mapping = self.create_index_mapping()
-        
+
         table_schema_fields = (
             SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
             if row_tracking_enabled else self.table.table_schema.fields
@@ -189,7 +190,7 @@ class SplitRead(ABC):
             fields = table_schema_fields
 
         system_fields = SpecialFields.find_system_fields(fields)
-        
+
         field_map = {field.name: field for field in table_schema_fields}
         actual_read_fields_for_partition = []
         for field_name in read_file_fields:
@@ -213,7 +214,7 @@ class SplitRead(ABC):
             actual_read_fields=actual_read_fields_for_partition if actual_read_fields_for_partition else None,
             output_fields=fields
         )
-        
+
         if for_merge_read:
             return DataFileBatchReader(
                 format_reader,
@@ -392,12 +393,12 @@ class SplitRead(ABC):
             read_data_fields = actual_read_fields
         else:
             read_data_fields = self._get_read_data_fields()
-        
+
         if output_fields is not None:
             fields_to_map = output_fields
         else:
             fields_to_map = read_data_fields
-        
+
         actual_read_field_names = {field.name: idx for idx, field in enumerate(read_data_fields)}
         partition_names = self.table.partition_keys
         num_record_batch_cols = len(read_data_fields)
@@ -706,11 +707,7 @@ class DataEvolutionSplitRead(SplitRead):
                         SpecialFields.row_type_with_row_tracking(schema.fields)
                         if self.row_tracking_enabled else schema.fields
                     )
-                    blob_column_names = set()
-                    for field in self.table.table_schema.fields:
-                        type_str = str(field.type).lower()
-                        if 'blob' in type_str:
-                            blob_column_names.add(field.name)
+                    blob_column_names = self._get_blob_column_names()
                     read_field_names_set = {f.name for f in read_fields}
                     for f in schema_fields:
                         if f.name in blob_column_names:
