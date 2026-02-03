@@ -283,8 +283,10 @@ class DataFileBatchReader(RecordBatchReader):
         arrays = list(record_batch.columns)
         num_cols = len(arrays)
 
+        # Handle _ROW_ID field
         if SpecialFields.ROW_ID.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.ROW_ID.name]
+            # Create a new array that fills with computed row IDs
             if idx < num_cols:
                 if self.first_row_id is not None:
                     arrays[idx] = pa.array(
