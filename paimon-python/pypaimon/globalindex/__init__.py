@@ -20,8 +20,8 @@ from pypaimon.globalindex.global_index_result import GlobalIndexResult
 from pypaimon.globalindex.global_index_reader import GlobalIndexReader, FieldRef
 from pypaimon.globalindex.vector_search import VectorSearch
 from pypaimon.globalindex.vector_search_result import (
-    VectorSearchGlobalIndexResult,
-    DictBasedVectorSearchResult,
+    ScoredGlobalIndexResult,
+    DictBasedScoredIndexResult,
     ScoreGetter,
 )
 from pypaimon.globalindex.global_index_meta import GlobalIndexMeta, GlobalIndexIOMeta
@@ -30,7 +30,6 @@ from pypaimon.globalindex.global_index_scan_builder import (
     GlobalIndexScanBuilder,
     RowRangeGlobalIndexScanner,
 )
-from pypaimon.globalindex.roaring_bitmap import RoaringBitmap64
 from pypaimon.globalindex.range import Range
 
 __all__ = [
@@ -38,14 +37,13 @@ __all__ = [
     'GlobalIndexReader',
     'FieldRef',
     'VectorSearch',
-    'VectorSearchGlobalIndexResult',
-    'DictBasedVectorSearchResult',
+    'ScoredGlobalIndexResult',
+    'DictBasedScoredIndexResult',
     'ScoreGetter',
     'GlobalIndexMeta',
     'GlobalIndexIOMeta',
     'GlobalIndexEvaluator',
     'GlobalIndexScanBuilder',
     'RowRangeGlobalIndexScanner',
-    'RoaringBitmap64',
     'Range',
 ]
