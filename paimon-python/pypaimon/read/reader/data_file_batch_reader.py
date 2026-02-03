@@ -241,12 +241,10 @@ class DataFileBatchReader(RecordBatchReader):
         for i, name in enumerate(inter_names):
             array = inter_arrays[i]
             target_field = self.schema_map.get(name)
-            if not target_field:
-                target_field = pa.field(name, array.type)
+            if target_field is None:
+                final_fields.append(pa.field(name, array.type))
             else:
-                if name in (SpecialFields.ROW_ID.name, SpecialFields.SEQUENCE_NUMBER.name):
-                    target_field = pa.field(name, target_field.type, nullable=False)
-            final_fields.append(target_field)
+                final_fields.append(target_field)
         final_schema = pa.schema(final_fields)
         record_batch = pa.RecordBatch.from_arrays(inter_arrays, schema=final_schema)
 
@@ -261,17 +259,18 @@ class DataFileBatchReader(RecordBatchReader):
         arrays = list(record_batch.columns)
         num_cols = len(arrays)
 
-        # Handle _ROW_ID field
+        # Handle _ROW_ID field (non-nullable per schema; do not fill with nulls)
         if SpecialFields.ROW_ID.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.ROW_ID.name]
-            # Create a new array that fills with computed row IDs
             if idx < num_cols:
-                if self.first_row_id is not None:
-                    arrays[idx] = pa.array(
-                        range(self.first_row_id, self.first_row_id + record_batch.num_rows),
-                        type=pa.int64())
-                else:
-                    arrays[idx] = pa.nulls(record_batch.num_rows, pa.int64())
+                if self.first_row_id is None:
+                    raise ValueError(
+                        "Row tracking requires first_row_id on the file; "
+                        "got None. Ensure file metadata has first_row_id when reading _ROW_ID."
+                    )
+                arrays[idx] = pa.array(
+                    range(self.first_row_id, self.first_row_id + record_batch.num_rows),
+                    type=pa.int64())
 
         # Handle _SEQUENCE_NUMBER field
         if SpecialFields.SEQUENCE_NUMBER.name in self.system_fields.keys():

@@ -61,7 +61,6 @@ class TableRead:
 
     def to_arrow_batch_reader(self, splits: List[Split]) -> pyarrow.ipc.RecordBatchReader:
         schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
-        schema = self._schema_with_row_tracking_not_null(schema)
         batch_iterator = self._arrow_batch_generator(splits, schema)
         return pyarrow.ipc.RecordBatchReader.from_batches(schema, batch_iterator)
 
@@ -87,17 +86,6 @@ class TableRead:
             columns.append(col)
 
         return pyarrow.RecordBatch.from_arrays(columns, schema=target_schema)
-
-    @staticmethod
-    def _schema_with_row_tracking_not_null(schema: pyarrow.Schema) -> pyarrow.Schema:
-        """Ensure _ROW_ID and _SEQUENCE_NUMBER are not null (per SpecialFields)."""
-        fields = []
-        for field in schema:
-            if field.name == SpecialFields.ROW_ID.name or field.name == SpecialFields.SEQUENCE_NUMBER.name:
-                fields.append(pyarrow.field(field.name, field.type, nullable=False))
-            else:
-                fields.append(field)
-        return pyarrow.schema(fields)
 
     def to_arrow(self, splits: List[Split]) -> Optional[pyarrow.Table]:
         batch_reader = self.to_arrow_batch_reader(splits)
