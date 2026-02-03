@@ -170,7 +170,7 @@ class SplitRead(ABC):
             if row_tracking_enabled else self.table.table_schema.fields
         )
         if for_merge_read:
-            fields = self._get_all_data_fields()
+            fields = self.read_fields
         elif is_blob_file:
             field_map = {field.name: field for field in table_schema_fields}
             requested_fields = []
@@ -203,7 +203,11 @@ class SplitRead(ABC):
             and fields is table_schema_fields
         ):
             partition_row = self.split.partition
-            fields = list(partition_row.fields) + actual_read_fields_for_partition
+            full_partition_and_file = list(partition_row.fields) + actual_read_fields_for_partition
+            available_names = {f.name for f in full_partition_and_file}
+            fields = [f for f in self.read_fields if f.name in available_names]
+            if not fields:
+                fields = full_partition_and_file
 
         partition_info = self._create_partition_info(
             actual_read_fields=actual_read_fields_for_partition if actual_read_fields_for_partition else None,
