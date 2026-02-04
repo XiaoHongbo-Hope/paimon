@@ -16,13 +16,10 @@
 # limitations under the License.
 ################################################################################
 
-import logging
 import os
 from abc import ABC, abstractmethod
 from functools import partial
 from typing import Callable, List, Optional, Set, Tuple
-
-logger = logging.getLogger(__name__)
 
 from pypaimon.common.options.core_options import CoreOptions
 from pypaimon.common.predicate import Predicate
