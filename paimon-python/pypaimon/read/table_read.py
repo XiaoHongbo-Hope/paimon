@@ -145,57 +145,6 @@ class TableRead:
             finally:
                 reader.close()
 
-<<<<<<< HEAD
-=======
-        try:
-            if self.table.options.data_evolution_enabled():
-                self.table.new_read_builder().new_scan().starting_scanner.plan_files()
-        except Exception as e:
-            logger.debug(
-                "plan_files() at end of read session failed (read already complete): %s", e
-            )
-
-    def _filter_batches_by_row_ranges(
-        self,
-        batch_iterator: Iterator[pyarrow.RecordBatch],
-        split: Split,
-        row_ranges: List
-    ) -> Iterator[pyarrow.RecordBatch]:
-        """Filter batches to only include rows within the given row ranges."""
-        import numpy as np
-
-        # Build a set of allowed row IDs for fast lookup
-        allowed_row_ids = set()
-        for r in row_ranges:
-            for row_id in range(r.from_, r.to + 1):
-                allowed_row_ids.add(row_id)
-
-        # Track current row ID based on file's first_row_id
-        current_row_id = 0
-        for file in split.files:
-            if file.first_row_id is not None:
-                current_row_id = file.first_row_id
-                break
-
-        for batch in batch_iterator:
-            if batch.num_rows == 0:
-                continue
-
-            # Build mask for rows that are in allowed_row_ids
-            mask = np.zeros(batch.num_rows, dtype=bool)
-            for i in range(batch.num_rows):
-                if current_row_id + i in allowed_row_ids:
-                    mask[i] = True
-
-            current_row_id += batch.num_rows
-
-            # Filter batch
-            if np.any(mask):
-                filtered_batch = batch.filter(pyarrow.array(mask))
-                if filtered_batch.num_rows > 0:
-                    yield filtered_batch
-
->>>>>>> 57e006c69 (support data evolution read)
     def to_pandas(self, splits: List[Split]) -> pandas.DataFrame:
         arrow_table = self.to_arrow(splits)
         return arrow_table.to_pandas()

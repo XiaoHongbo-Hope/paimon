@@ -765,44 +765,34 @@ class DataEvolutionSplitRead(SplitRead):
     def _create_file_reader(self, file: DataFileMeta, read_fields: [str],
                             use_requested_field_names: bool = True) -> Optional[RecordReader]:
         """Create a file reader for a single file."""
-<<<<<<< HEAD
-        def create_record_reader():
-=======
-        # If the current file needs to be further divided for reading, use ShardBatchReader
-        # Check if this is a SlicedSplit to get shard_file_idx_map
         shard_file_idx_map = (
             self.split.shard_file_idx_map() if isinstance(self.split, SlicedSplit) else {}
         )
+        begin_pos, end_pos = 0, 0
         if file.file_name in shard_file_idx_map:
             (begin_pos, end_pos) = shard_file_idx_map[file.file_name]
             if (begin_pos, end_pos) == (-1, -1):
                 return None
-            else:
-                return ShardBatchReader(self.file_reader_supplier(
-                    file=file,
-                    for_merge_read=False,
-                    read_fields=read_fields,
-                    row_tracking_enabled=True,
-                    use_requested_field_names=use_requested_field_names), begin_pos, end_pos)
-        else:
->>>>>>> 57e006c69 (support data evolution read)
+
+        def create_record_reader():
             return self.file_reader_supplier(
                 file=file,
                 for_merge_read=False,
                 read_fields=read_fields,
-<<<<<<< HEAD
-                row_tracking_enabled=True)
+                row_tracking_enabled=True,
+                use_requested_field_names=use_requested_field_names)
+
+        base = create_record_reader()
+        if file.file_name in shard_file_idx_map:
+            base = ShardBatchReader(base, begin_pos, end_pos)
         if self.row_ranges is None:
-            return create_record_reader()
+            return base
         file_range = Range(file.first_row_id, file.first_row_id + file.row_count - 1)
         row_ranges = Range.and_(self.row_ranges, [file_range])
         if len(row_ranges) == 0:
             return EmptyRecordBatchReader()
-        return RowIdFilterRecordBatchReader(create_record_reader(), file.first_row_id, row_ranges)
-=======
-                row_tracking_enabled=True,
-                use_requested_field_names=use_requested_field_names)
->>>>>>> 57e006c69 (support data evolution read)
+        first_row_id = file.first_row_id + (begin_pos if file.file_name in shard_file_idx_map else 0)
+        return RowIdFilterRecordBatchReader(base, first_row_id, row_ranges)
 
     def _split_field_bunches(self, need_merge_files: List[DataFileMeta]) -> List[FieldBunch]:
         """Split files into field bunches."""
