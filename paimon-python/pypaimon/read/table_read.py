@@ -224,6 +224,8 @@ class TableRead:
         elif self.table.options.data_evolution_enabled():
             from pypaimon.globalindex.data_evolution_batch_scan import DataEvolutionBatchScan
             predicate_for_read = DataEvolutionBatchScan.remove_row_id_filter(self.predicate)
+            if predicate_for_read is None and self.predicate is not None:
+                predicate_for_read = self.predicate
             return DataEvolutionSplitRead(
                 table=self.table,
                 predicate=predicate_for_read,
