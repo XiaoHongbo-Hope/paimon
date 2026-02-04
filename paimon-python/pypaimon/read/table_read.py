@@ -15,6 +15,7 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
+import logging
 from typing import Any, Dict, Iterator, List, Optional
 
 import pandas
@@ -28,17 +29,22 @@ from pypaimon.read.split_read import (DataEvolutionSplitRead,
                                       SplitRead)
 from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 from pypaimon.table.row.offset_row import OffsetRow
+from pypaimon.table.special_fields import SpecialFields
+
+logger = logging.getLogger(__name__)
 
 
 class TableRead:
     """Implementation of TableRead for native Python reading."""
 
-    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField]):
+    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField],
+                 projection: Optional[List[str]] = None):
         from pypaimon.table.file_store_table import FileStoreTable
 
         self.table: FileStoreTable = table
         self.predicate = predicate
         self.read_type = read_type
+        self.projection = projection
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
         def _record_generator():
@@ -59,15 +65,21 @@ class TableRead:
 
     @staticmethod
     def _try_to_pad_batch_by_schema(batch: pyarrow.RecordBatch, target_schema):
-        if batch.schema.names == target_schema.names:
+        if batch.schema.names == target_schema.names and len(batch.schema.names) == len(target_schema.names):
             return batch
 
-        columns = []
         num_rows = batch.num_rows
+        columns = []
 
+        batch_column_names = batch.schema.names  # py36: use schema.names (no RecordBatch.column_names)
         for field in target_schema:
-            if field.name in batch.column_names:
+            if field.name in batch_column_names:
                 col = batch.column(field.name)
+                if col.type != field.type:
+                    try:
+                        col = col.cast(field.type)
+                    except (pyarrow.ArrowInvalid, pyarrow.ArrowNotImplementedError):
+                        col = pyarrow.nulls(num_rows, type=field.type)
             else:
                 col = pyarrow.nulls(num_rows, type=field.type)
             columns.append(col)
@@ -78,6 +90,17 @@ class TableRead:
         batch_reader = self.to_arrow_batch_reader(splits)
 
         schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
+        
+        if self.projection is None:
+            table_field_names = set(f.name for f in self.table.fields)
+            output_schema_fields = [
+                field for field in schema
+                if not SpecialFields.is_system_field(field.name) or field.name in table_field_names
+            ]
+            output_schema = pyarrow.schema(output_schema_fields)
+        else:
+            output_schema = schema
+        
         table_list = []
         for batch in iter(batch_reader.read_next_batch, None):
             if batch.num_rows == 0:
@@ -85,9 +108,15 @@ class TableRead:
             table_list.append(self._try_to_pad_batch_by_schema(batch, schema))
 
         if not table_list:
-            return pyarrow.Table.from_arrays([pyarrow.array([], type=field.type) for field in schema], schema=schema)
-        else:
-            return pyarrow.Table.from_batches(table_list)
+            empty_arrays = [pyarrow.array([], type=field.type) for field in output_schema]
+            return pyarrow.Table.from_arrays(empty_arrays, schema=output_schema)
+        
+        concat_arrays = [
+            pyarrow.concat_arrays([b.column(field.name) for b in table_list])
+            for field in output_schema
+        ]
+        single_batch = pyarrow.RecordBatch.from_arrays(concat_arrays, schema=output_schema)
+        return pyarrow.Table.from_batches([single_batch], schema=output_schema)
 
     def _arrow_batch_generator(self, splits: List[Split], schema: pyarrow.Schema) -> Iterator[pyarrow.RecordBatch]:
         chunk_size = 65536
@@ -116,6 +145,57 @@ class TableRead:
             finally:
                 reader.close()
 
+<<<<<<< HEAD
+=======
+        try:
+            if self.table.options.data_evolution_enabled():
+                self.table.new_read_builder().new_scan().starting_scanner.plan_files()
+        except Exception as e:
+            logger.debug(
+                "plan_files() at end of read session failed (read already complete): %s", e
+            )
+
+    def _filter_batches_by_row_ranges(
+        self,
+        batch_iterator: Iterator[pyarrow.RecordBatch],
+        split: Split,
+        row_ranges: List
+    ) -> Iterator[pyarrow.RecordBatch]:
+        """Filter batches to only include rows within the given row ranges."""
+        import numpy as np
+
+        # Build a set of allowed row IDs for fast lookup
+        allowed_row_ids = set()
+        for r in row_ranges:
+            for row_id in range(r.from_, r.to + 1):
+                allowed_row_ids.add(row_id)
+
+        # Track current row ID based on file's first_row_id
+        current_row_id = 0
+        for file in split.files:
+            if file.first_row_id is not None:
+                current_row_id = file.first_row_id
+                break
+
+        for batch in batch_iterator:
+            if batch.num_rows == 0:
+                continue
+
+            # Build mask for rows that are in allowed_row_ids
+            mask = np.zeros(batch.num_rows, dtype=bool)
+            for i in range(batch.num_rows):
+                if current_row_id + i in allowed_row_ids:
+                    mask[i] = True
+
+            current_row_id += batch.num_rows
+
+            # Filter batch
+            if np.any(mask):
+                filtered_batch = batch.filter(pyarrow.array(mask))
+                if filtered_batch.num_rows > 0:
+                    yield filtered_batch
+
+>>>>>>> 57e006c69 (support data evolution read)
     def to_pandas(self, splits: List[Split]) -> pandas.DataFrame:
         arrow_table = self.to_arrow(splits)
         return arrow_table.to_pandas()
