@@ -442,6 +442,74 @@ class DataEvolutionTest(unittest.TestCase):
         }, schema=simple_pa_schema)
         self.assertEqual(actual, expect)
 
+    def test_filter_on_evolved_column(self):
+        pa_schema = pa.schema([
+            ("id", pa.int64()),
+            ("b", pa.int32()),
+            ("c", pa.int32()),
+        ])
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                "row-tracking.enabled": "true",
+                "data-evolution.enabled": "true",
+            },
+        )
+        table_name = "default.test_filter_on_evolved_column"
+        self.catalog.create_table(table_name, schema, ignore_if_exists=True)
+        table = self.catalog.get_table(table_name)
+        write_builder = table.new_batch_write_builder()
+
+        w0 = write_builder.new_write().with_write_type(["id", "b"])
+        c0 = write_builder.new_commit()
+        d0 = pa.Table.from_pydict(
+            {"id": [1, 2], "b": [10, 20]},
+            schema=pa.schema([("id", pa.int64()), ("b", pa.int32())]),
+        )
+        w0.write_arrow(d0)
+        c0.commit(w0.prepare_commit())
+        w0.close()
+        c0.close()
+
+        w1 = write_builder.new_write().with_write_type(["c"])
+        c1 = write_builder.new_commit()
+        d1 = pa.Table.from_pydict({"c": [100, 200]}, schema=pa.schema([("c", pa.int32())]))
+        w1.write_arrow(d1)
+        cmts1 = w1.prepare_commit()
+        for cmt in cmts1:
+            for nf in cmt.new_files:
+                nf.first_row_id = 0
+        c1.commit(cmts1)
+        w1.close()
+        c1.close()
+
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+
+        full_df = rb.new_read().to_pandas(splits)
+        self.assertEqual(len(full_df), 2, "Full scan should return 2 rows")
+        self.assertEqual(sorted(full_df["id"].tolist()), [1, 2])
+        self.assertEqual(sorted(full_df["c"].tolist()), [100, 200])
+
+        predicate = rb.new_predicate_builder().greater_than("c", 150)
+        rb_filtered = table.new_read_builder().with_filter(predicate)
+        result_df = rb_filtered.new_read().to_pandas(rb_filtered.new_scan().plan().splits())
+        self.assertEqual(
+            len(result_df),
+            1,
+            "Filter c > 150 should return 1 row (c=200). ",
+        )
+        self.assertEqual(result_df["id"].iloc[0], 2)
+        self.assertEqual(result_df["b"].iloc[0], 20)
+        self.assertEqual(result_df["c"].iloc[0], 200)
+
+        predicate_lt = rb.new_predicate_builder().less_than("c", 150)
+        rb_lt = table.new_read_builder().with_filter(predicate_lt)
+        result_lt_df = rb_lt.new_read().to_pandas(rb_lt.new_scan().plan().splits())
+        self.assertEqual(len(result_lt_df), 1, "Filter c < 150 should return 1 row (c=100).")
+        self.assertEqual(result_lt_df["id"].iloc[0], 1)
+        self.assertEqual(result_lt_df["c"].iloc[0], 100)
+
     def test_null_values(self):
         simple_pa_schema = pa.schema([
             ('f0', pa.int32()),

@@ -198,7 +198,7 @@ class TableRead:
         elif self.table.options.data_evolution_enabled():
             return DataEvolutionSplitRead(
                 table=self.table,
-                predicate=None,  # Never push predicate to split read
+                predicate=self.predicate,
                 read_type=self.read_type,
                 split=split,
                 row_tracking_enabled=True
