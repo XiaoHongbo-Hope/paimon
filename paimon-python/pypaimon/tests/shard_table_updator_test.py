@@ -514,6 +514,22 @@ class ShardTableUpdatorTest(unittest.TestCase):
             self.assertEqual(a_cross[i].as_py(), 10 + (i - 5))
             self.assertIsNone(d_cross[i].as_py(), "Cross-shard slice row %d (from file2): d null" % i)
 
+        rb_col = table.new_read_builder()
+        rb_col.with_projection(['a', 'b', 'c', 'd'])
+        pb_col = rb_col.new_predicate_builder()
+        pred_d = pb_col.is_in('d', [109, 218])  # d = c+b-a for a=1,2
+        rb_col.with_filter(pred_d)
+        tr_col = rb_col.new_read()
+        splits_d = rb_col.new_scan().plan().splits()
+        result_d = tr_col.to_arrow(splits_d)
+        self.assertEqual(result_d.num_rows, 2, "Filter d in [109, 218] should return 2 rows")
+        a_d = result_d.column('a')
+        d_d = result_d.column('d')
+        self.assertEqual(a_d[0].as_py(), 1)
+        self.assertEqual(d_d[0].as_py(), 109)
+        self.assertEqual(a_d[1].as_py(), 2)
+        self.assertEqual(d_d[1].as_py(), 218)
+
 
 if __name__ == '__main__':
     unittest.main()

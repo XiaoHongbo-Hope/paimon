@@ -222,9 +222,11 @@ class TableRead:
                 row_tracking_enabled=False
             )
         elif self.table.options.data_evolution_enabled():
+            from pypaimon.globalindex.data_evolution_batch_scan import DataEvolutionBatchScan
+            predicate_for_read = DataEvolutionBatchScan.remove_row_id_filter(self.predicate)
             return DataEvolutionSplitRead(
                 table=self.table,
-                predicate=None,  # Never push predicate to split read
+                predicate=predicate_for_read,
                 read_type=self.read_type,
                 split=split,
                 row_tracking_enabled=True
