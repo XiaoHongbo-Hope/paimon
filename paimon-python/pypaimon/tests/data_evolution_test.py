@@ -19,6 +19,7 @@ import os
 import tempfile
 import unittest
 
+import pandas as pd
 import pyarrow as pa
 
 from pypaimon import CatalogFactory, Schema
@@ -441,6 +442,135 @@ class DataEvolutionTest(unittest.TestCase):
             'f2': ['b'],
         }, schema=simple_pa_schema)
         self.assertEqual(actual, expect)
+
+    def test_with_filter(self):
+        """Test predicate filtering on data evolution tables.
+
+        Covers comparison (>, <, ==), AND, OR, IS NULL, IS NOT NULL on base and
+        evolved columns. Table has 3 rows with evolved column c = [100, NULL, 200].
+        """
+        pa_schema = pa.schema([
+            ("id", pa.int64()),
+            ("b", pa.int32()),
+            pa.field("c", pa.int32(), nullable=True),
+        ])
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                "row-tracking.enabled": "true",
+                "data-evolution.enabled": "true",
+            },
+        )
+        table_name = "default.test_filter_on_evolved_column"
+        self.catalog.create_table(table_name, schema, ignore_if_exists=True)
+        table = self.catalog.get_table(table_name)
+        write_builder = table.new_batch_write_builder()
+
+        w0 = write_builder.new_write().with_write_type(["id", "b"])
+        c0 = write_builder.new_commit()
+        d0 = pa.Table.from_pydict(
+            {"id": [1, 2, 3], "b": [10, 20, 30]},
+            schema=pa.schema([("id", pa.int64()), ("b", pa.int32())]),
+        )
+        w0.write_arrow(d0)
+        c0.commit(w0.prepare_commit())
+        w0.close()
+        c0.close()
+
+        w1 = write_builder.new_write().with_write_type(["c"])
+        c1 = write_builder.new_commit()
+        d1 = pa.Table.from_pydict(
+            {"c": [100, None, 200]},
+            schema=pa.schema([pa.field("c", pa.int32(), nullable=True)]),
+        )
+        w1.write_arrow(d1)
+        cmts1 = w1.prepare_commit()
+        for cmt in cmts1:
+            for nf in cmt.new_files:
+                nf.first_row_id = 0
+        c1.commit(cmts1)
+        w1.close()
+        c1.close()
+
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+
+        full_df = rb.new_read().to_pandas(splits)
+        self.assertEqual(len(full_df), 3, "Full scan must return 3 rows")
+        full_sorted = full_df.sort_values("id").reset_index(drop=True)
+        self.assertEqual(full_sorted["id"].tolist(), [1, 2, 3])
+        self.assertEqual(full_sorted["b"].tolist(), [10, 20, 30])
+        self.assertEqual(full_sorted["c"].iloc[0], 100)
+        self.assertTrue(pd.isna(full_sorted["c"].iloc[1]), "Row id=2 must have NULL c")
+        self.assertEqual(full_sorted["c"].iloc[2], 200)
+
+        predicate_gt = rb.new_predicate_builder().greater_than("c", 150)
+        rb_gt = table.new_read_builder().with_filter(predicate_gt)
+        result_gt = rb_gt.new_read().to_pandas(rb_gt.new_scan().plan().splits())
+        self.assertEqual(len(result_gt), 1, "Filter c > 150 should return 1 row (c=200)")
+        self.assertEqual(result_gt["id"].iloc[0], 3, "Row with c=200 must have id=3")
+        self.assertEqual(result_gt["b"].iloc[0], 30, "Row with c=200 must have b=30")
+        self.assertEqual(result_gt["c"].iloc[0], 200, "Filtered row must have c=200")
+
+        predicate_lt = rb.new_predicate_builder().less_than("c", 150)
+        rb_lt = table.new_read_builder().with_filter(predicate_lt)
+        result_lt = rb_lt.new_read().to_pandas(rb_lt.new_scan().plan().splits())
+        self.assertEqual(len(result_lt), 1, "Filter c < 150 should return 1 row (c=100)")
+        self.assertEqual(result_lt["id"].iloc[0], 1, "Row with c=100 must have id=1")
+        self.assertEqual(result_lt["c"].iloc[0], 100, "Filtered row must have c=100")
+
+        predicate_id = rb.new_predicate_builder().equal("id", 2)
+        rb_id = table.new_read_builder().with_filter(predicate_id)
+        result_id = rb_id.new_read().to_pandas(rb_id.new_scan().plan().splits())
+        self.assertEqual(len(result_id), 1, "Filter id == 2 should return 1 row")
+        self.assertEqual(result_id["id"].iloc[0], 2, "Filtered row must have id=2")
+        self.assertTrue(pd.isna(result_id["c"].iloc[0]), "Row id=2 must have c=NULL")
+
+        pb = rb.new_predicate_builder()
+        predicate_and = pb.and_predicates([
+            pb.greater_than("c", 50),
+            pb.less_than("c", 150),
+        ])
+        rb_and = table.new_read_builder().with_filter(predicate_and)
+        result_and = rb_and.new_read().to_pandas(rb_and.new_scan().plan().splits())
+        self.assertEqual(
+            len(result_and), 1,
+            "Filter c>50 AND c<150 should return 1 row (c=100)",
+        )
+        self.assertEqual(result_and["id"].iloc[0], 1, "Row with c=100 must have id=1")
+        self.assertEqual(result_and["c"].iloc[0], 100, "Filtered row must have c=100")
+
+        predicate_is_null = rb.new_predicate_builder().is_null("c")
+        rb_null = table.new_read_builder().with_filter(predicate_is_null)
+        result_null = rb_null.new_read().to_pandas(rb_null.new_scan().plan().splits())
+        self.assertEqual(len(result_null), 1, "Filter c IS NULL should return 1 row (id=2)")
+        self.assertEqual(result_null["id"].iloc[0], 2, "NULL row must have id=2")
+        self.assertTrue(pd.isna(result_null["c"].iloc[0]), "Filtered row c must be NULL")
+
+        predicate_not_null = rb.new_predicate_builder().is_not_null("c")
+        rb_not_null = table.new_read_builder().with_filter(predicate_not_null)
+        result_not_null = rb_not_null.new_read().to_pandas(
+            rb_not_null.new_scan().plan().splits())
+        self.assertEqual(
+            len(result_not_null), 2,
+            "Filter c IS NOT NULL should return 2 rows (id=1, id=3)",
+        )
+        result_not_null_sorted = result_not_null.sort_values("id").reset_index(drop=True)
+        self.assertEqual(result_not_null_sorted["id"].tolist(), [1, 3])
+        self.assertEqual(result_not_null_sorted["c"].tolist(), [100, 200])
+
+        predicate_or = pb.or_predicates([
+            pb.greater_than("c", 150),
+            pb.less_than("c", 100),
+        ])
+        rb_or = table.new_read_builder().with_filter(predicate_or)
+        result_or = rb_or.new_read().to_pandas(rb_or.new_scan().plan().splits())
+        self.assertEqual(
+            len(result_or), 1,
+            "Filter c>150 OR c<100 should return 1 row (id=3, c=200)",
+        )
+        self.assertEqual(result_or["id"].iloc[0], 3, "Row with c=200 must have id=3")
+        self.assertEqual(result_or["c"].iloc[0], 200, "Filtered row must have c=200")
 
     def test_null_values(self):
         simple_pa_schema = pa.schema([

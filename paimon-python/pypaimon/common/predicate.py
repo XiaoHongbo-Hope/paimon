@@ -57,8 +57,7 @@ class Predicate:
         if self.method == 'and':
             return all(p.test(record) for p in self.literals)
         if self.method == 'or':
-            t = any(p.test(record) for p in self.literals)
-            return t
+            return any(p.test(record) for p in self.literals)
 
         field_value = record.get_field(self.index)
         tester = Predicate.testers.get(self.method)
