@@ -194,6 +194,14 @@ class DataEvolutionTest(unittest.TestCase):
             [2, 1001, 2001],
             "with_slice(1, 4) should return id in (2, 1001, 2001). Got ids=%s" % ids,
         )
+        scan_oob = rb.new_scan().with_slice(10, 12)
+        splits_oob = scan_oob.plan().splits()
+        result_oob = rb.new_read().to_pandas(splits_oob)
+        self.assertEqual(
+            len(result_oob),
+            0,
+            "with_slice(10, 12) on 6 rows should return 0 rows (out of bounds), got %d" % len(result_oob),
+        )
 
     def test_multiple_appends(self):
         simple_pa_schema = pa.schema([
