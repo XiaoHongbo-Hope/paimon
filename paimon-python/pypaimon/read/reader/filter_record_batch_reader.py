@@ -19,6 +19,8 @@
 from typing import List, Optional
 
 import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.dataset as ds
 
 from pypaimon.common.predicate import Predicate
 from pypaimon.read.reader.iface.record_batch_reader import RecordBatchReader
@@ -26,6 +28,12 @@ from pypaimon.table.row.offset_row import OffsetRow
 
 
 class FilterRecordBatchReader(RecordBatchReader):
+    """
+    Wraps a RecordBatchReader and filters each batch by predicate.
+    Used for data evolution read where predicate cannot be pushed down to
+    individual file readers.
+    """
+
     def __init__(
         self,
         reader: RecordBatchReader,
@@ -43,38 +51,83 @@ class FilterRecordBatchReader(RecordBatchReader):
                 return None
             if batch.num_rows == 0:
                 return batch
-            nrows = batch.num_rows
-            if self.field_names is not None:
-                col_indices = []
-                batch_schema_names = set(batch.schema.names)
-                for name in self.field_names:
-                    if name in batch_schema_names:
-                        col_indices.append(batch.schema.get_field_index(name))
-                    else:
-                        col_indices.append(None)
-                ncols = len(self.field_names)
-            else:
-                col_indices = list(range(batch.num_columns))
-                ncols = batch.num_columns
-            mask = []
-            row_tuple = [None] * ncols
-            offset_row = OffsetRow(row_tuple, 0, ncols)
-            for i in range(nrows):
-                for j in range(ncols):
-                    if col_indices[j] is not None:
-                        row_tuple[j] = batch.column(col_indices[j])[i].as_py()
-                    else:
-                        row_tuple[j] = None
-                offset_row.replace(tuple(row_tuple))
-                try:
-                    mask.append(self.predicate.test(offset_row))
-                except Exception:
-                    mask.append(False)
-            if any(mask):
-                filtered = batch.filter(pa.array(mask))
-                if filtered.num_rows > 0:
-                    return filtered
+            filtered = self._filter_batch(batch)
+            if filtered is not None and filtered.num_rows > 0:
+                return filtered
             continue
+
+    @staticmethod
+    def _predicate_has_null_check(predicate: Predicate) -> bool:
+        if predicate.method in ('isNull', 'isNotNull'):
+            return True
+        if predicate.method in ('and', 'or') and predicate.literals:
+            return any(
+                FilterRecordBatchReader._predicate_has_null_check(p)
+                for p in predicate.literals
+            )
+        return False
+
+    def _filter_batch_simple_null(self, batch: pa.RecordBatch) -> Optional[pa.RecordBatch]:
+        if self.predicate.method not in ('isNull', 'isNotNull') or not self.predicate.field:
+            return None
+        if self.predicate.field not in batch.schema.names:
+            return None
+        col = batch.column(batch.schema.get_field_index(self.predicate.field))
+        if self.predicate.method == 'isNull':
+            mask = pc.is_null(col)
+        else:
+            mask = pc.is_valid(col)
+        result = batch.filter(mask)
+        return result if result.num_rows > 0 else None
+
+    def _filter_batch(self, batch: pa.RecordBatch) -> Optional[pa.RecordBatch]:
+        simple_null = self._filter_batch_simple_null(batch)
+        if simple_null is not None:
+            return simple_null
+        use_vectorized = not self._predicate_has_null_check(self.predicate)
+        if use_vectorized:
+            try:
+                expr = self.predicate.to_arrow()
+                table = pa.Table.from_batches([batch])
+                dataset = ds.InMemoryDataset(table)
+                result = dataset.scanner(filter=expr).to_table()
+                if result.num_rows == 0:
+                    return None
+                return pa.RecordBatch.from_arrays(
+                    [result.column(i) for i in range(result.num_columns)],
+                    schema=result.schema)
+            except Exception:
+                pass
+        nrows = batch.num_rows
+        if self.field_names is not None:
+            col_indices = []
+            batch_schema_names = set(batch.schema.names)
+            for name in self.field_names:
+                if name in batch_schema_names:
+                    col_indices.append(batch.schema.get_field_index(name))
+                else:
+                    col_indices.append(None)
+            ncols = len(self.field_names)
+        else:
+            col_indices = list(range(batch.num_columns))
+            ncols = batch.num_columns
+        mask = []
+        row_tuple = [None] * ncols
+        offset_row = OffsetRow(row_tuple, 0, ncols)
+        for i in range(nrows):
+            for j in range(ncols):
+                if col_indices[j] is not None:
+                    row_tuple[j] = batch.column(col_indices[j])[i].as_py()
+                else:
+                    row_tuple[j] = None
+            offset_row.replace(tuple(row_tuple))
+            try:
+                mask.append(self.predicate.test(offset_row))
+            except Exception:
+                mask.append(False)
+        if not any(mask):
+            return None
+        return batch.filter(pa.array(mask))
 
     def return_batch_pos(self) -> int:
         pos = getattr(self.reader, 'return_batch_pos', lambda: 0)()
