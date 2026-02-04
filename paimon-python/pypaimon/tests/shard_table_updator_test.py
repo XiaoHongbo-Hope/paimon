@@ -449,6 +449,71 @@ class ShardTableUpdatorTest(unittest.TestCase):
         for i in range(11):
             self.assertIsNone(d_col_1[i].as_py(), "Shard 1 row %d: d should be null" % i)
 
+        full_splits = rb.new_scan().plan().splits()
+        full_result = tr.to_arrow(full_splits)
+        self.assertEqual(
+            result_0.num_rows + result_1.num_rows,
+            full_result.num_rows,
+            "Shard 0 + Shard 1 row count should equal full scan (21)",
+        )
+
+        rb_filter = table.new_read_builder()
+        rb_filter.with_projection(['a', 'b', 'c', 'd', '_ROW_ID'])
+        pb = rb_filter.new_predicate_builder()
+        pred_row_id = pb.is_in('_ROW_ID', [0, 1, 2, 3, 4])
+        rb_filter.with_filter(pred_row_id)
+        tr_filter = rb_filter.new_read()
+        splits_row_id = rb_filter.new_scan().plan().splits()
+        result_row_id = tr_filter.to_arrow(splits_row_id)
+        self.assertEqual(result_row_id.num_rows, 5, "Filter _ROW_ID in [0..4] should return 5 rows")
+        a_col = result_row_id.column('a')
+        d_col_r = result_row_id.column('d')
+        for i in range(5):
+            self.assertEqual(a_col[i].as_py(), i + 1)
+            self.assertEqual(
+                d_col_r[i].as_py(),
+                (i + 1) * 100 + (i + 1) * 10 - (i + 1),
+                "Filter-by-_row_id row %d: d should be c+b-a" % i,
+            )
+
+        rb_slice = table.new_read_builder()
+        tr_slice = rb_slice.new_read()
+        slice_0 = rb_slice.new_scan().with_slice(0, 10).plan().splits()
+        result_slice_0 = tr_slice.to_arrow(slice_0)
+        self.assertEqual(result_slice_0.num_rows, 10, "with_slice(0, 10) should return 10 rows")
+        d_s0 = result_slice_0.column('d')
+        for i in range(10):
+            self.assertEqual(
+                d_s0[i].as_py(),
+                (i + 1) * 100 + (i + 1) * 10 - (i + 1),
+                "Slice [0,10) row %d: d should be c+b-a" % i,
+            )
+        slice_1 = rb_slice.new_scan().with_slice(10, 21).plan().splits()
+        result_slice_1 = tr_slice.to_arrow(slice_1)
+        self.assertEqual(result_slice_1.num_rows, 11, "with_slice(10, 21) should return 11 rows")
+        d_s1 = result_slice_1.column('d')
+        for i in range(11):
+            self.assertIsNone(d_s1[i].as_py(), "Slice [10,21) row %d: d should be null" % i)
+
+        cross_slice = rb_slice.new_scan().with_slice(5, 16).plan().splits()
+        result_cross = tr_slice.to_arrow(cross_slice)
+        self.assertEqual(
+            result_cross.num_rows, 11,
+            "Cross-shard with_slice(5, 16) should return 11 rows (5 from file1 + 6 from file2)",
+        )
+        a_cross = result_cross.column('a')
+        d_cross = result_cross.column('d')
+        for i in range(5):
+            self.assertEqual(a_cross[i].as_py(), 6 + i)
+            self.assertEqual(
+                d_cross[i].as_py(),
+                (6 + i) * 100 + (6 + i) * 10 - (6 + i),
+                "Cross-shard slice row %d (from file1): d should be c+b-a" % i,
+            )
+        for i in range(5, 11):
+            self.assertEqual(a_cross[i].as_py(), 10 + (i - 5))
+            self.assertIsNone(d_cross[i].as_py(), "Cross-shard slice row %d (from file2): d null" % i)
+
 
 if __name__ == '__main__':
     unittest.main()
