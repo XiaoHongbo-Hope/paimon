@@ -40,6 +40,7 @@ from pypaimon.read.reader.empty_record_reader import EmptyFileRecordReader
 from pypaimon.read.reader.field_bunch import BlobBunch, DataBunch, FieldBunch
 from pypaimon.read.reader.filter_record_reader import FilterRecordReader
 from pypaimon.read.reader.format_avro_reader import FormatAvroReader
+from pypaimon.read.reader.filter_record_batch_reader import FilterRecordBatchReader
 from pypaimon.read.reader.row_range_filter_record_reader import RowIdFilterRecordBatchReader
 from pypaimon.read.reader.format_blob_reader import FormatBlobReader
 from pypaimon.read.reader.format_lance_reader import FormatLanceReader
@@ -449,6 +450,10 @@ class DataEvolutionSplitRead(SplitRead):
             actual_split = split.data_split()
         super().__init__(table, predicate, read_type, actual_split, row_tracking_enabled)
 
+    def _push_down_predicate(self) -> Optional[Predicate]:
+        # Do not push predicate to file readers;
+        return None
+
     def create_reader(self) -> RecordReader:
         files = self.split.files
         suppliers = []
@@ -467,7 +472,17 @@ class DataEvolutionSplitRead(SplitRead):
                     lambda files=need_merge_files: self._create_union_reader(files)
                 )
 
-        return ConcatBatchReader(suppliers)
+        merge_reader = ConcatBatchReader(suppliers)
+        if self.predicate is not None:
+            field_names = [f.name for f in self.read_fields]
+            schema_fields = self.table.fields
+            return FilterRecordBatchReader(
+                merge_reader,
+                self.predicate,
+                field_names=field_names,
+                schema_fields=schema_fields,
+            )
+        return merge_reader
 
     def _split_by_row_id(self, files: List[DataFileMeta]) -> List[List[DataFileMeta]]:
         """Split files by firstRowId for data evolution."""

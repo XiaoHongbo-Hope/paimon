@@ -33,27 +33,47 @@ from pypaimon.table.row.offset_row import OffsetRow
 class TableRead:
     """Implementation of TableRead for native Python reading."""
 
-    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField]):
+    def __init__(
+        self,
+        table,
+        predicate: Optional[Predicate],
+        read_type: List[DataField],
+        output_type: Optional[List[DataField]] = None,
+    ):
         from pypaimon.table.file_store_table import FileStoreTable
 
         self.table: FileStoreTable = table
         self.predicate = predicate
         self.read_type = read_type
+        self.output_type = output_type if output_type is not None else read_type
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
+        output_arity = len(self.output_type)
+
         def _record_generator():
             for split in splits:
                 reader = self._create_split_read(split).create_reader()
                 try:
                     for batch in iter(reader.read_batch, None):
-                        yield from iter(batch.next, None)
+                        for row in iter(batch.next, None):
+                            if (
+                                output_arity < len(self.read_type)
+                                and isinstance(row, OffsetRow)
+                            ):
+                                projected = OffsetRow(
+                                    row.row_tuple, row.offset, output_arity
+                                )
+                                projected.set_row_kind_byte(row.row_kind_byte)
+                                yield projected
+                            else:
+                                yield row
                 finally:
                     reader.close()
 
         return _record_generator()
 
     def to_arrow_batch_reader(self, splits: List[Split]) -> pyarrow.ipc.RecordBatchReader:
-        schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
+        schema = PyarrowFieldParser.from_paimon_schema(self.output_type)
         batch_iterator = self._arrow_batch_generator(splits, schema)
         return pyarrow.ipc.RecordBatchReader.from_batches(schema, batch_iterator)
 
@@ -65,8 +85,9 @@ class TableRead:
         columns = []
         num_rows = batch.num_rows
 
+        batch_column_names = batch.schema.names
         for field in target_schema:
-            if field.name in batch.column_names:
+            if field.name in batch_column_names:
                 col = batch.column(field.name)
             else:
                 col = pyarrow.nulls(num_rows, type=field.type)
@@ -77,7 +98,7 @@ class TableRead:
     def to_arrow(self, splits: List[Split]) -> Optional[pyarrow.Table]:
         batch_reader = self.to_arrow_batch_reader(splits)
 
-        schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
+        schema = PyarrowFieldParser.from_paimon_schema(self.output_type)
         table_list = []
         for batch in iter(batch_reader.read_next_batch, None):
             if batch.num_rows == 0:
@@ -96,7 +117,8 @@ class TableRead:
             reader = self._create_split_read(split).create_reader()
             try:
                 if isinstance(reader, RecordBatchReader):
-                    yield from iter(reader.read_arrow_batch, None)
+                    for batch in iter(reader.read_arrow_batch, None):
+                        yield self._try_to_pad_batch_by_schema(batch, schema)
                 else:
                     row_tuple_chunk = []
                     for row_iterator in iter(reader.read_batch, None):
@@ -155,7 +177,7 @@ class TableRead:
         import ray
 
         if not splits:
-            schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
+            schema = PyarrowFieldParser.from_paimon_schema(self.output_type)
             empty_table = pyarrow.Table.from_arrays(
                 [pyarrow.array([], type=field.type) for field in schema],
                 schema=schema
@@ -198,7 +220,7 @@ class TableRead:
         elif self.table.options.data_evolution_enabled():
             return DataEvolutionSplitRead(
                 table=self.table,
-                predicate=None,  # Never push predicate to split read
+                predicate=self.predicate,
                 read_type=self.read_type,
                 split=split,
                 row_tracking_enabled=True

@@ -20,6 +20,7 @@ from typing import List, Optional
 
 from pypaimon.common.predicate import Predicate
 from pypaimon.common.predicate_builder import PredicateBuilder
+from pypaimon.read.push_down_utils import _get_all_fields
 from pypaimon.globalindex import VectorSearch
 from pypaimon.read.table_read import TableRead
 from pypaimon.read.table_scan import TableScan
@@ -67,7 +68,8 @@ class ReadBuilder:
         return TableRead(
             table=self.table,
             predicate=self._predicate,
-            read_type=self.read_type()
+            read_type=self.read_type(),
+            output_type=self.output_type(),
         )
 
     def new_predicate_builder(self) -> PredicateBuilder:
@@ -81,5 +83,31 @@ class ReadBuilder:
         else:
             if self.table.options.row_tracking_enabled():
                 table_fields = SpecialFields.row_type_with_row_tracking(table_fields)
-            field_map = {field.name: field for field in table_fields}
-            return [field_map[name] for name in self._projection if name in field_map]
+
+            # Projection columns first (preserve requested order)
+            field_map = {f.name: f for f in table_fields}
+            result: List[DataField] = [
+                field_map[name] for name in self._projection if name in field_map
+            ]
+            result_names = set(self._projection)
+
+            # Add predicate columns so filter can evaluate (fix: filter on
+            # non-projected column silently filters all rows)
+            if self._predicate is not None:
+                for field in table_fields:
+                    if field.name not in result_names and field.name in _get_all_fields(
+                        self._predicate
+                    ):
+                        result.append(field)
+                        result_names.add(field.name)
+
+            return result
+
+    def output_type(self) -> List[DataField]:
+        if not self._projection:
+            return self.read_type()
+        table_fields = self.table.fields
+        if self.table.options.row_tracking_enabled():
+            table_fields = SpecialFields.row_type_with_row_tracking(table_fields)
+        field_map = {f.name: f for f in table_fields}
+        return [field_map[name] for name in self._projection if name in field_map]

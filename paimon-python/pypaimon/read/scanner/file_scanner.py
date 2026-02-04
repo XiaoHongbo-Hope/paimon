@@ -205,6 +205,14 @@ class FileScanner:
 
         entries = self.read_manifest_entries(manifest_files)
 
+        if self.predicate:
+            from pypaimon.read.scanner.data_evolution_manifest_filter import (
+                post_filter_manifest_entries,
+            )
+            entries = post_filter_manifest_entries(
+                entries, self.predicate, self.table
+            )
+
         return entries, DataEvolutionSplitGenerator(
             self.table,
             self.target_split_size,
@@ -352,6 +360,8 @@ class FileScanner:
             )
         else:
             if not self.predicate:
+                return True
+            if self.data_evolution:
                 return True
             if entry.file.value_stats_cols is None and entry.file.write_cols is not None:
                 stats_fields = entry.file.write_cols
