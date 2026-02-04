@@ -542,8 +542,7 @@ class DataEvolutionTest(unittest.TestCase):
 
         predicate_is_null = rb.new_predicate_builder().is_null("c")
         rb_null = table.new_read_builder().with_filter(predicate_is_null)
-        # Use same splits so predicate-based planning does not exclude evolved file
-        result_null = rb_null.new_read().to_pandas(splits)
+        result_null = rb_null.new_read().to_pandas(rb_null.new_scan().plan().splits())
         self.assertEqual(len(result_null), 1, "Filter c IS NULL should return 1 row (id=2)")
         self.assertEqual(result_null["id"].iloc[0], 2, "NULL row must have id=2")
         self.assertTrue(pd.isna(result_null["c"].iloc[0]), "Filtered row c must be NULL")

@@ -343,6 +343,8 @@ class FileScanner:
         else:
             if not self.predicate:
                 return True
+            if self.data_evolution:
+                return True
             if entry.file.value_stats_cols is None and entry.file.write_cols is not None:
                 stats_fields = entry.file.write_cols
             else:

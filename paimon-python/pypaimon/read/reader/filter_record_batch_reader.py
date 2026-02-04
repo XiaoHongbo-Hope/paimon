@@ -60,6 +60,9 @@ class FilterRecordBatchReader(RecordBatchReader):
     def _predicate_has_null_check(predicate: Predicate) -> bool:
         if predicate.method in ('isNull', 'isNotNull'):
             return True
+        if predicate.method not in ('and', 'or') and predicate.literals:
+            if any(l is None for l in predicate.literals):
+                return True
         if predicate.method in ('and', 'or') and predicate.literals:
             return any(
                 FilterRecordBatchReader._predicate_has_null_check(p)
@@ -93,6 +96,9 @@ class FilterRecordBatchReader(RecordBatchReader):
                 result = dataset.scanner(filter=expr).to_table()
                 if result.num_rows == 0:
                     return None
+                batches = result.to_batches()
+                if len(batches) == 1:
+                    return batches[0]
                 return pa.RecordBatch.from_arrays(
                     [result.column(i) for i in range(result.num_columns)],
                     schema=result.schema)
