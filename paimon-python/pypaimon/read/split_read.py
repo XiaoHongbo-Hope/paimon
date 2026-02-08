@@ -188,7 +188,9 @@ class SplitRead(ABC):
                     requested_fields.append(field_map[field_name])
             fields = requested_fields if requested_fields else table_schema_fields
         else:
-            fields = table_schema_fields
+            field_map = {field.name: field for field in table_schema_fields}
+            requested_fields = [field_map[f.name] for f in self.read_fields if f.name in field_map]
+            fields = requested_fields if requested_fields else table_schema_fields
 
         system_fields = SpecialFields.find_system_fields(fields)
 

@@ -530,6 +530,55 @@ class ShardTableUpdatorTest(unittest.TestCase):
         self.assertEqual(a_d[1].as_py(), 2)
         self.assertEqual(d_d[1].as_py(), 218)
 
+    def test_read_projection(self):
+        table_schema = pa.schema([
+            ('a', pa.int32()),
+            ('b', pa.int32()),
+            ('c', pa.int32()),
+        ])
+        schema = Schema.from_pyarrow_schema(
+            table_schema,
+            options={'row-tracking.enabled': 'true', 'data-evolution.enabled': 'true'}
+        )
+        name = self._create_unique_table_name('read_proj')
+        self.catalog.create_table(name, schema, False)
+        table = self.catalog.get_table(name)
+
+        write_builder = table.new_batch_write_builder()
+        table_write = write_builder.new_write().with_write_type(['a', 'b', 'c'])
+        table_commit = write_builder.new_commit()
+        init_data = pa.Table.from_pydict(
+            {'a': [1, 2, 3], 'b': [10, 20, 30], 'c': [100, 200, 300]},
+            schema=pa.schema([('a', pa.int32()), ('b', pa.int32()), ('c', pa.int32())])
+        )
+        table_write.write_arrow(init_data)
+        cmts = table_write.prepare_commit()
+        for cmt in cmts:
+            for nf in cmt.new_files:
+                nf.first_row_id = 0
+        table_commit.commit(cmts)
+        table_write.close()
+        table_commit.close()
+
+        table_update = write_builder.new_update()
+        table_update.with_read_projection(['a', 'b', 'c'])
+        table_update.with_update_type(['a'])
+        shard_updator = table_update.new_shard_updator(0, 1)
+        reader = shard_updator.arrow_reader()
+
+        batch = reader.read_next_batch()
+        self.assertIsNotNone(batch, "Should have at least one batch")
+        actual_columns = set(batch.schema.names)
+
+        expected_columns = {'a', 'b', 'c'}
+        self.assertEqual(
+            actual_columns,
+            expected_columns,
+            "with_read_projection(['a','b','c']) should return only a,b,c; "
+            "got %s. _ROW_ID and _SEQUENCE_NUMBER should NOT be returned when not in projection."
+            % actual_columns
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
