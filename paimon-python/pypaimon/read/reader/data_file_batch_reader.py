@@ -259,7 +259,7 @@ class DataFileBatchReader(RecordBatchReader):
         arrays = list(record_batch.columns)
         num_cols = len(arrays)
 
-        # Handle _ROW_ID field (non-nullable per schema; do not fill with nulls)
+        # Handle _ROW_ID field
         if SpecialFields.ROW_ID.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.ROW_ID.name]
             if idx < num_cols:
