@@ -80,7 +80,7 @@ class ShardTableUpdatorTest(unittest.TestCase):
 
         # Step 3: Use ShardTableUpdator to compute d = c + b - a
         table_update = write_builder.new_update()
-        table_update.with_read_projection(['a', 'b', 'c'])
+        table_update.with_read_projection(['a', 'b', 'c', '_ROW_ID'])
         table_update.with_update_type(['d'])
         
         shard_updator = table_update.new_shard_updator(0, 1)
@@ -93,7 +93,13 @@ class ShardTableUpdatorTest(unittest.TestCase):
             a_values = batch.column('a').to_pylist()
             b_values = batch.column('b').to_pylist()
             c_values = batch.column('c').to_pylist()
-            
+            row_id_values = batch.column('_ROW_ID').to_pylist()
+            self.assertEqual(
+                row_id_values,
+                list(range(len(a_values))),
+                '_ROW_ID should be [0, 1, 2, ...] for sequential rows',
+            )
+
             d_values = [c + b - a for a, b, c in zip(a_values, b_values, c_values)]
             
             # Create batch with d column
