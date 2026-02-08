@@ -48,7 +48,9 @@ class PredicateFilterRecordBatchReader(RecordBatchReader):
                 offset_row.replace(tuple(row_tuple))
                 try:
                     mask.append(self.predicate.test(offset_row))
-                except Exception:
+                except IndexError:
+                    raise
+                except (TypeError, ValueError):
                     mask.append(False)
             if any(mask):
                 filtered = batch.filter(pa.array(mask))

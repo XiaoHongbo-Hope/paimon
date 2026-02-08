@@ -22,6 +22,12 @@ import unittest
 import pyarrow as pa
 
 from pypaimon import CatalogFactory, Schema
+from pypaimon.common.predicate_builder import PredicateBuilder
+from pypaimon.read.reader.iface.record_batch_reader import RecordBatchReader
+from pypaimon.read.reader.predicate_filter_record_batch_reader import (
+    PredicateFilterRecordBatchReader,
+)
+from pypaimon.schema.data_types import AtomicType, DataField
 
 
 class DataEvolutionTest(unittest.TestCase):
@@ -712,3 +718,35 @@ class DataEvolutionTest(unittest.TestCase):
         rebuilt = pa.RecordBatch.from_arrays(arrays, names=batch.schema.names)
         self.assertTrue(rebuilt.schema.field('_ROW_ID').nullable)
         self.assertTrue(rebuilt.schema.field('_SEQUENCE_NUMBER').nullable)
+
+    def test_with_filter(self):
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array([1, 2, 3]), pa.array(['a', 'b', 'c'])],
+            names=['f0', 'f1'],
+        )
+        fields = [
+            DataField(0, 'f0', AtomicType('BIGINT')),
+            DataField(1, 'f1', AtomicType('STRING')),
+            DataField(2, 'f2', AtomicType('INT')),
+        ]
+        pb = PredicateBuilder(fields)
+        predicate = pb.greater_than('f2', 5)
+
+        class _SingleBatchReader(RecordBatchReader):
+            def __init__(self, b):
+                self._batch, self._returned = b, False
+
+            def read_arrow_batch(self):
+                if self._returned:
+                    return None
+                self._returned = True
+                return self._batch
+
+            def close(self):
+                pass
+
+        filtered_reader = PredicateFilterRecordBatchReader(
+            _SingleBatchReader(batch), predicate
+        )
+        with self.assertRaises(IndexError):
+            filtered_reader.read_arrow_batch()

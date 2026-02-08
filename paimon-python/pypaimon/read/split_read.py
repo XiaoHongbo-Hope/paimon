@@ -55,7 +55,7 @@ from pypaimon.read.reader.shard_batch_reader import ShardBatchReader
 from pypaimon.read.reader.sort_merge_reader import SortMergeReaderWithMinHeap
 from pypaimon.read.split import Split
 from pypaimon.read.sliced_split import SlicedSplit
-from pypaimon.schema.data_types import DataField, PyarrowFieldParser
+from pypaimon.schema.data_types import AtomicType, DataField, PyarrowFieldParser
 from pypaimon.table.special_fields import SpecialFields
 from pypaimon.globalindex.indexed_split import IndexedSplit
 
@@ -108,7 +108,8 @@ class SplitRead(ABC):
     def _get_blob_column_names(self) -> Set[str]:
         out = set()
         for field in self.table.table_schema.fields:
-            if 'blob' in str(field.type).lower():
+            t = field.type
+            if isinstance(t, AtomicType) and t.type.upper() == "BLOB":
                 out.add(field.name)
         return out
 
