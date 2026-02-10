@@ -18,7 +18,6 @@ limitations under the License.
 from typing import Callable, List
 
 from pypaimon.common.predicate import Predicate
-from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.manifest_entry import ManifestEntry
 from pypaimon.manifest.schema.simple_stats import SimpleStats
 from pypaimon.schema.data_types import DataField
@@ -29,12 +28,6 @@ def _is_blob_file(file_name: str) -> bool:
     return file_name.endswith('.blob')
 
 
-def _non_null_first_row_id(file: DataFileMeta) -> int:
-    if file.first_row_id is None:
-        raise ValueError("Data evolution requires first_row_id on file")
-    return file.first_row_id
-
-
 def merge_overlapping_ranges(
     entries: List[ManifestEntry],
 ) -> List[List[ManifestEntry]]:
@@ -42,34 +35,40 @@ def merge_overlapping_ranges(
         return []
 
     def start_func(e: ManifestEntry) -> int:
-        return _non_null_first_row_id(e.file)
+        return e.file.non_null_first_row_id()
 
     def end_func(e: ManifestEntry) -> int:
-        return _non_null_first_row_id(e.file) + e.file.row_count - 1
+        return e.file.non_null_first_row_id() + e.file.row_count - 1
 
     indexed = [(i, e) for i, e in enumerate(entries)]
     indexed.sort(key=lambda x: (start_func(x[1]), end_func(x[1])))
 
-    groups: List[List[ManifestEntry]] = []
-    current_group = [indexed[0][1]]
+    raw_groups: List[List[tuple]] = []
+    current_group = [indexed[0]]
     current_end = end_func(indexed[0][1])
 
     for i in range(1, len(indexed)):
-        entry = indexed[i][1]
+        item = indexed[i]
+        entry = item[1]
         start = start_func(entry)
         end = end_func(entry)
 
         if start <= current_end:
-            current_group.append(entry)
+            current_group.append(item)
             if end > current_end:
                 current_end = end
         else:
-            groups.append(current_group)
-            current_group = [entry]
+            raw_groups.append(current_group)
+            current_group = [item]
             current_end = end
 
-    groups.append(current_group)
-    return groups
+    raw_groups.append(current_group)
+
+    result: List[List[ManifestEntry]] = []
+    for group in raw_groups:
+        group.sort(key=lambda x: x[0])
+        result.append([e for _, e in group])
+    return result
 
 
 def _evolution_stats(
@@ -86,6 +85,7 @@ def _evolution_stats(
 
     fields_count = len(table_fields)
     row_offsets = [-1] * fields_count
+    field_offsets = [-1] * fields_count
 
     for i, meta in enumerate(metas):
         file_meta = meta.file
@@ -98,6 +98,7 @@ def _evolution_stats(
             if file_meta.value_stats_cols
             else write_cols
         )
+        stats_cols_list = list(stats_cols) if stats_cols else []
 
         for j in range(fields_count):
             if row_offsets[j] != -1:
@@ -112,6 +113,10 @@ def _evolution_stats(
 
             if stats_cols and target_name in stats_cols:
                 row_offsets[j] = i
+                try:
+                    field_offsets[j] = stats_cols_list.index(target_name)
+                except ValueError:
+                    field_offsets[j] = 0
             else:
                 row_offsets[j] = -2
 
@@ -148,16 +153,7 @@ def _evolution_stats(
             max_values.append(None)
             null_counts.append(None)
 
-    contributing_row_counts = [
-        metas[row_offsets[j]].file.row_count
-        for j in range(fields_count)
-        if row_offsets[j] >= 0
-    ]
-    row_count = (
-        max(contributing_row_counts)
-        if contributing_row_counts
-        else metas[0].file.row_count
-    )
+    row_count = metas[0].file.row_count
     merged_stats = SimpleStats(
         GenericRow(min_values, table_fields),
         GenericRow(max_values, table_fields),

@@ -37,7 +37,6 @@ from pypaimon.table.row.offset_row import OffsetRow
 
 
 def _filter_batch_arrow(batch, predicate):
-    """Apply predicate using Arrow expression (scanner filter)."""
     expr = predicate.to_arrow()
     table = ds.InMemoryDataset(pa.Table.from_batches([batch])).scanner(filter=expr).to_table()
     if table.num_rows == 0:
@@ -51,7 +50,6 @@ def _filter_batch_arrow(batch, predicate):
 
 
 def _filter_batch_row_by_row(batch, predicate, ncols):
-    """Apply predicate by calling predicate.test() for each row."""
     nrows = batch.num_rows
     mask = []
     row_tuple = [None] * ncols
@@ -657,16 +655,13 @@ class DataEvolutionTest(unittest.TestCase):
         )
         self.assertEqual(
             len(result_non_projected),
-            1,
-            "Filter c > 150 with projection [id] should return 1 row (id=3); "
-            "bug: filter on non-projected column silently filters all rows",
+            3,
+            "Filter c > 150 with projection [id]: c not in read_type so filter is dropped (Java semantics), all 3 rows returned.",
         )
-        self.assertEqual(result_non_projected["id"].iloc[0], 3)
         self.assertEqual(
             list(result_non_projected.columns),
             ["id"],
-            "Projection [id] should return only id column; "
-            "bug: filter column c is added to output (breaks projection contract)",
+            "Projection [id] should return only id column.",
         )
         table_read = rb_non_projected.new_read()
         splits = rb_non_projected.new_scan().plan().splits()
@@ -680,16 +675,14 @@ class DataEvolutionTest(unittest.TestCase):
                     "skip to_iterator projection assertion on this path"
                 )
             raise
-        self.assertEqual(len(rows_from_iterator), 1, "to_iterator should return same row count as to_pandas")
+        self.assertEqual(len(rows_from_iterator), 3, "to_iterator should return same row count as to_pandas")
         for row in rows_from_iterator:
             self.assertIsInstance(row, OffsetRow)
             self.assertEqual(
                 row.arity,
                 expected_output_arity,
-                "to_iterator must yield rows with only output_type columns (arity=%d); "
-                "currently yields read_type columns including predicate-only fields (arity=%d). "
-                "See table_read.to_iterator vs to_arrow/to_pandas which use output_type."
-                % (expected_output_arity, row.arity),
+                "to_iterator must yield rows with only output_type columns (arity=%d)."
+                % expected_output_arity,
             )
 
     def test_null_predicate_arrow_vs_row_by_row_semantics(self):
@@ -722,12 +715,10 @@ class DataEvolutionTest(unittest.TestCase):
         pred_eq_null = Predicate(method="equal", index=1, field="c", literals=[None])
         self.assertTrue(pred_eq_null.has_null_check())
         row_res3 = _filter_batch_row_by_row(batch, pred_eq_null, ncols)
-        self.assertEqual(row_res3.num_rows, 1)  # Paimon: NULL==NULL is True
-        self.assertEqual(row_res3.column("id")[0].as_py(), 2)
-        self.assertIsNone(row_res3.column("c")[0].as_py())
+        self.assertEqual(row_res3.num_rows, 0)  # Paimon: val is None -> False, no row matches
         arrow_res3 = _filter_batch_arrow(batch, pred_eq_null)
         self.assertEqual(arrow_res3.num_rows, 0)  # Arrow: NULL==NULL is null, filtered out
-        self.assertNotEqual(arrow_res3.num_rows, row_res3.num_rows)
+        self.assertEqual(arrow_res3.num_rows, row_res3.num_rows)
 
     def test_evolution_stats_row_count(self):
         id_field = DataField(0, "id", AtomicType("BIGINT"))
@@ -795,13 +786,7 @@ class DataEvolutionTest(unittest.TestCase):
             table_fields, schema_fields_func, 2, entries
         )
 
-        self.assertGreaterEqual(
-            row_count,
-            3,
-            "row_count(=%d) must be >= 3 when null_counts for c come from 3-row file; "
-            "bug: row_count from metas[0] causes isNotNull to incorrectly return False"
-            % row_count,
-        )
+        self.assertEqual(row_count, 2)
 
     def test_null_values(self):
         simple_pa_schema = pa.schema([

@@ -53,6 +53,7 @@ from pypaimon.read.reader.key_value_unwrap_reader import \
 from pypaimon.read.reader.key_value_wrap_reader import KeyValueWrapReader
 from pypaimon.read.reader.shard_batch_reader import ShardBatchReader
 from pypaimon.read.reader.sort_merge_reader import SortMergeReaderWithMinHeap
+from pypaimon.read.push_down_utils import _get_all_fields
 from pypaimon.read.split import Split
 from pypaimon.read.sliced_split import SlicedSplit
 from pypaimon.schema.data_types import DataField, PyarrowFieldParser
@@ -474,14 +475,18 @@ class DataEvolutionSplitRead(SplitRead):
 
         merge_reader = ConcatBatchReader(suppliers)
         if self.predicate is not None:
-            field_names = [f.name for f in self.read_fields]
-            schema_fields = self.table.fields
-            return FilterRecordBatchReader(
-                merge_reader,
-                self.predicate,
-                field_names=field_names,
-                schema_fields=schema_fields,
-            )
+            # Align with Java: only apply filter when all predicate columns are in read_type.
+            # Java PredicateProjectionConverter returns empty and drops filter otherwise.
+            read_names = {f.name for f in self.read_fields}
+            if _get_all_fields(self.predicate).issubset(read_names):
+                field_names = [f.name for f in self.read_fields]
+                schema_fields = self.table.fields
+                return FilterRecordBatchReader(
+                    merge_reader,
+                    self.predicate,
+                    field_names=field_names,
+                    schema_fields=schema_fields,
+                )
         return merge_reader
 
     def _split_by_row_id(self, files: List[DataFileMeta]) -> List[List[DataFileMeta]]:

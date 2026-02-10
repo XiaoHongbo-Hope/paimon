@@ -48,7 +48,6 @@ class TableRead:
         self.output_type = output_type if output_type is not None else read_type
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
-        output_arity = len(self.output_type)
 
         def _record_generator():
             for split in splits:
@@ -56,17 +55,7 @@ class TableRead:
                 try:
                     for batch in iter(reader.read_batch, None):
                         for row in iter(batch.next, None):
-                            if (
-                                output_arity < len(self.read_type)
-                                and isinstance(row, OffsetRow)
-                            ):
-                                projected = OffsetRow(
-                                    row.row_tuple, row.offset, output_arity
-                                )
-                                projected.set_row_kind_byte(row.row_kind_byte)
-                                yield projected
-                            else:
-                                yield row
+                            yield row
                 finally:
                     reader.close()
 

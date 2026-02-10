@@ -158,6 +158,13 @@ class DataFileMeta:
             file_path=self.file_path
         )
 
+    def non_null_first_row_id(self) -> int:
+        if self.first_row_id is None:
+            raise ValueError(
+                f"Data evolution requires first_row_id on file: {self.file_name!r}"
+            )
+        return self.first_row_id
+
     def assign_first_row_id(self, first_row_id: int) -> 'DataFileMeta':
         """Create a new DataFileMeta with the assigned first_row_id."""
         return DataFileMeta(
