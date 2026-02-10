@@ -480,7 +480,7 @@ class DataEvolutionSplitRead(SplitRead):
             read_names = {f.name for f in self.read_fields}
             if _get_all_fields(self.predicate).issubset(read_names):
                 field_names = [f.name for f in self.read_fields]
-                schema_fields = self.table.fields
+                schema_fields = self.read_fields
                 return FilterRecordBatchReader(
                     merge_reader,
                     self.predicate,

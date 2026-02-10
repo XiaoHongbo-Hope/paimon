@@ -621,6 +621,8 @@ class DataEvolutionTest(unittest.TestCase):
         self.assertEqual(len(result), 1, "Filter c > 150 with projection [c, id] should return 1 row")
         self.assertEqual(result["id"].iloc[0], 3)
         self.assertEqual(result["c"].iloc[0], 200)
+        for _, row in result.iterrows():
+            self.assertGreater(row["c"], 150, "Each row must satisfy predicate c > 150 (row-by-row path uses predicate.index; if schema_fields != read_type, wrong column is compared).")
 
         predicate2 = rb_full.new_predicate_builder().is_null("c")
         rb2_filtered = table.new_read_builder().with_projection(["id", "c"]).with_filter(predicate2)
@@ -719,6 +721,55 @@ class DataEvolutionTest(unittest.TestCase):
         arrow_res3 = _filter_batch_arrow(batch, pred_eq_null)
         self.assertEqual(arrow_res3.num_rows, 0)  # Arrow: NULL==NULL is null, filtered out
         self.assertEqual(arrow_res3.num_rows, row_res3.num_rows)
+
+    def test_filter_row_by_row_mismatched_schema(self):
+        batch = pa.RecordBatch.from_pydict(
+            {"c": [1, 200, 50], "id": [100, 2, 3]},
+            schema=pa.schema([("c", pa.int64()), ("id", pa.int64())]),
+        )
+        pred = Predicate(method="greaterThan", index=0, field="c", literals=[150])
+
+        ncols = 3
+        nrows = batch.num_rows
+        id_col = batch.column("id")
+        c_col = batch.column("c")
+        row_tuple = [None] * ncols
+        offset_row = OffsetRow(row_tuple, 0, ncols)
+        mask = []
+        for i in range(nrows):
+            row_tuple[0] = id_col[i].as_py()
+            row_tuple[1] = None
+            row_tuple[2] = c_col[i].as_py()
+            offset_row.replace(tuple(row_tuple))
+            try:
+                mask.append(pred.test(offset_row))
+            except (TypeError, ValueError):
+                mask.append(False)
+        rows_passing_wrong_layout = sum(mask)
+        self.assertEqual(
+            rows_passing_wrong_layout,
+            0,
+            "With wrong layout (position 0 = id), predicate c > 150 becomes id > 150 -> 0 rows. "
+            "This reproduces FilterRecordBatchReader bug when schema_fields=table.fields.",
+        )
+        ncols_right = 2
+        row_tuple_right = [None] * ncols_right
+        offset_row_right = OffsetRow(row_tuple_right, 0, ncols_right)
+        mask_right = []
+        for i in range(nrows):
+            row_tuple_right[0] = c_col[i].as_py()
+            row_tuple_right[1] = id_col[i].as_py()
+            offset_row_right.replace(tuple(row_tuple_right))
+            try:
+                mask_right.append(pred.test(offset_row_right))
+            except (TypeError, ValueError):
+                mask_right.append(False)
+        rows_passing_right_layout = sum(mask_right)
+        self.assertEqual(
+            rows_passing_right_layout,
+            1,
+            "With correct layout (position 0 = c), predicate c > 150 -> 1 row (c=200).",
+        )
 
     def test_evolution_stats_row_count(self):
         id_field = DataField(0, "id", AtomicType("BIGINT"))
