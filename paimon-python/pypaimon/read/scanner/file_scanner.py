@@ -435,12 +435,7 @@ class FileScanner:
         else:
             if not self.predicate:
                 return True
-            from pypaimon.globalindex.data_evolution_batch_scan import DataEvolutionBatchScan
-            predicate_for_stats = DataEvolutionBatchScan.remove_row_id_filter(self.predicate)
-            if predicate_for_stats is None:
-                return True
-            # Data evolution: file stats may be from another schema, skip stats filter and filter in reader.
-            if self.data_evolution:
+            if self.predicate_for_stats is None:
                 return True
             # Data evolution: file stats may be from another schema, skip stats filter and filter in reader.
             if self.data_evolution:
@@ -454,7 +449,7 @@ class FileScanner:
                 entry.file.row_count,
                 stats_fields
             )
-            return predicate_for_stats.test_by_simple_stats(
+            return self.predicate_for_stats.test_by_simple_stats(
                 evolved_stats,
                 entry.file.row_count
             )
