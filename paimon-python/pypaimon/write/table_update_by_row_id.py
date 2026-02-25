@@ -50,7 +50,8 @@ class TableUpdateByRowId:
         (self.first_row_ids,
          self.first_row_id_to_partition_map,
          self.first_row_id_to_row_count_map,
-         self.total_row_count) = self._load_existing_files_info()
+         self.total_row_count,
+         self.splits) = self._load_existing_files_info()
 
         # Collect commit messages
         self.commit_messages = []
@@ -78,7 +79,8 @@ class TableUpdateByRowId:
         return (sorted(list(set(first_row_ids))),
                 first_row_id_to_partition_map,
                 first_row_id_to_row_count_map,
-                total_row_count)
+                total_row_count,
+                splits)
 
     def update_columns(self, data: pa.Table, column_names: List[str]) -> List:
         """
@@ -198,18 +200,11 @@ class TableUpdateByRowId:
         if not read_fields:
             return None
 
-        # Use the table's read builder to get the latest data
-        # This properly handles Data Evolution mode where multiple files may contain
-        # different columns for the same first_row_id
-        read_builder = self.table.new_read_builder()
-        scan = read_builder.new_scan()
-        all_splits = scan.plan().splits()
-
         # Find the split that contains files with this first_row_id
         target_split = None
         target_files = []
         target_deletion_files = []
-        for split in all_splits:
+        for split in self.splits:
             for file_idx, file in enumerate(split.files):
                 if file.first_row_id == first_row_id:
                     target_files.append(file)
@@ -258,13 +253,17 @@ class TableUpdateByRowId:
         expected_row_count = self.first_row_id_to_row_count_map.get(first_row_id, 0)
 
         # Get the _ROW_ID values from update_data to determine which rows are being updated
-        update_row_ids = update_data[SpecialFields.ROW_ID.name].to_pylist()
-
-        # Calculate relative row indices within this file (row_id - first_row_id)
-        update_relative_indices = [row_id - first_row_id for row_id in update_row_ids]
+        relative_indices = pc.subtract(
+            update_data[SpecialFields.ROW_ID.name],
+            pa.scalar(first_row_id, type=pa.int64())
+        ).cast(pa.int64())
 
         # Determine which columns exist in original_data
         original_columns = set(original_data.column_names) if original_data is not None else set()
+
+        # Build a boolean mask: True at positions that need to be updated
+        all_indices = pa.array(range(expected_row_count), type=pa.int64())
+        mask = pc.is_in(all_indices, relative_indices)
 
         # Build the merged table column by column
         merged_columns = {}
@@ -272,34 +271,11 @@ class TableUpdateByRowId:
             update_col = update_data[col_name]
 
             if col_name in original_columns:
-                # Column exists in original file, merge with original values
-                original_col = original_data[col_name]
-                merged_values = original_col.to_pylist()
-
-                # Apply updates at the correct positions
-                for i, relative_idx in enumerate(update_relative_indices):
-                    merged_values[relative_idx] = update_col[i].as_py()
-
-                merged_columns[col_name] = pa.array(merged_values, type=original_col.type)
-            else:
-                # Column doesn't exist in original file, create new column with nulls for non-updated rows
-                # Get the field type from table schema
-                field_type = None
-                for field in self.table.fields:
-                    if field.name == col_name:
-                        from pypaimon.schema.data_types import PyarrowFieldParser
-                        pa_field = PyarrowFieldParser.from_paimon_field(field)
-                        field_type = pa_field.type
-                        break
-
-                # Initialize with nulls
-                merged_values = [None] * expected_row_count
-
-                # Apply updates at the correct positions
-                for i, relative_idx in enumerate(update_relative_indices):
-                    merged_values[relative_idx] = update_col[i].as_py()
-
-                merged_columns[col_name] = pa.array(merged_values, type=field_type)
+                original_col = original_data[col_name].combine_chunks()
+                # replace_with_mask fills mask=True positions with update values in order
+                merged_columns[col_name] = pc.replace_with_mask(
+                    original_col, mask, update_col.combine_chunks().cast(original_col.type)
+                )
 
         # Create the merged table
         merged_table = pa.table(merged_columns)
