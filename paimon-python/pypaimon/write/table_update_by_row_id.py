@@ -254,9 +254,6 @@ class TableUpdateByRowId:
             pa.scalar(first_row_id, type=pa.int64())
         ).cast(pa.int64())
 
-        # Determine which columns exist in original_data
-        original_columns = set(original_data.column_names) if original_data is not None else set()
-
         # Build a boolean mask: True at positions that need to be updated
         all_indices = pa.array(range(original_data.num_rows), type=pa.int64())
         mask = pc.is_in(all_indices, relative_indices)
