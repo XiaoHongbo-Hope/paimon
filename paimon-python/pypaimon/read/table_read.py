@@ -65,12 +65,11 @@ class TableRead:
         if batch.schema.names == target_schema.names and len(batch.schema.names) == len(target_schema.names):
             return batch
 
-        num_rows = batch.num_rows
         columns = []
+        num_rows = batch.num_rows
 
-        batch_column_names = batch.schema.names  # py36: use schema.names (no RecordBatch.column_names)
         for field in target_schema:
-            if field.name in batch_column_names:
+            if field.name in batch.schema.names:
                 col = batch.column(field.name)
                 if col.type != field.type:
                     try:
