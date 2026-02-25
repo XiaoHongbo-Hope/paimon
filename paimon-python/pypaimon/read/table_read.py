@@ -88,9 +88,7 @@ class TableRead:
             table_list.append(self._try_to_pad_batch_by_schema(batch, schema))
 
         if not table_list:
-            result = pyarrow.Table.from_arrays(
-                [pyarrow.array([], type=field.type) for field in schema], schema=schema
-            )
+            result = pyarrow.Table.from_arrays([pyarrow.array([], type=field.type) for field in schema], schema=schema)
         else:
             result = pyarrow.Table.from_batches(table_list)
 
