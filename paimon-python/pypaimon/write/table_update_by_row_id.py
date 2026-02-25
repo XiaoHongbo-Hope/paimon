@@ -221,9 +221,6 @@ class TableUpdateByRowId:
             files=target_files,
             partition=target_split.partition,
             bucket=target_split.bucket,
-            file_paths=[f.file_path for f in target_files],
-            row_count=target_files[0].row_count,  # All files have the same row count
-            file_size=sum(f.file_size for f in target_files),
             raw_convertible=True,
             data_deletion_files=target_deletion_files if not target_deletion_files else None
         )
@@ -250,7 +247,6 @@ class TableUpdateByRowId:
         Returns:
             Merged PyArrow Table with all rows
         """
-        expected_row_count = self.first_row_id_to_row_count_map.get(first_row_id, 0)
 
         # Get the _ROW_ID values from update_data to determine which rows are being updated
         relative_indices = pc.subtract(
@@ -262,20 +258,18 @@ class TableUpdateByRowId:
         original_columns = set(original_data.column_names) if original_data is not None else set()
 
         # Build a boolean mask: True at positions that need to be updated
-        all_indices = pa.array(range(expected_row_count), type=pa.int64())
+        all_indices = pa.array(range(original_data.num_rows), type=pa.int64())
         mask = pc.is_in(all_indices, relative_indices)
 
         # Build the merged table column by column
         merged_columns = {}
         for col_name in column_names:
-            update_col = update_data[col_name]
-
-            if col_name in original_columns:
-                original_col = original_data[col_name].combine_chunks()
-                # replace_with_mask fills mask=True positions with update values in order
-                merged_columns[col_name] = pc.replace_with_mask(
-                    original_col, mask, update_col.combine_chunks().cast(original_col.type)
-                )
+            update_col = update_data[col_name].combine_chunks()
+            original_col = original_data[col_name].combine_chunks()
+            # replace_with_mask fills mask=True positions with update values in order
+            merged_columns[col_name] = pc.replace_with_mask(
+                original_col, mask, update_col.cast(original_col.type)
+            )
 
         # Create the merged table
         merged_table = pa.table(merged_columns)
