@@ -45,7 +45,12 @@ from pypaimon.manifest.simple_stats_evolutions import SimpleStatsEvolutions
 
 
 def _row_ranges_from_predicate(predicate: Optional[Predicate]) -> Optional[List]:
-    from pypaimon.utils.range import Range
+    """
+    Extract row ID ranges from predicate for data evolution push-down.
+    Supports _ROW_ID with 'equal' and 'in', and 'and'/'or' of those.
+    Returns None if predicate cannot be converted to row ID ranges.
+    """
+    from pypaimon.globalindex import Range
     from pypaimon.table.special_fields import SpecialFields
 
     if predicate is None:
@@ -430,7 +435,12 @@ class FileScanner:
         else:
             if not self.predicate:
                 return True
-            if self.predicate_for_stats is None:
+            from pypaimon.globalindex.data_evolution_batch_scan import DataEvolutionBatchScan
+            predicate_for_stats = DataEvolutionBatchScan.remove_row_id_filter(self.predicate)
+            if predicate_for_stats is None:
+                return True
+            # Data evolution: file stats may be from another schema, skip stats filter and filter in reader.
+            if self.data_evolution:
                 return True
             # Data evolution: file stats may be from another schema, skip stats filter and filter in reader.
             if self.data_evolution:
@@ -444,7 +454,7 @@ class FileScanner:
                 entry.file.row_count,
                 stats_fields
             )
-            return self.predicate_for_stats.test_by_simple_stats(
+            return predicate_for_stats.test_by_simple_stats(
                 evolved_stats,
                 entry.file.row_count
             )
