@@ -70,11 +70,7 @@ class TableRead:
 
         batch_column_names = batch.schema.names  # py36: use schema.names (no RecordBatch.column_names)
         for field in target_schema:
-<<<<<<< HEAD
-            if field.name in batch.schema.names:
-=======
             if field.name in batch_column_names:
->>>>>>> 47b19a225 (support shards read)
                 col = batch.column(field.name)
                 if col.type != field.type:
                     try:

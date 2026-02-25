@@ -27,10 +27,7 @@ import pyarrow.dataset as ds
 
 from pypaimon import CatalogFactory, Schema
 from pypaimon.common.predicate import Predicate
-<<<<<<< HEAD
-=======
 from pypaimon.common.predicate_builder import PredicateBuilder
->>>>>>> 47b19a225 (support shards read)
 from pypaimon.manifest.manifest_list_manager import ManifestListManager
 from pypaimon.read.reader.iface.record_batch_reader import RecordBatchReader
 from pypaimon.read.reader.predicate_filter_record_batch_reader import (

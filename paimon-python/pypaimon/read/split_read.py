@@ -581,7 +581,6 @@ class DataEvolutionSplitRead(SplitRead):
                 )
 
         merge_reader = ConcatBatchReader(suppliers)
-<<<<<<< HEAD
         if self.predicate_for_reader is not None:
             return FilterRecordBatchReader(
                 merge_reader,
@@ -589,20 +588,6 @@ class DataEvolutionSplitRead(SplitRead):
                 field_names=[f.name for f in self.read_fields],
                 schema_fields=self.read_fields,
             )
-=======
-        if self.predicate is not None:
-            # Only apply filter when all predicate columns are in read_type (e.g. projected schema).
-            read_names = {f.name for f in self.read_fields}
-            if _get_all_fields(self.predicate).issubset(read_names):
-                field_names = [f.name for f in self.read_fields]
-                schema_fields = self.read_fields
-                return FilterRecordBatchReader(
-                    merge_reader,
-                    self.predicate,
-                    field_names=field_names,
-                    schema_fields=schema_fields,
-                )
->>>>>>> 47b19a225 (support shards read)
         return merge_reader
 
     def _split_by_row_id(self, files: List[DataFileMeta]) -> List[List[DataFileMeta]]:
