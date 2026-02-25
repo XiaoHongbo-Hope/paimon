@@ -28,17 +28,20 @@ from pypaimon.read.split_read import (DataEvolutionSplitRead,
                                       SplitRead)
 from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 from pypaimon.table.row.offset_row import OffsetRow
+from pypaimon.table.special_fields import SpecialFields
 
 
 class TableRead:
     """Implementation of TableRead for native Python reading."""
 
-    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField]):
+    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField],
+                 projection: Optional[List[str]] = None):
         from pypaimon.table.file_store_table import FileStoreTable
 
         self.table: FileStoreTable = table
         self.predicate = predicate
         self.read_type = read_type
+        self.projection = projection
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
         def _record_generator():
@@ -85,9 +88,20 @@ class TableRead:
             table_list.append(self._try_to_pad_batch_by_schema(batch, schema))
 
         if not table_list:
-            return pyarrow.Table.from_arrays([pyarrow.array([], type=field.type) for field in schema], schema=schema)
+            result = pyarrow.Table.from_arrays(
+                [pyarrow.array([], type=field.type) for field in schema], schema=schema
+            )
         else:
-            return pyarrow.Table.from_batches(table_list)
+            result = pyarrow.Table.from_batches(table_list)
+
+        if self.projection is None:
+            table_field_names = set(f.name for f in self.table.fields)
+            keep = [
+                c for c in result.column_names
+                if not SpecialFields.is_system_field(c) or c in table_field_names
+            ]
+            result = result.select(keep)
+        return result
 
     def _arrow_batch_generator(self, splits: List[Split], schema: pyarrow.Schema) -> Iterator[pyarrow.RecordBatch]:
         chunk_size = 65536
