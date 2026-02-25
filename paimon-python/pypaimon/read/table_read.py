@@ -28,7 +28,6 @@ from pypaimon.read.split_read import (DataEvolutionSplitRead,
                                       SplitRead)
 from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 from pypaimon.table.row.offset_row import OffsetRow
-from pypaimon.table.special_fields import SpecialFields
 
 
 class TableRead:
@@ -91,14 +90,6 @@ class TableRead:
             result = pyarrow.Table.from_arrays([pyarrow.array([], type=field.type) for field in schema], schema=schema)
         else:
             result = pyarrow.Table.from_batches(table_list)
-
-        if self.projection is None:
-            table_field_names = set(f.name for f in self.table.fields)
-            keep = [
-                c for c in result.column_names
-                if not SpecialFields.is_system_field(c) or c in table_field_names
-            ]
-            result = result.select(keep)
         return result
 
     def _arrow_batch_generator(self, splits: List[Split], schema: pyarrow.Schema) -> Iterator[pyarrow.RecordBatch]:
