@@ -20,12 +20,13 @@ import os
 import shutil
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 import pyarrow
-import pyarrow.fs
+import pyarrow.fs as pafs
 
 from pypaimon.common.file_io import FileIO
 from pypaimon.common.options import Options
@@ -117,11 +118,12 @@ class LocalFileIO(FileIO):
                 stat_info = file_path.stat()
                 self.path = str(file_path.absolute())
                 self.original_path = original_path
+                self.base_name = os.path.basename(original_path)
                 self.size = stat_info.st_size if file_path.is_file() else None
                 self.type = (
-                    pyarrow.fs.FileType.Directory if file_path.is_dir()
-                    else pyarrow.fs.FileType.File if file_path.is_file()
-                    else pyarrow.fs.FileType.NotFound
+                    pafs.FileType.Directory if file_path.is_dir()
+                    else pafs.FileType.File if file_path.is_file()
+                    else pafs.FileType.NotFound
                 )
                 self.mtime = stat_info.st_mtime
         
@@ -337,7 +339,13 @@ class LocalFileIO(FileIO):
         def record_generator():
             num_rows = len(list(records_dict.values())[0])
             for i in range(num_rows):
-                yield {col: records_dict[col][i] for col in records_dict.keys()}
+                record = {}
+                for col in records_dict.keys():
+                    value = records_dict[col][i]
+                    if isinstance(value, datetime) and value.tzinfo is None:
+                        value = value.replace(tzinfo=timezone.utc)
+                    record[col] = value
+                yield record
         
         records = record_generator()
         
