@@ -609,7 +609,7 @@ class TableUpdateTest(unittest.TestCase):
         self.assertIn("duplicate _ROW_ID values", str(context.exception))
 
     def test_large_table_partial_column_updates(self):
-        """Test partial column updates on a large table with 4 columns and 20 rows (2 files, 10 rows each).
+        """Test partial column updates on a large table with 4 columns.
 
         This test covers:
         1. Update first column (id), update 1 row, verify result
