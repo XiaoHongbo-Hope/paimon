@@ -68,7 +68,6 @@ class ReadBuilder:
             table=self.table,
             predicate=self._predicate,
             read_type=self.read_type(),
-            projection=self._projection,
         )
 
     def new_predicate_builder(self) -> PredicateBuilder:
@@ -78,7 +77,7 @@ class ReadBuilder:
         table_fields = self.table.fields
 
         if not self._projection:
-            return [f for f in table_fields if not SpecialFields.is_system_field(f.name)]
+            return table_fields
         else:
             if self.table.options.row_tracking_enabled():
                 table_fields = SpecialFields.row_type_with_row_tracking(table_fields)
