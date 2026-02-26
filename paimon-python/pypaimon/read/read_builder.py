@@ -67,7 +67,7 @@ class ReadBuilder:
         return TableRead(
             table=self.table,
             predicate=self._predicate,
-            read_type=self.read_type()
+            read_type=self.read_type(),
         )
 
     def new_predicate_builder(self) -> PredicateBuilder:
