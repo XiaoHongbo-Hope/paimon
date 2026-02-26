@@ -591,6 +591,23 @@ class TableUpdateTest(unittest.TestCase):
 
         self.assertIn("out of valid range", str(context.exception))
 
+    def test_duplicate_row_id(self):
+        """Test that duplicate _ROW_ID values raise an error."""
+        table = self._create_table()
+
+        write_builder = table.new_batch_write_builder()
+        table_update = write_builder.new_update().with_update_type(['age'])
+
+        update_data = pa.Table.from_pydict({
+            '_ROW_ID': [0, 0, 1],
+            'age': [100, 200, 300]
+        })
+
+        with self.assertRaises(ValueError) as context:
+            table_update.update_by_arrow_with_row_id(update_data)
+
+        self.assertIn("duplicate _ROW_ID values", str(context.exception))
+
     def test_large_table_partial_column_updates(self):
         """Test partial column updates on a large table with 4 columns and 20 rows (2 files, 10 rows each).
 

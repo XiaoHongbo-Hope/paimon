@@ -125,6 +125,10 @@ class TableUpdateByRowId:
         """
         row_ids = data[SpecialFields.ROW_ID.name].to_pylist()
 
+        # Validate row_ids have no duplicates
+        if len(row_ids) != len(set(row_ids)):
+            raise ValueError("Input data contains duplicate _ROW_ID values")
+
         # Validate row_ids are within valid range
         for row_id in row_ids:
             if row_id < 0 or row_id >= self.total_row_count:
@@ -212,6 +216,8 @@ class TableUpdateByRowId:
                         target_deletion_files.append(split.data_deletion_files[file_idx])
                     if target_split is None:
                         target_split = split
+            if target_split is not None:
+                break
 
         if not target_files:
             raise ValueError(f"No file found for first_row_id {first_row_id}")
