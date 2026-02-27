@@ -219,10 +219,8 @@ class DataEvolutionMergeReader(RecordBatchReader):
                     ).slice(0, min_rows)
                     columns.append(column)
                 else:
-                    # Field doesn't exist in this batch, fill with nulls
                     columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
             else:
-                # No batch provides this field, fill with nulls
                 columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
 
         for i in range(len(self.readers)):

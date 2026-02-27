@@ -53,7 +53,6 @@ class DataFileBatchReader(RecordBatchReader):
         self.first_row_id = first_row_id
         self.max_sequence_number = max_sequence_number
         self.system_fields = system_fields
-<<<<<<< HEAD
         self.blob_as_descriptor = blob_as_descriptor
         self.blob_descriptor_fields = blob_descriptor_fields or set()
         self.file_io = file_io
@@ -67,7 +66,6 @@ class DataFileBatchReader(RecordBatchReader):
             for field_name in self.blob_descriptor_fields
             if field_name in self.blob_field_names
         }
-=======
         self.requested_field_names = [field.name for field in fields] if fields else None
         self.fields = fields
 
@@ -95,7 +93,6 @@ class DataFileBatchReader(RecordBatchReader):
                 )
                 ordered_names.append(name)
         return ordered_arrays, ordered_names
->>>>>>> 277fef48c (support shards read of data evolution)
 
     def read_arrow_batch(self, start_idx=None, end_idx=None) -> Optional[RecordBatch]:
         if isinstance(self.format_reader, FormatBlobReader):

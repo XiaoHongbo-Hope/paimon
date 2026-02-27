@@ -130,13 +130,14 @@ class SplitRead(ABC):
                     read_file_fields.append(col)
 
         batch_size = self.table.options.read_batch_size()
+        blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
+        blob_descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
 
         format_reader: RecordBatchReader
         if file_format == CoreOptions.FILE_FORMAT_AVRO:
             format_reader = FormatAvroReader(self.table.file_io, file_path, read_file_fields,
                                              self.read_fields, read_arrow_predicate, batch_size=batch_size)
         elif file_format == CoreOptions.FILE_FORMAT_BLOB:
-            blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
             format_reader = FormatBlobReader(self.table.file_io, file_path, read_file_fields,
                                              self.read_fields, read_arrow_predicate, blob_as_descriptor,
                                              batch_size=batch_size)
@@ -149,19 +150,9 @@ class SplitRead(ABC):
         else:
             raise ValueError(f"Unexpected file format: {file_format}")
 
-<<<<<<< HEAD
-        blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
-        blob_descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
-
-        index_mapping = self.create_index_mapping()
-        partition_info = self._create_partition_info()
-        system_fields = SpecialFields.find_system_fields(self.read_fields)
-=======
         index_mapping = self.create_index_mapping(
             file=file, read_file_fields=read_file_fields, read_fields=read_fields, is_blob_file=is_blob_file
         )
-
->>>>>>> 277fef48c (support shards read of data evolution)
         table_schema_fields = (
             SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
             if row_tracking_enabled else self.table.table_schema.fields
