@@ -80,7 +80,7 @@ class TableWrite:
     ) -> None:
         """
         Write a Ray Dataset to Paimon table.
-        
+
         Args:
             dataset: Ray Dataset to write. This is a distributed data collection
                 from Ray Data (ray.data.Dataset).
@@ -97,6 +97,18 @@ class TableWrite:
             concurrency=concurrency,
             ray_remote_args=ray_remote_args,
         )
+
+    def write_tf(self, dataset, *, overwrite: bool = False) -> None:
+        """
+        Write a TensorFlow Dataset to this Paimon table.
+        Args:
+            dataset: tf.data.Dataset (dict of column name -> Tensor per batch).
+            overwrite: Whether to overwrite existing data. Defaults to False.
+        """
+        import tensorflow as tf
+        from pypaimon.write.tf_write import write_tf_dataset
+        strategy = tf.distribute.get_strategy()
+        write_tf_dataset(self.table, dataset, strategy, overwrite=overwrite)
 
     def close(self):
         self.file_store_write.close()
