@@ -213,6 +213,15 @@ class JavaPyReadWriteTest(unittest.TestCase):
         self.assertEqual(buckets[0], expected_bucket_first_row,
                          "bucket for first row (id=1) with num_buckets=4 must be %d" % expected_bucket_first_row)
 
+        from pypaimon.write.row_key_extractor import FixedBucketRowKeyExtractor
+        expected_bucket_first_row = 2
+        first_row = initial_data.head(1)
+        batch = pa.RecordBatch.from_pandas(first_row, schema=pa_schema)
+        extractor = FixedBucketRowKeyExtractor(table.table_schema)
+        _, buckets = extractor.extract_partition_bucket_batch(batch)
+        self.assertEqual(buckets[0], expected_bucket_first_row,
+                         "bucket for first row (id=1) with num_buckets=4 must be %d" % expected_bucket_first_row)
+
     @parameterized.expand(get_file_format_params())
     def test_read_pk_table(self, file_format):
         # Skip ORC format for Python < 3.8 due to pyarrow limitation with TIMESTAMP_INSTANT
