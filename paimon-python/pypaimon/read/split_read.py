@@ -806,15 +806,6 @@ class DataEvolutionSplitRead(SplitRead):
     def _create_file_reader(self, file: DataFileMeta, read_fields: [str],
                             use_requested_field_names: bool = True) -> Optional[RecordReader]:
         """Create a file reader for a single file."""
-        shard_file_idx_map = (
-            self.split.shard_file_idx_map() if isinstance(self.split, SlicedSplit) else {}
-        )
-        begin_pos, end_pos = 0, 0
-        if file.file_name in shard_file_idx_map:
-            (begin_pos, end_pos) = shard_file_idx_map[file.file_name]
-            if (begin_pos, end_pos) == (-1, -1):
-                return None
-
         def create_record_reader():
             return self.file_reader_supplier(
                 file=file,
@@ -824,8 +815,6 @@ class DataEvolutionSplitRead(SplitRead):
                 use_requested_field_names=use_requested_field_names)
 
         base = create_record_reader()
-        if file.file_name in shard_file_idx_map:
-            base = ShardBatchReader(base, begin_pos, end_pos)
         if self.row_ranges is None:
             return base
         file_range = file.row_id_range()

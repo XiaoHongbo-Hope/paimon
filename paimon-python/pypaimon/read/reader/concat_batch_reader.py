@@ -210,28 +210,19 @@ class DataEvolutionMergeReader(RecordBatchReader):
             batch_index = self.row_offsets[i]
             field_index = self.field_offsets[i]
             field_name = self.schema.field(i).name
-            column = None
 
             if batch_index >= 0 and batches[batch_index] is not None:
                 src_batch = batches[batch_index]
-                if field_name is not None and field_name in src_batch.schema.names:
+                if field_name in src_batch.schema.names:
                     column = src_batch.column(
                         src_batch.schema.get_field_index(field_name)
                     ).slice(0, min_rows)
-                elif field_index < src_batch.num_columns:
-                    column = src_batch.column(field_index).slice(0, min_rows)
-
-            if column is None and field_name is not None:
-                for b in batches:
-                    if b is not None and field_name in b.schema.names:
-                        column = b.column(b.schema.get_field_index(field_name)).slice(
-                            0, min_rows
-                        )
-                        break
-
-            if column is not None:
-                columns.append(column)
-            elif self.schema is not None and i < len(self.schema):
+                    columns.append(column)
+                else:
+                    # Field doesn't exist in this batch, fill with nulls
+                    columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
+            else:
+                # No batch provides this field, fill with nulls
                 columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
 
         for i in range(len(self.readers)):

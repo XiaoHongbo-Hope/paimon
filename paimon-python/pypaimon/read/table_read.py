@@ -68,8 +68,6 @@ class TableRead:
         for field in target_schema:
             if field.name in batch.schema.names:
                 col = batch.column(field.name)
-                if col.type != field.type:
-                    col = pyarrow.nulls(num_rows, type=field.type)
             else:
                 col = pyarrow.nulls(num_rows, type=field.type)
             columns.append(col)
