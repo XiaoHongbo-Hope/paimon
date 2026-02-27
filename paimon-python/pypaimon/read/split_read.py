@@ -798,8 +798,7 @@ class DataEvolutionSplitRead(SplitRead):
         row_ranges = Range.and_(self.row_ranges, [file_range])
         if len(row_ranges) == 0:
             return EmptyRecordBatchReader()
-        first_row_id = file.first_row_id + (begin_pos if file.file_name in shard_file_idx_map else 0)
-        return RowIdFilterRecordBatchReader(base, first_row_id, row_ranges)
+        return RowIdFilterRecordBatchReader(base, file.first_row_id, row_ranges)
 
     def _split_field_bunches(self, need_merge_files: List[DataFileMeta]) -> List[FieldBunch]:
         """Split files into field bunches."""
