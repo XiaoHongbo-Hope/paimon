@@ -137,12 +137,8 @@ class SplitRead(ABC):
                                              self.read_fields, read_arrow_predicate, batch_size=batch_size)
         elif file_format == CoreOptions.FILE_FORMAT_BLOB:
             blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
-            blob_full_fields = (
-                SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
-                if row_tracking_enabled else self.table.table_schema.fields
-            )
             format_reader = FormatBlobReader(self.table.file_io, file_path, read_file_fields,
-                                             blob_full_fields, read_arrow_predicate, blob_as_descriptor,
+                                             self.read_fields, read_arrow_predicate, blob_as_descriptor,
                                              batch_size=batch_size)
         elif file_format == CoreOptions.FILE_FORMAT_LANCE:
             format_reader = FormatLanceReader(self.table.file_io, file_path, read_file_fields,
@@ -153,48 +149,26 @@ class SplitRead(ABC):
         else:
             raise ValueError(f"Unexpected file format: {file_format}")
 
-        write_cols = getattr(file, "write_cols", None)
-        if write_cols:
-            num_cols = len(read_file_fields) if is_blob_file else len(read_fields)
-            if num_cols > 0:
-                index_mapping = list(range(num_cols)) if num_cols > 0 else None
-            else:
-                index_mapping = None
-        else:
-            index_mapping = self.create_index_mapping()
+        index_mapping = self.create_index_mapping(
+            file=file, read_file_fields=read_file_fields, read_fields=read_fields, is_blob_file=is_blob_file
+        )
 
         table_schema_fields = (
             SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
             if row_tracking_enabled else self.table.table_schema.fields
         )
-        if for_merge_read:
-            fields = self.read_fields
-        elif is_blob_file:
-            field_map = {field.name: field for field in table_schema_fields}
-            requested_fields = []
-            for field_name in read_file_fields:
-                if field_name in field_map:
-                    requested_fields.append(field_map[field_name])
-            fields = requested_fields if requested_fields else table_schema_fields
-        elif use_requested_field_names and write_cols:
-            field_map = {field.name: field for field in table_schema_fields}
-            requested_fields = []
-            for field_name in read_fields:
-                if field_name in field_map:
-                    requested_fields.append(field_map[field_name])
-            fields = requested_fields if requested_fields else table_schema_fields
-        else:
-            field_map = {field.name: field for field in table_schema_fields}
-            requested_fields = [field_map[f.name] for f in self.read_fields if f.name in field_map]
-            fields = requested_fields if requested_fields else table_schema_fields
+        write_cols = getattr(file, "write_cols", None)
+        fields = self._output_fields_for_file_reader(
+            for_merge_read, is_blob_file, use_requested_field_names, write_cols,
+            read_file_fields, read_fields, table_schema_fields
+        )
 
         system_fields = SpecialFields.find_system_fields(fields)
 
         field_map = {field.name: field for field in table_schema_fields}
-        actual_read_fields_for_partition = []
-        for field_name in read_file_fields:
-            if field_name in field_map:
-                actual_read_fields_for_partition.append(field_map[field_name])
+        actual_read_fields_for_partition = [
+            field_map[fn] for fn in read_file_fields if fn in field_map
+        ]
 
         if (
             not for_merge_read
@@ -255,6 +229,28 @@ class SplitRead(ABC):
             self.schema_id_2_fields[key] = (read_file_fields, read_arrow_predicate)
         return self.schema_id_2_fields[key]
 
+    def _output_fields_for_file_reader(
+        self,
+        for_merge_read: bool,
+        is_blob_file: bool,
+        use_requested_field_names: bool,
+        write_cols,
+        read_file_fields: List[str],
+        read_fields: List[str],
+        table_schema_fields: List[DataField],
+    ) -> List[DataField]:
+        if for_merge_read:
+            return self.read_fields
+        if is_blob_file:
+            names = read_file_fields
+        elif use_requested_field_names and write_cols:
+            names = read_fields
+        else:
+            names = [f.name for f in self.read_fields]
+        field_map = {f.name: f for f in table_schema_fields}
+        requested = [field_map[n] for n in names if n in field_map]
+        return requested if requested else table_schema_fields
+
     @abstractmethod
     def _get_all_data_fields(self):
         """Get all data fields"""
@@ -286,7 +282,12 @@ class SplitRead(ABC):
 
         return all_data_fields
 
-    def create_index_mapping(self):
+    def create_index_mapping(self, file: Optional[DataFileMeta] = None, read_file_fields: Optional[List[str]] = None,
+                             read_fields: Optional[List[str]] = None, is_blob_file: bool = False):
+        write_cols = getattr(file, "write_cols", None) if file else None
+        if write_cols and read_file_fields is not None and read_fields is not None:
+            num_cols = len(read_file_fields) if is_blob_file else len(read_fields)
+            return list(range(num_cols)) if num_cols > 0 else None
         base_index_mapping = self._create_base_index_mapping(self.read_fields, self._get_read_data_fields())
         trimmed_key_mapping, _ = self._get_trimmed_fields(self._get_read_data_fields(), self._get_all_data_fields())
         if base_index_mapping is None:
@@ -483,7 +484,7 @@ class RawFileSplitRead(SplitRead):
 
 
 class MergeFileSplitRead(SplitRead):
-    def create_index_mapping(self):
+    def create_index_mapping(self, file=None, read_file_fields=None, read_fields=None, is_blob_file=False):
         return None
 
     def kv_reader_supplier(self, file: DataFileMeta, dv_factory: Optional[Callable] = None) -> RecordReader:
