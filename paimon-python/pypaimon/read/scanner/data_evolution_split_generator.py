@@ -192,7 +192,7 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
             # Calculate shard boundaries based on total row count
             rows_per_task = total_row_count // self.number_of_para_subtasks
             remainder = total_row_count % self.number_of_para_subtasks
-
+            
             start_pos = self.idx_of_this_subtask * rows_per_task
             # Distribute remainder rows across first 'remainder' tasks
             if self.idx_of_this_subtask < remainder:

@@ -241,10 +241,9 @@ class DataFileBatchReader(RecordBatchReader):
         for i, name in enumerate(inter_names):
             array = inter_arrays[i]
             target_field = self.schema_map.get(name)
-            if target_field is None:
-                final_fields.append(pa.field(name, array.type))
-            else:
-                final_fields.append(target_field)
+            if not target_field:
+                target_field = pa.field(name, array.type)
+            final_fields.append(target_field)
         final_schema = pa.schema(final_fields)
         record_batch = pa.RecordBatch.from_arrays(inter_arrays, schema=final_schema)
 
@@ -262,6 +261,7 @@ class DataFileBatchReader(RecordBatchReader):
         # Handle _ROW_ID field
         if SpecialFields.ROW_ID.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.ROW_ID.name]
+            # Create a new array that fills with computed row IDs
             if idx < num_cols:
                 if self.first_row_id is None:
                     raise ValueError(
@@ -280,11 +280,17 @@ class DataFileBatchReader(RecordBatchReader):
                 arrays[idx] = pa.repeat(self.max_sequence_number, record_batch.num_rows)
 
         names = record_batch.schema.names
-        fields = [
-            pa.field(name, arrays[i].type, nullable=record_batch.schema.field(name).nullable)
-            for i, name in enumerate(names)
-        ]
-        return pa.RecordBatch.from_arrays(arrays, schema=pa.schema(fields))
+        table = None
+        for i, name in enumerate(names):
+            field = pa.field(
+                name, arrays[i].type,
+                nullable=record_batch.schema.field(name).nullable
+            )
+            if table is None:
+                table = pa.table({name: arrays[i]}, schema=pa.schema([field]))
+            else:
+                table = table.append_column(field, arrays[i])
+        return table.to_batches()[0]
 
     def close(self) -> None:
         self.format_reader.close()

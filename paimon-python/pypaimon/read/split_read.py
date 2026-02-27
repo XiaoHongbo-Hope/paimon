@@ -165,26 +165,14 @@ class SplitRead(ABC):
 
         system_fields = SpecialFields.find_system_fields(fields)
 
-        field_map = {field.name: field for field in table_schema_fields}
-        actual_read_fields_for_partition = [
-            field_map[fn] for fn in read_file_fields if fn in field_map
-        ]
-
-        if (
-            not for_merge_read
-            and self.table.partition_keys
-            and actual_read_fields_for_partition
-            and fields is table_schema_fields
-        ):
-            partition_row = self.split.partition
-            full_partition_and_file = list(partition_row.fields) + actual_read_fields_for_partition
-            available_names = {f.name for f in full_partition_and_file}
-            fields = [f for f in self.read_fields if f.name in available_names]
-            if not fields:
-                fields = full_partition_and_file
-
+        actual_read_fields_for_partition = self._actual_read_fields_for_partition(
+            read_file_fields, table_schema_fields
+        )
+        fields = self._output_fields_for_partition_info(
+            for_merge_read, fields, actual_read_fields_for_partition, table_schema_fields
+        )
         partition_info = self._create_partition_info(
-            actual_read_fields=actual_read_fields_for_partition if actual_read_fields_for_partition else None,
+            actual_read_fields=actual_read_fields_for_partition or None,
             output_fields=fields
         )
 
@@ -374,6 +362,40 @@ class SplitRead(ABC):
 
         return trimmed_mapping, trimmed_fields
 
+    def _actual_read_fields_for_partition(
+            self,
+            read_file_fields: List[str],
+            table_schema_fields: List[DataField],
+    ) -> List[DataField]:
+        """Fields actually read from this file (for partition mapping)."""
+        field_map = {f.name: f for f in table_schema_fields}
+        return [field_map[fn] for fn in read_file_fields if fn in field_map]
+
+    def _output_fields_for_partition_info(
+            self,
+            for_merge_read: bool,
+            fields: List[DataField],
+            actual_read_fields_for_partition: List[DataField],
+            table_schema_fields: List[DataField],
+    ) -> List[DataField]:
+        """
+        Output field list for this file's partition mapping.
+        When partition + data evolution, narrow to partition + actual read columns
+        so mapping indices match the record batch from this file.
+        """
+        if (
+            for_merge_read
+            or not self.table.partition_keys
+            or not actual_read_fields_for_partition
+            or fields is not table_schema_fields
+        ):
+            return fields
+        partition_row = self.split.partition
+        full_partition_and_file = list(partition_row.fields) + actual_read_fields_for_partition
+        available_names = {f.name for f in full_partition_and_file}
+        out = [f for f in self.read_fields if f.name in available_names]
+        return out if out else full_partition_and_file
+
     def _create_partition_info(
             self,
             actual_read_fields: Optional[List[DataField]] = None,
@@ -484,12 +506,8 @@ class RawFileSplitRead(SplitRead):
 
 
 class MergeFileSplitRead(SplitRead):
-    def create_index_mapping(self, file=None, read_file_fields=None, read_fields=None, is_blob_file=False):
-        return None
-
     def kv_reader_supplier(self, file: DataFileMeta, dv_factory: Optional[Callable] = None) -> RecordReader:
-        merge_read_fields = [f.name for f in self._get_read_data_fields()]
-        file_batch_reader = self.file_reader_supplier(file, True, merge_read_fields, False)
+        file_batch_reader = self.file_reader_supplier(file, True, self._get_final_read_data_fields(), False)
         dv = dv_factory() if dv_factory else None
         if dv:
             return ApplyDeletionVectorReader(
@@ -672,7 +690,10 @@ class DataEvolutionSplitRead(SplitRead):
         # Pass 2: Assign remaining fields by field id (full-schema base and system fields)
         for i, bunch in enumerate(fields_files):
             first_file = bunch.files()[0]
+
+            # Get field IDs for this bunch
             if DataFileMeta.is_blob_file(first_file.file_name):
+                # For blob files, we need to get the field ID from the write columns
                 field_ids = [self._get_field_id_from_write_cols(first_file)]
             elif first_file.write_cols:
                 field_ids = self._get_field_ids_from_write_cols(first_file.write_cols)
@@ -685,42 +706,19 @@ class DataEvolutionSplitRead(SplitRead):
                 field_ids = [field.id for field in schema_fields]
             read_fields = list(read_fields_per_bunch[i])
             for j, read_field_id in enumerate(read_field_index):
-                if row_offsets[j] != -1:
-                    continue
                 for field_id in field_ids:
                     if read_field_id == field_id:
-                        row_offsets[j] = i
-                        field_offsets[j] = len(read_fields)
-                        read_fields.append(all_read_fields[j])
+                        if row_offsets[j] == -1:
+                            row_offsets[j] = i
+                            field_offsets[j] = len(read_fields)
+                            read_fields.append(all_read_fields[j])
                         break
             read_fields_per_bunch[i] = read_fields
 
-        # Post-pass: any data field still unassigned, take from a partial bunch by name
-        table_field_names = {f.name for f in self.table.fields}
-        for i, field in enumerate(all_read_fields):
-            if row_offsets[i] != -1:
-                continue
-            if field.name not in table_field_names:
-                continue
-            for bi, bunch in enumerate(fields_files):
-                first_file = bunch.files()[0]
-                if not first_file.write_cols or field.name not in first_file.write_cols:
-                    continue
-                # Do not assign non-blob fields to a blob bunch (blob file only has blob column)
-                if DataFileMeta.is_blob_file(first_file.file_name) and field.name != first_file.write_cols[0]:
-                    continue
-                row_offsets[i] = bi
-                field_offsets[i] = len(read_fields_per_bunch[bi])
-                read_fields_per_bunch[bi].append(field)
-                break
-
-        write_cols_tuples = [
-            tuple(f.files()[0].write_cols or ())
-            for f in fields_files
-            if not DataFileMeta.is_blob_file(f.files()[0].file_name)
-        ]
-        all_same_write_cols = len(set(write_cols_tuples)) <= 1 if write_cols_tuples else True
-        use_requested_field_names = not all_same_write_cols
+        self._assign_remaining_fields_by_write_cols(
+            all_read_fields, row_offsets, field_offsets, read_fields_per_bunch, fields_files
+        )
+        use_requested_field_names = self._use_requested_field_names_for_merge(fields_files)
 
         table_field_names_set = {f.name for f in self.table.fields}
         for i, bunch in enumerate(fields_files):
@@ -741,8 +739,9 @@ class DataEvolutionSplitRead(SplitRead):
                             read_field_names_set.add(f.name)
                 read_field_names = self._remove_partition_fields(read_fields)
                 table_fields = self.read_fields
-                self.read_fields = read_fields
+                self.read_fields = read_fields  # create reader based on read_fields
                 batch_size = self.table.options.read_batch_size()
+                # Create reader for this bunch
                 if len(bunch.files()) == 1:
                     suppliers = [
                         partial(self._create_file_reader, file=bunch.files()[0],
@@ -751,6 +750,7 @@ class DataEvolutionSplitRead(SplitRead):
                     ]
                     file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 else:
+                    # Create concatenated reader for multiple files
                     suppliers = [
                         partial(self._create_file_reader, file=file,
                                 read_fields=read_field_names,
@@ -768,6 +768,40 @@ class DataEvolutionSplitRead(SplitRead):
 
         output_schema = PyarrowFieldParser.from_paimon_schema(all_read_fields)
         return DataEvolutionMergeReader(row_offsets, field_offsets, file_record_readers, schema=output_schema)
+
+    def _assign_remaining_fields_by_write_cols(
+        self,
+        all_read_fields: List[DataField],
+        row_offsets: List[int],
+        field_offsets: List[int],
+        read_fields_per_bunch: List[List[DataField]],
+        fields_files: List[FieldBunch],
+    ) -> None:
+        """Assign any still-unassigned table field to a bunch that has it in write_cols (by name)."""
+        table_field_names = {f.name for f in self.table.fields}
+        for i, field in enumerate(all_read_fields):
+            if row_offsets[i] != -1 or field.name not in table_field_names:
+                continue
+            for bi, bunch in enumerate(fields_files):
+                first_file = bunch.files()[0]
+                if not first_file.write_cols or field.name not in first_file.write_cols:
+                    continue
+                if DataFileMeta.is_blob_file(first_file.file_name) and field.name != first_file.write_cols[0]:
+                    continue
+                row_offsets[i] = bi
+                field_offsets[i] = len(read_fields_per_bunch[bi])
+                read_fields_per_bunch[bi].append(field)
+                break
+
+    def _use_requested_field_names_for_merge(self, fields_files: List[FieldBunch]) -> bool:
+        """True when non-blob bunches have different write_cols, so output column order must be unified."""
+        write_cols_tuples = [
+            tuple(f.files()[0].write_cols or ())
+            for f in fields_files
+            if not DataFileMeta.is_blob_file(f.files()[0].file_name)
+        ]
+        all_same = len(set(write_cols_tuples)) <= 1 if write_cols_tuples else True
+        return not all_same
 
     def _create_file_reader(self, file: DataFileMeta, read_fields: [str],
                             use_requested_field_names: bool = True) -> Optional[RecordReader]:
@@ -794,7 +828,9 @@ class DataEvolutionSplitRead(SplitRead):
             base = ShardBatchReader(base, begin_pos, end_pos)
         if self.row_ranges is None:
             return base
-        file_range = Range(file.first_row_id, file.first_row_id + file.row_count - 1)
+        file_range = file.row_id_range()
+        if file_range is None:
+            return base
         row_ranges = Range.and_(self.row_ranges, [file_range])
         if len(row_ranges) == 0:
             return EmptyRecordBatchReader()
