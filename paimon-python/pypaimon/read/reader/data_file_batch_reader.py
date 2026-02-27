@@ -29,6 +29,8 @@ from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 from pypaimon.table.row.blob import Blob, BlobDescriptor
 from pypaimon.table.special_fields import SpecialFields
 
+_KEY_PREFIX = "_KEY_"
+
 
 class DataFileBatchReader(RecordBatchReader):
     """
@@ -81,8 +83,8 @@ class DataFileBatchReader(RecordBatchReader):
         ordered_names = []
         for name in requested_field_names:
             idx = name_to_idx.get(name)
-            if idx is None and name.startswith("_KEY_") and name[5:] in name_to_idx:
-                idx = name_to_idx[name[5:]]
+            if idx is None and name.startswith(_KEY_PREFIX) and name[len(_KEY_PREFIX):] in name_to_idx:
+                idx = name_to_idx[name[len(_KEY_PREFIX):]]
             if idx is not None:
                 ordered_arrays.append(inter_arrays[idx])
                 ordered_names.append(name)
@@ -115,14 +117,6 @@ class DataFileBatchReader(RecordBatchReader):
                 record_batch = pa.RecordBatch.from_arrays(ordered_arrays, ordered_names)
             return record_batch
 
-        if (self.partition_info is None and self.index_mapping is not None
-                and not self.requested_field_names):
-            ncol = record_batch.num_columns
-            if len(self.index_mapping) == ncol and self.index_mapping == list(range(ncol)):
-                if self.row_tracking_enabled and self.system_fields:
-                    record_batch = self._assign_row_tracking(record_batch)
-                return record_batch
-
         inter_arrays = []
         inter_names = []
         num_rows = record_batch.num_rows
@@ -136,21 +130,18 @@ class DataFileBatchReader(RecordBatchReader):
                     inter_names.append(partition_field.name)
                 else:
                     real_index = self.partition_info.get_real_index(i)
-                    name = (
-                        self.requested_field_names[i]
-                        if self.requested_field_names and i < len(self.requested_field_names)
-                        else f"_col_{i}"
-                    )
-                    batch_names = record_batch.schema.names
-                    col_idx = None
-                    if name in batch_names:
-                        col_idx = record_batch.schema.get_field_index(name)
-                    elif name.startswith("_KEY_") and name[5:] in batch_names:
-                        col_idx = record_batch.schema.get_field_index(name[5:])
-                    if col_idx is not None:
-                        inter_arrays.append(record_batch.column(col_idx))
-                        inter_names.append(name)
+                    if self.requested_field_names and i < len(self.requested_field_names):
+                        name = self.requested_field_names[i]
                     elif real_index < record_batch.num_columns:
+                        name = record_batch.schema.field(real_index).name
+                    elif self.fields and i < len(self.fields):
+                        name = self.fields[i].name
+                    else:
+                        raise ValueError(
+                            f"Cannot resolve name for output column i={i}: "
+                            "need requested_field_names, batch column, or fields"
+                        )
+                    if real_index < record_batch.num_columns:
                         inter_arrays.append(record_batch.column(real_index))
                         inter_names.append(name)
                     else:
@@ -183,11 +174,15 @@ class DataFileBatchReader(RecordBatchReader):
                     mapped_arrays.append(inter_arrays[actual_index])
                     mapped_names.append(inter_names[actual_index])
                 else:
-                    name = (
-                        self.requested_field_names[i]
-                        if self.requested_field_names and i < len(self.requested_field_names)
-                        else f"null_col_{i}"
-                    )
+                    if self.requested_field_names and i < len(self.requested_field_names):
+                        name = self.requested_field_names[i]
+                    elif self.fields and i < len(self.fields):
+                        name = self.fields[i].name
+                    else:
+                        raise ValueError(
+                            f"Cannot resolve name for null column at i={i}: "
+                            "need requested_field_names or fields"
+                        )
                     field = self.schema_map.get(name)
                     null_array = pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
                     mapped_arrays.append(null_array)
@@ -235,8 +230,8 @@ class DataFileBatchReader(RecordBatchReader):
 
             if self.system_primary_key:
                 for i in range(len(self.system_primary_key)):
-                    if i < len(inter_names) and not inter_names[i].startswith("_KEY_"):
-                        inter_names[i] = f"_KEY_{inter_names[i]}"
+                    if i < len(inter_names) and not inter_names[i].startswith(_KEY_PREFIX):
+                        inter_names[i] = f"{_KEY_PREFIX}{inter_names[i]}"
 
         if self.requested_field_names is not None and len(inter_arrays) < len(self.requested_field_names):
             for name in self.requested_field_names[len(inter_arrays):]:
