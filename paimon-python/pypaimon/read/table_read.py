@@ -83,7 +83,6 @@ class TableRead:
         batch_reader = self.to_arrow_batch_reader(splits)
 
         schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
-
         table_list = []
         for batch in iter(batch_reader.read_next_batch, None):
             if batch.num_rows == 0:
@@ -91,15 +90,10 @@ class TableRead:
             table_list.append(self._try_to_pad_batch_by_schema(batch, schema))
 
         if not table_list:
-            empty_arrays = [pyarrow.array([], type=field.type) for field in schema]
-            return pyarrow.Table.from_arrays(empty_arrays, schema=schema)
-
-        concat_arrays = [
-            pyarrow.concat_arrays([b.column(field.name) for b in table_list])
-            for field in schema
-        ]
-        single_batch = pyarrow.RecordBatch.from_arrays(concat_arrays, schema=schema)
-        return pyarrow.Table.from_batches([single_batch], schema=schema)
+            return pyarrow.Table.from_arrays(
+                [pyarrow.array([], type=field.type) for field in schema], schema=schema
+            )
+        return pyarrow.Table.from_batches(table_list)
 
     def _arrow_batch_generator(self, splits: List[Split], schema: pyarrow.Schema) -> Iterator[pyarrow.RecordBatch]:
         chunk_size = 65536
