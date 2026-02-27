@@ -45,12 +45,7 @@ from pypaimon.manifest.simple_stats_evolutions import SimpleStatsEvolutions
 
 
 def _row_ranges_from_predicate(predicate: Optional[Predicate]) -> Optional[List]:
-    """
-    Extract row ID ranges from predicate for data evolution push-down.
-    Supports _ROW_ID with 'equal' and 'in', and 'and'/'or' of those.
-    Returns None if predicate cannot be converted to row ID ranges.
-    """
-    from pypaimon.globalindex import Range
+    from pypaimon.utils.range import Range
     from pypaimon.table.special_fields import SpecialFields
 
     if predicate is None:
