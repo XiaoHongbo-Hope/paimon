@@ -141,6 +141,8 @@ class DataEvolutionMergeReader(RecordBatchReader):
      - The fourth field comes from batch1, and it is at offset 1 in batch1.
      - The fifth field comes from batch2, and it is at offset 1 in batch2.
      - The sixth field comes from batch1, and it is at offset 0 in batch1.
+
+    When row_offsets[i] == -1 (no file provides that field), output a column of nulls using schema.
     """
 
     def __init__(
@@ -207,9 +209,20 @@ class DataEvolutionMergeReader(RecordBatchReader):
         for i in range(len(self.row_offsets)):
             batch_index = self.row_offsets[i]
             field_index = self.field_offsets[i]
+            field_name = self.schema.field(i).name
+
             if batch_index >= 0 and batches[batch_index] is not None:
-                columns.append(batches[batch_index].column(field_index).slice(0, min_rows))
+                src_batch = batches[batch_index]
+                if field_name in src_batch.schema.names:
+                    column = src_batch.column(
+                        src_batch.schema.get_field_index(field_name)
+                    ).slice(0, min_rows)
+                    columns.append(column)
+                else:
+                    # Field doesn't exist in this batch, fill with nulls
+                    columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
             else:
+                # No batch provides this field, fill with nulls
                 columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
 
         for i in range(len(self.readers)):
