@@ -28,20 +28,17 @@ from pypaimon.read.split_read import (DataEvolutionSplitRead,
                                       SplitRead)
 from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 from pypaimon.table.row.offset_row import OffsetRow
-from pypaimon.table.special_fields import SpecialFields
 
 
 class TableRead:
     """Implementation of TableRead for native Python reading."""
 
-    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField],
-                 projection: Optional[List[str]] = None):
+    def __init__(self, table, predicate: Optional[Predicate], read_type: List[DataField]):
         from pypaimon.table.file_store_table import FileStoreTable
 
         self.table: FileStoreTable = table
         self.predicate = predicate
         self.read_type = read_type
-        self.projection = projection
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
         def _record_generator():
@@ -86,17 +83,7 @@ class TableRead:
         batch_reader = self.to_arrow_batch_reader(splits)
 
         schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
-        
-        if self.projection is None:
-            table_field_names = set(f.name for f in self.table.fields)
-            output_schema_fields = [
-                field for field in schema
-                if not SpecialFields.is_system_field(field.name) or field.name in table_field_names
-            ]
-            output_schema = pyarrow.schema(output_schema_fields)
-        else:
-            output_schema = schema
-        
+
         table_list = []
         for batch in iter(batch_reader.read_next_batch, None):
             if batch.num_rows == 0:
@@ -104,15 +91,15 @@ class TableRead:
             table_list.append(self._try_to_pad_batch_by_schema(batch, schema))
 
         if not table_list:
-            empty_arrays = [pyarrow.array([], type=field.type) for field in output_schema]
-            return pyarrow.Table.from_arrays(empty_arrays, schema=output_schema)
-        
+            empty_arrays = [pyarrow.array([], type=field.type) for field in schema]
+            return pyarrow.Table.from_arrays(empty_arrays, schema=schema)
+
         concat_arrays = [
             pyarrow.concat_arrays([b.column(field.name) for b in table_list])
-            for field in output_schema
+            for field in schema
         ]
-        single_batch = pyarrow.RecordBatch.from_arrays(concat_arrays, schema=output_schema)
-        return pyarrow.Table.from_batches([single_batch], schema=output_schema)
+        single_batch = pyarrow.RecordBatch.from_arrays(concat_arrays, schema=schema)
+        return pyarrow.Table.from_batches([single_batch], schema=schema)
 
     def _arrow_batch_generator(self, splits: List[Split], schema: pyarrow.Schema) -> Iterator[pyarrow.RecordBatch]:
         chunk_size = 65536
