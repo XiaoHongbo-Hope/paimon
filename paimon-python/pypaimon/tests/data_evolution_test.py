@@ -27,10 +27,7 @@ import pyarrow.dataset as ds
 
 from pypaimon import CatalogFactory, Schema
 from pypaimon.common.predicate import Predicate
-from pypaimon.common.predicate_builder import PredicateBuilder
 from pypaimon.manifest.manifest_list_manager import ManifestListManager
-from pypaimon.read.reader.iface.record_batch_reader import RecordBatchReader
-from pypaimon.schema.data_types import AtomicType, DataField
 from pypaimon.snapshot.snapshot_manager import SnapshotManager
 from pypaimon.table.row.offset_row import OffsetRow
 

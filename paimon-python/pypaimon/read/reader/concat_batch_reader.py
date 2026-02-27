@@ -208,7 +208,6 @@ class DataEvolutionMergeReader(RecordBatchReader):
         columns = []
         for i in range(len(self.row_offsets)):
             batch_index = self.row_offsets[i]
-            field_index = self.field_offsets[i]
             field_name = self.schema.field(i).name
 
             if batch_index >= 0 and batches[batch_index] is not None:

@@ -130,18 +130,21 @@ class DataFileBatchReader(RecordBatchReader):
                     inter_names.append(partition_field.name)
                 else:
                     real_index = self.partition_info.get_real_index(i)
-                    if self.requested_field_names and i < len(self.requested_field_names):
-                        name = self.requested_field_names[i]
+                    name = (
+                        self.requested_field_names[i]
+                        if self.requested_field_names and i < len(self.requested_field_names)
+                        else f"_col_{i}"
+                    )
+                    batch_names = record_batch.schema.names
+                    col_idx = None
+                    if name in batch_names:
+                        col_idx = record_batch.schema.get_field_index(name)
+                    elif name.startswith(_KEY_PREFIX) and name[len(_KEY_PREFIX):] in batch_names:
+                        col_idx = record_batch.schema.get_field_index(name[len(_KEY_PREFIX):])
+                    if col_idx is not None:
+                        inter_arrays.append(record_batch.column(col_idx))
+                        inter_names.append(name)
                     elif real_index < record_batch.num_columns:
-                        name = record_batch.schema.field(real_index).name
-                    elif self.fields and i < len(self.fields):
-                        name = self.fields[i].name
-                    else:
-                        raise ValueError(
-                            f"Cannot resolve name for output column i={i}: "
-                            "need requested_field_names, batch column, or fields"
-                        )
-                    if real_index < record_batch.num_columns:
                         inter_arrays.append(record_batch.column(real_index))
                         inter_names.append(name)
                     else:

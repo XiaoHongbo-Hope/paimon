@@ -512,8 +512,12 @@ class RawFileSplitRead(SplitRead):
 
 
 class MergeFileSplitRead(SplitRead):
+    def create_index_mapping(self, file=None, read_file_fields=None, read_fields=None, is_blob_file=False):
+        return None
+
     def kv_reader_supplier(self, file: DataFileMeta, dv_factory: Optional[Callable] = None) -> RecordReader:
-        file_batch_reader = self.file_reader_supplier(file, True, self._get_final_read_data_fields(), False)
+        merge_read_fields = [f.name for f in self._get_read_data_fields()]
+        file_batch_reader = self.file_reader_supplier(file, True, merge_read_fields, False)
         dv = dv_factory() if dv_factory else None
         if dv:
             return ApplyDeletionVectorReader(
