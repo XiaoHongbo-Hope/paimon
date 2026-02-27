@@ -189,19 +189,18 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
         
         # If idx_of_this_subtask exists, calculate start_pos and end_pos based on number_of_para_subtasks
         if self.idx_of_this_subtask is not None:
-            # Shard distribution: first (n - remainder) shards get base rows each,
-            # last remainder shards get (base+1) rows each (so last shards get the extra rows).
-            n = self.number_of_para_subtasks
-            base = total_row_count // n
-            remainder = total_row_count % n
-            idx = self.idx_of_this_subtask
-            if idx < n - remainder:
-                num_row = base
-                start_pos = idx * base
+            # Calculate shard boundaries based on total row count
+            rows_per_task = total_row_count // self.number_of_para_subtasks
+            remainder = total_row_count % self.number_of_para_subtasks
+
+            start_pos = self.idx_of_this_subtask * rows_per_task
+            # Distribute remainder rows across first 'remainder' tasks
+            if self.idx_of_this_subtask < remainder:
+                start_pos += self.idx_of_this_subtask
+                end_pos = start_pos + rows_per_task + 1
             else:
-                num_row = base + 1
-                start_pos = (n - remainder) * base + (idx - (n - remainder)) * (base + 1)
-            end_pos = start_pos + num_row
+                start_pos += remainder
+                end_pos = start_pos + rows_per_task
         else:
             # Use existing start_pos and end_pos
             start_pos = self.start_pos_of_this_subtask

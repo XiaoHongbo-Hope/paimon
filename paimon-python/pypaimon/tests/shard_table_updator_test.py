@@ -444,7 +444,7 @@ class ShardTableUpdatorTest(unittest.TestCase):
 
         splits_0 = rb.new_scan().with_shard(0, 2).plan().splits()
         result_0 = tr.to_arrow(splits_0)
-        self.assertEqual(result_0.num_rows, 10)
+        self.assertEqual(result_0.num_rows, 11)
         d_col_0 = result_0.column('d')
         for i in range(10):
             self.assertEqual(
@@ -452,12 +452,13 @@ class ShardTableUpdatorTest(unittest.TestCase):
                 (i + 1) * 100 + (i + 1) * 10 - (i + 1),
                 "Shard 0 row %d: d should be c+b-a" % i,
             )
+        self.assertIsNone(d_col_0[10].as_py(), "Shard 0 row 10: d not updated, should be null")
 
         splits_1 = rb.new_scan().with_shard(1, 2).plan().splits()
         result_1 = tr.to_arrow(splits_1)
-        self.assertEqual(result_1.num_rows, 11)
+        self.assertEqual(result_1.num_rows, 10)
         d_col_1 = result_1.column('d')
-        for i in range(11):
+        for i in range(10):
             self.assertIsNone(d_col_1[i].as_py(), "Shard 1 row %d: d should be null" % i)
 
         full_splits = rb.new_scan().plan().splits()
