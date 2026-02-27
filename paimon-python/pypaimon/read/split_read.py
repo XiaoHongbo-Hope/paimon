@@ -19,7 +19,7 @@
 import os
 from abc import ABC, abstractmethod
 from functools import partial
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from pypaimon.common.options.core_options import CoreOptions
 from pypaimon.common.predicate import Predicate
@@ -56,7 +56,7 @@ from pypaimon.read.reader.sort_merge_reader import SortMergeReaderWithMinHeap
 from pypaimon.read.push_down_utils import _get_all_fields
 from pypaimon.read.split import Split
 from pypaimon.read.sliced_split import SlicedSplit
-from pypaimon.schema.data_types import AtomicType, DataField, PyarrowFieldParser
+from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 from pypaimon.table.special_fields import SpecialFields
 from pypaimon.globalindex.indexed_split import IndexedSplit
 
@@ -113,14 +113,6 @@ class SplitRead(ABC):
     def create_reader(self) -> RecordReader:
         """Create a record reader for the given split."""
 
-    def _get_blob_column_names(self) -> Set[str]:
-        out = set()
-        for field in self.table.table_schema.fields:
-            t = field.type
-            if isinstance(t, AtomicType) and t.type.upper() == "BLOB":
-                out.add(field.name)
-        return out
-
     def file_reader_supplier(self, file: DataFileMeta, for_merge_read: bool,
                              read_fields: List[str], row_tracking_enabled: bool,
                              use_requested_field_names: bool = True) -> RecordBatchReader:
@@ -129,16 +121,11 @@ class SplitRead(ABC):
         file_path = file.external_path if file.external_path else file.file_path
         _, extension = os.path.splitext(file_path)
         file_format = extension[1:]
-        blob_column_names = self._get_blob_column_names()
         is_blob_file = file_format == CoreOptions.FILE_FORMAT_BLOB
-        if not is_blob_file and blob_column_names:
-            read_file_fields = [f for f in read_file_fields if f not in blob_column_names]
 
         if getattr(file, "write_cols", None):
             read_file_fields = list(read_file_fields)
             for col in file.write_cols:
-                if col in blob_column_names and not is_blob_file:
-                    continue
                 if col in read_fields and col not in read_file_fields:
                     read_file_fields.append(col)
 
@@ -746,11 +733,8 @@ class DataEvolutionSplitRead(SplitRead):
                         SpecialFields.row_type_with_row_tracking(schema.fields)
                         if self.row_tracking_enabled else schema.fields
                     )
-                    blob_column_names = self._get_blob_column_names()
                     read_field_names_set = {f.name for f in read_fields}
                     for f in schema_fields:
-                        if f.name in blob_column_names:
-                            continue
                         if f.name in table_field_names_set and f.name not in read_field_names_set:
                             read_fields.append(f)
                             read_field_names_set.add(f.name)
