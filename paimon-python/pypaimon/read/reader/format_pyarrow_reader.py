@@ -24,6 +24,8 @@ from pyarrow import RecordBatch
 
 from pypaimon.common.file_io import FileIO
 from pypaimon.read.reader.iface.record_batch_reader import RecordBatchReader
+from pypaimon.schema.data_types import DataField, PyarrowFieldParser
+from pypaimon.table.special_fields import SpecialFields
 
 
 class FormatPyArrowReader(RecordBatchReader):
@@ -33,15 +35,17 @@ class FormatPyArrowReader(RecordBatchReader):
     """
 
     def __init__(self, file_io: FileIO, file_format: str, file_path: str, read_fields: List[str],
-                 push_down_predicate: Any, batch_size: int = 1024):
+                 push_down_predicate: Any, batch_size: int = 1024,
+                 read_schema_fields: Optional[List[DataField]] = None):
         file_path_for_pyarrow = file_io.to_filesystem_path(file_path)
         self.dataset = ds.dataset(file_path_for_pyarrow, format=file_format, filesystem=file_io.filesystem)
         self.read_fields = read_fields
+        self.read_schema_fields = read_schema_fields
 
         # Identify which fields exist in the file and which are missing
         file_schema_names = set(self.dataset.schema.names)
-        self.existing_fields = [field for field in read_fields if field in file_schema_names]
-        self.missing_fields = [field for field in read_fields if field not in file_schema_names]
+        self.existing_fields = [f for f in read_fields if f in file_schema_names]
+        self.missing_fields = [f for f in read_fields if f not in file_schema_names]
 
         # Only pass existing fields to PyArrow scanner to avoid errors
         self.reader = self.dataset.scanner(
@@ -50,6 +54,16 @@ class FormatPyArrowReader(RecordBatchReader):
             batch_size=batch_size
         ).to_reader()
 
+    def _build_output_schema(self) -> Optional[pa.Schema]:
+        """Build PyArrow schema for type lookup when filling missing columns."""
+        if self.read_schema_fields is None:
+            return None
+        name_to_field = {f.name: f for f in self.read_schema_fields}
+        ordered_fields = [name_to_field[n] for n in self.read_fields if n in name_to_field]
+        if not ordered_fields:
+            return None
+        return PyarrowFieldParser.from_paimon_schema(ordered_fields)
+
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         try:
             batch = self.reader.read_next_batch()
@@ -57,8 +71,19 @@ class FormatPyArrowReader(RecordBatchReader):
             if not self.missing_fields:
                 return batch
 
-            # Create columns for missing fields with null values
-            missing_columns = [pa.nulls(batch.num_rows, type=pa.null()) for _ in self.missing_fields]
+            output_schema = self._build_output_schema()
+
+            def _type_for_missing(name: str) -> pa.DataType:
+                if output_schema is not None:
+                    idx = output_schema.get_field_index(name)
+                    if idx >= 0:
+                        return output_schema.field(idx).type
+                return pa.null()
+
+            missing_columns = [
+                pa.nulls(batch.num_rows, type=_type_for_missing(name))
+                for name in self.missing_fields
+            ]
 
             # Reconstruct the batch with all fields in the correct order
             all_columns = []
@@ -72,8 +97,10 @@ class FormatPyArrowReader(RecordBatchReader):
                 else:
                     # Get the column from missing fields
                     column_idx = self.missing_fields.index(field_name)
+                    col_type = _type_for_missing(field_name)
                     all_columns.append(missing_columns[column_idx])
-                    out_fields.append(pa.field(field_name, pa.null(), nullable=True))
+                    nullable = not SpecialFields.is_system_field(field_name)
+                    out_fields.append(pa.field(field_name, col_type, nullable=nullable))
             # Create a new RecordBatch with all columns
             return pa.RecordBatch.from_arrays(all_columns, schema=pa.schema(out_fields))
 
