@@ -168,7 +168,7 @@ class SplitRead(ABC):
             if (merge_output_fields is not None and not is_blob_file)
             else self.create_index_mapping()
         )
-        partition_info = self._create_partition_info()
+        partition_info = None if for_merge_read else self._create_partition_info()
         system_fields = SpecialFields.find_system_fields(self.read_fields)
         table_schema_fields = (
             SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
@@ -607,10 +607,6 @@ class DataEvolutionSplitRead(SplitRead):
 
             read_fields = []
             for j, read_field_id in enumerate(read_field_index):
-                # In merge, _ROW_ID and _SEQUENCE_NUMBER are filled from merge metadata, not from file
-                if (SpecialFields.ROW_ID.name == all_read_fields[j].name or
-                        SpecialFields.SEQUENCE_NUMBER.name == all_read_fields[j].name):
-                    continue
                 for field_id in field_ids:
                     if read_field_id == field_id:
                         if row_offsets[j] == -1:
@@ -647,19 +643,15 @@ class DataEvolutionSplitRead(SplitRead):
                     file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 self.read_fields = table_fields
 
-        # Validate that all required fields are found (system fields are filled by merge reader)
+        # Validate that all required fields are found
         for i, field in enumerate(all_read_fields):
             if row_offsets[i] == -1:
-                if field.name in (SpecialFields.ROW_ID.name, SpecialFields.SEQUENCE_NUMBER.name):
-                    continue
                 if not field.type.nullable:
                     raise ValueError(f"Field {field} is not null but can't find any file contains it.")
 
-        max_sequence_number = max(f.max_sequence_number for f in need_merge_files)
         output_schema = PyarrowFieldParser.from_paimon_schema(all_read_fields)
         return DataEvolutionMergeReader(
-            row_offsets, field_offsets, file_record_readers, schema=output_schema,
-            first_row_id=first_row_id, max_sequence_number=max_sequence_number
+            row_offsets, field_offsets, file_record_readers, schema=output_schema
         )
 
     def _create_file_reader(self, file: DataFileMeta, read_fields: [str],

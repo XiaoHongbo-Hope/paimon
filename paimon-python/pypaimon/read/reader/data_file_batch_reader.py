@@ -212,17 +212,25 @@ class DataFileBatchReader(RecordBatchReader):
         """Assign row tracking meta fields (_ROW_ID and _SEQUENCE_NUMBER)."""
         arrays = list(record_batch.columns)
         num_rows = record_batch.num_rows
+        schema_names = record_batch.schema.names
 
-        # Handle _ROW_ID field (only if batch has that column index)
-        if SpecialFields.ROW_ID.name in self.system_fields.keys():
-            idx = self.system_fields[SpecialFields.ROW_ID.name]
-            if idx < len(arrays):
+        def _idx(name: str) -> int:
+            if name not in self.system_fields.keys():
+                return -1
+            if name in schema_names:
+                return schema_names.index(name)
+            return -1
+
+        # Handle _ROW_ID field
+        if self.first_row_id is not None and SpecialFields.ROW_ID.name in self.system_fields.keys():
+            idx = _idx(SpecialFields.ROW_ID.name)
+            if 0 <= idx < len(arrays):
                 arrays[idx] = pa.array(range(self.first_row_id, self.first_row_id + num_rows), type=pa.int64())
 
-        # Handle _SEQUENCE_NUMBER field (only if batch has that column index)
+        # Handle _SEQUENCE_NUMBER field
         if SpecialFields.SEQUENCE_NUMBER.name in self.system_fields.keys():
-            idx = self.system_fields[SpecialFields.SEQUENCE_NUMBER.name]
-            if idx < len(arrays):
+            idx = _idx(SpecialFields.SEQUENCE_NUMBER.name)
+            if 0 <= idx < len(arrays):
                 arrays[idx] = pa.repeat(self.max_sequence_number, num_rows)
 
         names = record_batch.schema.names
