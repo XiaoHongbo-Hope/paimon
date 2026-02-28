@@ -115,7 +115,8 @@ class SplitRead(ABC):
 
     def file_reader_supplier(self, file: DataFileMeta, for_merge_read: bool,
                              read_fields: List[str], row_tracking_enabled: bool,
-                             merge_output_fields: Optional[List[DataField]] = None) -> RecordBatchReader:
+                             merge_output_fields: Optional[List[DataField]] = None,
+                             output_schema_names: Optional[List[str]] = None) -> RecordBatchReader:
         (read_file_fields, read_arrow_predicate) = self._get_fields_and_predicate(file.schema_id, read_fields)
 
         # Use external_path if available, otherwise use file_path
@@ -174,6 +175,13 @@ class SplitRead(ABC):
             SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
             if row_tracking_enabled else self.table.table_schema.fields
         )
+        output_schema_names = output_schema_names if output_schema_names is not None else [f.name for f in self.read_fields]
+        if output_schema_names is not None and output_schema_names != [f.name for f in self.read_fields]:
+            system_fields = {
+                name: output_schema_names.index(name)
+                for name in (SpecialFields.ROW_ID.name, SpecialFields.SEQUENCE_NUMBER.name)
+                if name in output_schema_names
+            }
         if for_merge_read:
             return DataFileBatchReader(
                 format_reader,
@@ -187,7 +195,8 @@ class SplitRead(ABC):
                 system_fields,
                 blob_as_descriptor=blob_as_descriptor,
                 blob_descriptor_fields=blob_descriptor_fields,
-                file_io=self.table.file_io)
+                file_io=self.table.file_io,
+                output_schema_names=output_schema_names)
         else:
             return DataFileBatchReader(
                 format_reader,
@@ -201,7 +210,8 @@ class SplitRead(ABC):
                 system_fields,
                 blob_as_descriptor=blob_as_descriptor,
                 blob_descriptor_fields=blob_descriptor_fields,
-                file_io=self.table.file_io)
+                file_io=self.table.file_io,
+                output_schema_names=output_schema_names)
 
     def _get_fields_and_predicate(self, schema_id: int, read_fields):
         key = (schema_id, tuple(read_fields))
@@ -664,7 +674,8 @@ class DataEvolutionSplitRead(SplitRead):
                 for_merge_read=for_merge_read,
                 read_fields=read_fields,
                 row_tracking_enabled=True,
-                merge_output_fields=merge_output_fields)
+                merge_output_fields=merge_output_fields,
+                output_schema_names=read_fields if for_merge_read else None)
         if self.row_ranges is None:
             return create_record_reader()
         row_ranges = Range.and_(self.row_ranges, [file.row_id_range()])
