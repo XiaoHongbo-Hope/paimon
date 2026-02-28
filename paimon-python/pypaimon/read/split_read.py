@@ -168,7 +168,7 @@ class SplitRead(ABC):
             if (merge_output_fields is not None and not is_blob_file)
             else self.create_index_mapping()
         )
-        partition_info = None if for_merge_read else self._create_partition_info()
+        partition_info = self._create_partition_info()
         system_fields = SpecialFields.find_system_fields(self.read_fields)
         table_schema_fields = (
             SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
