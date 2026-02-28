@@ -43,8 +43,7 @@ class DataFileBatchReader(RecordBatchReader):
                  system_fields: dict,
                  blob_as_descriptor: bool = False,
                  blob_descriptor_fields: Optional[set] = None,
-                 file_io: Optional[FileIO] = None,
-                 output_schema_names: Optional[List[str]] = None):
+                 file_io: Optional[FileIO] = None):
         self.format_reader = format_reader
         self.index_mapping = index_mapping
         self.partition_info = partition_info
@@ -57,7 +56,6 @@ class DataFileBatchReader(RecordBatchReader):
         self.blob_as_descriptor = blob_as_descriptor
         self.blob_descriptor_fields = blob_descriptor_fields or set()
         self.file_io = file_io
-        self.output_schema_names = output_schema_names
         self.blob_field_names = {
             field.name
             for field in fields
@@ -78,8 +76,6 @@ class DataFileBatchReader(RecordBatchReader):
             return None
 
         if self.partition_info is None and self.index_mapping is None:
-            if self.output_schema_names is not None and record_batch.schema.names != self.output_schema_names:
-                record_batch = self._expand_batch_to_schema(record_batch, self.output_schema_names)
             if self.row_tracking_enabled and self.system_fields:
                 record_batch = self._assign_row_tracking(record_batch)
             return record_batch
@@ -206,38 +202,21 @@ class DataFileBatchReader(RecordBatchReader):
             return None
         return BlobDescriptor.deserialize(raw)
 
-    def _expand_batch_to_schema(self, record_batch: RecordBatch, schema_names: List[str]) -> RecordBatch:
-        num_rows = record_batch.num_rows
-        batch_names = record_batch.schema.names
-        arrays = []
-        out_fields = []
-        for name in schema_names:
-            if name in batch_names:
-                idx = batch_names.index(name)
-                arrays.append(record_batch.column(idx))
-                out_fields.append(record_batch.schema.field(idx))
-            else:
-                pa_type = pa.null()
-                if name in self.schema_map:
-                    pa_type = self.schema_map[name].type
-                arrays.append(pa.nulls(num_rows, type=pa_type))
-                out_fields.append(pa.field(name, pa_type, nullable=True))
-        return pa.RecordBatch.from_arrays(arrays, schema=pa.schema(out_fields))
-
     def _assign_row_tracking(self, record_batch: RecordBatch) -> RecordBatch:
-        """Assign row tracking meta fields (_ROW_ID and _SEQUENCE_NUMBER). Call after batch is expanded to full schema."""
+        """Assign row tracking meta fields (_ROW_ID and _SEQUENCE_NUMBER)."""
         arrays = list(record_batch.columns)
-        num_rows = record_batch.num_rows
 
-        if self.first_row_id is not None and SpecialFields.ROW_ID.name in self.system_fields.keys():
+        # Handle _ROW_ID field
+        if SpecialFields.ROW_ID.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.ROW_ID.name]
-            if idx < len(arrays):
-                arrays[idx] = pa.array(range(self.first_row_id, self.first_row_id + num_rows), type=pa.int64())
+            # Create a new array that fills with computed row IDs
+            arrays[idx] = pa.array(range(self.first_row_id, self.first_row_id + record_batch.num_rows), type=pa.int64())
 
+        # Handle _SEQUENCE_NUMBER field
         if SpecialFields.SEQUENCE_NUMBER.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.SEQUENCE_NUMBER.name]
-            if idx < len(arrays):
-                arrays[idx] = pa.repeat(self.max_sequence_number, num_rows)
+            # Create a new array that fills with max_sequence_number
+            arrays[idx] = pa.repeat(self.max_sequence_number, record_batch.num_rows)
 
         names = record_batch.schema.names
         table = None

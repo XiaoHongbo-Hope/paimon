@@ -114,29 +114,13 @@ class SplitRead(ABC):
         """Create a record reader for the given split."""
 
     def file_reader_supplier(self, file: DataFileMeta, for_merge_read: bool,
-                             read_fields: List[str], row_tracking_enabled: bool,
-                             merge_output_fields: Optional[List[DataField]] = None,
-                             output_schema_names: Optional[List[str]] = None) -> RecordBatchReader:
+                             read_fields: List[str], row_tracking_enabled: bool) -> RecordBatchReader:
         (read_file_fields, read_arrow_predicate) = self._get_fields_and_predicate(file.schema_id, read_fields)
 
         # Use external_path if available, otherwise use file_path
         file_path = file.external_path if file.external_path else file.file_path
         _, extension = os.path.splitext(file_path)
         file_format = extension[1:]
-        is_blob_file = file_format == CoreOptions.FILE_FORMAT_BLOB
-
-        # Only when used inside a merge (for_merge_read): each reader returns just its columns.
-        # Single-file read still expands to full schema so row tracking has enough columns.
-        if for_merge_read and merge_output_fields is not None and not is_blob_file:
-            columns_for_format = read_file_fields
-            output_schema_pa = None
-        elif merge_output_fields is not None and not is_blob_file:
-            partition_keys = set(self.table.partition_keys or [])
-            columns_for_format = [f.name for f in merge_output_fields if f.name not in partition_keys]
-            output_schema_pa = PyarrowFieldParser.from_paimon_schema(merge_output_fields)
-        else:
-            columns_for_format = read_file_fields
-            output_schema_pa = None
 
         batch_size = self.table.options.read_batch_size()
 
@@ -153,35 +137,21 @@ class SplitRead(ABC):
             format_reader = FormatLanceReader(self.table.file_io, file_path, read_file_fields,
                                               read_arrow_predicate, batch_size=batch_size)
         elif file_format == CoreOptions.FILE_FORMAT_PARQUET or file_format == CoreOptions.FILE_FORMAT_ORC:
-            format_reader = FormatPyArrowReader(
-                self.table.file_io, file_format, file_path,
-                columns_for_format, read_arrow_predicate, batch_size=batch_size,
-                output_schema=output_schema_pa
-            )
+            format_reader = FormatPyArrowReader(self.table.file_io, file_format, file_path,
+                                                read_file_fields, read_arrow_predicate, batch_size=batch_size)
         else:
             raise ValueError(f"Unexpected file format: {file_format}")
 
         blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
         blob_descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
 
-        index_mapping = (
-            None
-            if (merge_output_fields is not None and not is_blob_file)
-            else self.create_index_mapping()
-        )
+        index_mapping = self.create_index_mapping()
         partition_info = self._create_partition_info()
         system_fields = SpecialFields.find_system_fields(self.read_fields)
         table_schema_fields = (
             SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
             if row_tracking_enabled else self.table.table_schema.fields
         )
-        output_schema_names = output_schema_names if output_schema_names is not None else [f.name for f in self.read_fields]
-        if output_schema_names is not None and output_schema_names != [f.name for f in self.read_fields]:
-            system_fields = {
-                name: output_schema_names.index(name)
-                for name in (SpecialFields.ROW_ID.name, SpecialFields.SEQUENCE_NUMBER.name)
-                if name in output_schema_names
-            }
         if for_merge_read:
             return DataFileBatchReader(
                 format_reader,
@@ -195,8 +165,7 @@ class SplitRead(ABC):
                 system_fields,
                 blob_as_descriptor=blob_as_descriptor,
                 blob_descriptor_fields=blob_descriptor_fields,
-                file_io=self.table.file_io,
-                output_schema_names=output_schema_names)
+                file_io=self.table.file_io)
         else:
             return DataFileBatchReader(
                 format_reader,
@@ -210,8 +179,7 @@ class SplitRead(ABC):
                 system_fields,
                 blob_as_descriptor=blob_as_descriptor,
                 blob_descriptor_fields=blob_descriptor_fields,
-                file_io=self.table.file_io,
-                output_schema_names=output_schema_names)
+                file_io=self.table.file_io)
 
     def _get_fields_and_predicate(self, schema_id: int, read_fields):
         key = (schema_id, tuple(read_fields))
@@ -515,9 +483,7 @@ class DataEvolutionSplitRead(SplitRead):
             if len(need_merge_files) == 1 or not self.read_fields:
                 # No need to merge fields, just create a single file reader
                 suppliers.append(
-                    lambda f=need_merge_files[0], mof=self.read_fields: self._create_file_reader(
-                        f, self._get_final_read_data_fields(), merge_output_fields=mof
-                    )
+                    lambda f=need_merge_files[0]: self._create_file_reader(f, self._get_final_read_data_fields())
                 )
             else:
                 suppliers.append(
@@ -632,23 +598,17 @@ class DataEvolutionSplitRead(SplitRead):
                 table_fields = self.read_fields
                 self.read_fields = read_fields  # create reader based on read_fields
                 batch_size = self.table.options.read_batch_size()
-                merge_output_fields = all_read_fields
                 # Create reader for this bunch
                 if len(bunch.files()) == 1:
-                    suppliers = [
-                        lambda f=bunch.files()[0], rn=read_field_names, mof=merge_output_fields: (
-                            self._create_file_reader(f, rn, merge_output_fields=mof, for_merge_read=True)
-                        )
-                    ]
+                    suppliers = [lambda r=self._create_file_reader(
+                        bunch.files()[0], read_field_names
+                    ): r]
                     file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 else:
                     # Create concatenated reader for multiple files
                     suppliers = [
                         partial(self._create_file_reader, file=file,
-                                read_fields=read_field_names,
-                                merge_output_fields=merge_output_fields,
-                                for_merge_read=True)
-                        for file in bunch.files()
+                                read_fields=read_field_names) for file in bunch.files()
                     ]
                     file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 self.read_fields = table_fields
@@ -660,22 +620,16 @@ class DataEvolutionSplitRead(SplitRead):
                     raise ValueError(f"Field {field} is not null but can't find any file contains it.")
 
         output_schema = PyarrowFieldParser.from_paimon_schema(all_read_fields)
-        return DataEvolutionMergeReader(
-            row_offsets, field_offsets, file_record_readers, schema=output_schema
-        )
+        return DataEvolutionMergeReader(row_offsets, field_offsets, file_record_readers, schema=output_schema)
 
-    def _create_file_reader(self, file: DataFileMeta, read_fields: [str],
-                            merge_output_fields: Optional[List[DataField]] = None,
-                            for_merge_read: bool = False) -> Optional[RecordReader]:
+    def _create_file_reader(self, file: DataFileMeta, read_fields: [str]) -> Optional[RecordReader]:
         """Create a file reader for a single file."""
         def create_record_reader():
             return self.file_reader_supplier(
                 file=file,
-                for_merge_read=for_merge_read,
+                for_merge_read=False,
                 read_fields=read_fields,
-                row_tracking_enabled=True,
-                merge_output_fields=merge_output_fields,
-                output_schema_names=read_fields if for_merge_read else None)
+                row_tracking_enabled=True)
         if self.row_ranges is None:
             return create_record_reader()
         row_ranges = Range.and_(self.row_ranges, [file.row_id_range()])
