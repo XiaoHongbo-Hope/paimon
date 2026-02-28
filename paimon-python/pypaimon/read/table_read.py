@@ -92,9 +92,6 @@ class TableRead:
             return self._convert_descriptor_stored_fields_for_read(table)
 
     def _convert_descriptor_stored_fields_for_read(self, table: pyarrow.Table) -> pyarrow.Table:
-        if CoreOptions.blob_as_descriptor(self.table.options):
-            return table
-
         descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
         if not descriptor_fields:
             return table

@@ -207,7 +207,11 @@ class DataEvolutionMergeReader(RecordBatchReader):
         for i in range(len(self.row_offsets)):
             batch_index = self.row_offsets[i]
             if batch_index >= 0 and batches[batch_index] is not None:
-                columns.append(batches[batch_index].column(i).slice(0, min_rows))
+                batch = batches[batch_index]
+                if i < batch.num_columns:
+                    columns.append(batch.column(i).slice(0, min_rows))
+                else:
+                    columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
             else:
                 columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
 

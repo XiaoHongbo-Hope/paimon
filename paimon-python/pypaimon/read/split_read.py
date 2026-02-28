@@ -158,17 +158,30 @@ class SplitRead(ABC):
         blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
         blob_descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
 
-        index_mapping = (
-            None
-            if (merge_output_fields is not None and not is_blob_file)
-            else self.create_index_mapping()
-        )
+        if merge_output_fields is not None and is_blob_file:
+            full_names = [f.name for f in merge_output_fields]
+            index_mapping = [
+                read_file_fields.index(name) if name in read_file_fields else NULL_FIELD_INDEX
+                for name in full_names
+            ]
+            output_field_names = full_names
+            table_schema_fields = merge_output_fields
+        elif merge_output_fields is not None and not is_blob_file:
+            index_mapping = None
+            output_field_names = None
+            table_schema_fields = (
+                SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
+                if row_tracking_enabled else self.table.table_schema.fields
+            )
+        else:
+            index_mapping = self.create_index_mapping()
+            output_field_names = None
+            table_schema_fields = (
+                SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
+                if row_tracking_enabled else self.table.table_schema.fields
+            )
         partition_info = self._create_partition_info()
         system_fields = SpecialFields.find_system_fields(self.read_fields)
-        table_schema_fields = (
-            SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
-            if row_tracking_enabled else self.table.table_schema.fields
-        )
         if for_merge_read:
             return DataFileBatchReader(
                 format_reader,
@@ -182,7 +195,8 @@ class SplitRead(ABC):
                 system_fields,
                 blob_as_descriptor=blob_as_descriptor,
                 blob_descriptor_fields=blob_descriptor_fields,
-                file_io=self.table.file_io)
+                file_io=self.table.file_io,
+                output_field_names=output_field_names)
         else:
             return DataFileBatchReader(
                 format_reader,
@@ -196,7 +210,8 @@ class SplitRead(ABC):
                 system_fields,
                 blob_as_descriptor=blob_as_descriptor,
                 blob_descriptor_fields=blob_descriptor_fields,
-                file_io=self.table.file_io)
+                file_io=self.table.file_io,
+                output_field_names=output_field_names)
 
     def _get_fields_and_predicate(self, schema_id: int, read_fields):
         key = (schema_id, tuple(read_fields))

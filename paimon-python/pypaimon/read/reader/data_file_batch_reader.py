@@ -43,7 +43,8 @@ class DataFileBatchReader(RecordBatchReader):
                  system_fields: dict,
                  blob_as_descriptor: bool = False,
                  blob_descriptor_fields: Optional[set] = None,
-                 file_io: Optional[FileIO] = None):
+                 file_io: Optional[FileIO] = None,
+                 output_field_names: Optional[List[str]] = None):
         self.format_reader = format_reader
         self.index_mapping = index_mapping
         self.partition_info = partition_info
@@ -56,6 +57,7 @@ class DataFileBatchReader(RecordBatchReader):
         self.blob_as_descriptor = blob_as_descriptor
         self.blob_descriptor_fields = blob_descriptor_fields or set()
         self.file_io = file_io
+        self.output_field_names = output_field_names
         self.blob_field_names = {
             field.name
             for field in fields
@@ -110,7 +112,9 @@ class DataFileBatchReader(RecordBatchReader):
                 else:
                     null_array = pa.nulls(num_rows)
                     mapped_arrays.append(null_array)
-                    mapped_names.append(f"null_col_{i}")
+                    name = (self.output_field_names[i] if self.output_field_names and i < len(self.output_field_names)
+                            else f"null_col_{i}")
+                    mapped_names.append(name)
 
             if self.system_primary_key:
                 for i in range(len(self.system_primary_key)):
@@ -155,7 +159,9 @@ class DataFileBatchReader(RecordBatchReader):
             field_idx = record_batch.schema.get_field_index(field_name)
             values = record_batch.column(field_idx).to_pylist()
 
-            if self.blob_as_descriptor:
+            if field_name in self.descriptor_blob_fields:
+                converted = [self._blob_cell_to_data(v) for v in values]
+            elif self.blob_as_descriptor:
                 converted = [self._normalize_blob_cell(v) for v in values]
             else:
                 converted = [self._blob_cell_to_data(v) for v in values]
