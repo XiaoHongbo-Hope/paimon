@@ -491,9 +491,10 @@ class DataEvolutionSplitRead(SplitRead):
 
         # Split files by row ID
         split_by_row_id = self._split_by_row_id(files)
-        # No need to merge fields, just create a single file reader
+
         for need_merge_files in split_by_row_id:
             if len(need_merge_files) == 1 or not self.read_fields:
+                # No need to merge fields, just create a single file reader
                 suppliers.append(
                     lambda f=need_merge_files[0], mof=self.read_fields: self._create_file_reader(
                         f, self._get_final_read_data_fields(), merge_output_fields=mof
