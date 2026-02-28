@@ -160,22 +160,18 @@ class SplitRead(ABC):
 
         index_mapping = None if merge_output_fields is not None else self.create_index_mapping()
         partition_info = self._create_partition_info()
-        output_fields = (
-            merge_output_fields
-            if merge_output_fields is not None
-            else (
-                SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
-                if row_tracking_enabled else self.table.table_schema.fields
-            )
+        system_fields = SpecialFields.find_system_fields(self.read_fields)
+        table_schema_fields = (
+            SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
+            if row_tracking_enabled else self.table.table_schema.fields
         )
-        system_fields = SpecialFields.find_system_fields(output_fields)
         if for_merge_read:
             return DataFileBatchReader(
                 format_reader,
                 index_mapping,
                 partition_info,
                 self.trimmed_primary_key,
-                output_fields,
+                table_schema_fields,
                 file.max_sequence_number,
                 file.first_row_id,
                 row_tracking_enabled,
@@ -189,7 +185,7 @@ class SplitRead(ABC):
                 index_mapping,
                 partition_info,
                 None,
-                output_fields,
+                table_schema_fields,
                 file.max_sequence_number,
                 file.first_row_id,
                 row_tracking_enabled,
@@ -495,7 +491,7 @@ class DataEvolutionSplitRead(SplitRead):
 
         # Split files by row ID
         split_by_row_id = self._split_by_row_id(files)
-
+        # No need to merge fields, just create a single file reader
         for need_merge_files in split_by_row_id:
             if len(need_merge_files) == 1 or not self.read_fields:
                 suppliers.append(
