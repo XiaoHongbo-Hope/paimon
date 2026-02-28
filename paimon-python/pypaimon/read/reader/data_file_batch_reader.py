@@ -16,7 +16,7 @@
 # limitations under the License.
 ################################################################################
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import pyarrow as pa
 from pyarrow import RecordBatch
@@ -28,8 +28,6 @@ from pypaimon.read.reader.iface.record_batch_reader import RecordBatchReader
 from pypaimon.schema.data_types import DataField, PyarrowFieldParser
 from pypaimon.table.row.blob import Blob, BlobDescriptor
 from pypaimon.table.special_fields import SpecialFields
-
-_KEY_PREFIX = "_KEY_"
 
 
 class DataFileBatchReader(RecordBatchReader):
@@ -68,33 +66,6 @@ class DataFileBatchReader(RecordBatchReader):
             for field_name in self.blob_descriptor_fields
             if field_name in self.blob_field_names
         }
-        self.requested_field_names = [field.name for field in fields] if fields else None
-        self.fields = fields
-
-    def _align_to_requested_names(
-        self,
-        inter_arrays: List,
-        inter_names: List,
-        requested_field_names: List[str],
-        num_rows: int,
-    ) -> Tuple[List, List]:
-        name_to_idx = {n: i for i, n in enumerate(inter_names)}
-        ordered_arrays = []
-        ordered_names = []
-        for name in requested_field_names:
-            idx = name_to_idx.get(name)
-            if idx is None and name.startswith(_KEY_PREFIX) and name[len(_KEY_PREFIX):] in name_to_idx:
-                idx = name_to_idx[name[len(_KEY_PREFIX):]]
-            if idx is not None:
-                ordered_arrays.append(inter_arrays[idx])
-                ordered_names.append(name)
-            else:
-                field = self.schema_map.get(name)
-                ordered_arrays.append(
-                    pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
-                )
-                ordered_names.append(name)
-        return ordered_arrays, ordered_names
 
     def read_arrow_batch(self, start_idx=None, end_idx=None) -> Optional[RecordBatch]:
         if isinstance(self.format_reader, FormatBlobReader):
@@ -104,17 +75,9 @@ class DataFileBatchReader(RecordBatchReader):
         if record_batch is None:
             return None
 
-        num_rows = record_batch.num_rows
         if self.partition_info is None and self.index_mapping is None:
             if self.row_tracking_enabled and self.system_fields:
                 record_batch = self._assign_row_tracking(record_batch)
-            if self.requested_field_names is not None:
-                inter_arrays = list(record_batch.columns)
-                inter_names = list(record_batch.schema.names)
-                ordered_arrays, ordered_names = self._align_to_requested_names(
-                    inter_arrays, inter_names, self.requested_field_names, num_rows
-                )
-                record_batch = pa.RecordBatch.from_arrays(ordered_arrays, ordered_names)
             return record_batch
 
         inter_arrays = []
@@ -130,127 +93,32 @@ class DataFileBatchReader(RecordBatchReader):
                     inter_names.append(partition_field.name)
                 else:
                     real_index = self.partition_info.get_real_index(i)
-                    name = (
-                        self.requested_field_names[i]
-                        if self.requested_field_names and i < len(self.requested_field_names)
-                        else f"_col_{i}"
-                    )
-                    batch_names = record_batch.schema.names
-                    col_idx = None
-                    if name in batch_names:
-                        col_idx = record_batch.schema.get_field_index(name)
-                    elif name.startswith(_KEY_PREFIX) and name[len(_KEY_PREFIX):] in batch_names:
-                        col_idx = record_batch.schema.get_field_index(name[len(_KEY_PREFIX):])
-                    if col_idx is not None:
-                        inter_arrays.append(record_batch.column(col_idx))
-                        inter_names.append(name)
-                    elif real_index < record_batch.num_columns:
+                    if real_index < record_batch.num_columns:
                         inter_arrays.append(record_batch.column(real_index))
-                        inter_names.append(name)
-                    else:
-                        field = self.schema_map.get(name)
-                        inter_arrays.append(
-                            pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
-                        )
-                        inter_names.append(name)
+                        inter_names.append(record_batch.schema.field(real_index).name)
         else:
-            inter_arrays = list(record_batch.columns)
-            inter_names = list(record_batch.schema.names)
+            inter_arrays = record_batch.columns
+            inter_names = record_batch.schema.names
 
-        if self.requested_field_names is not None:
-            inter_arrays, inter_names = self._align_to_requested_names(
-                inter_arrays, inter_names, self.requested_field_names, num_rows
-            )
-
-        if self.index_mapping is not None and not (
-                self.requested_field_names is not None and inter_names == self.requested_field_names):
+        if self.index_mapping is not None:
             mapped_arrays = []
             mapped_names = []
-            partition_names = (
-                set(pf.name for pf in self.partition_info.partition_fields)
-                if self.partition_info else set()
-            )
-            non_partition_indices = [idx for idx, name in enumerate(inter_names) if name not in partition_names]
             for i, real_index in enumerate(self.index_mapping):
-                if 0 <= real_index < len(non_partition_indices):
-                    actual_index = non_partition_indices[real_index]
-                    mapped_arrays.append(inter_arrays[actual_index])
-                    mapped_names.append(inter_names[actual_index])
+                if 0 <= real_index < len(inter_arrays):
+                    mapped_arrays.append(inter_arrays[real_index])
+                    mapped_names.append(inter_names[real_index])
                 else:
-                    if self.requested_field_names and i < len(self.requested_field_names):
-                        name = self.requested_field_names[i]
-                    elif self.fields and i < len(self.fields):
-                        name = self.fields[i].name
-                    else:
-                        raise ValueError(
-                            f"Cannot resolve name for null column at i={i}: "
-                            "need requested_field_names or fields"
-                        )
-                    field = self.schema_map.get(name)
-                    null_array = pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
+                    null_array = pa.nulls(num_rows)
                     mapped_arrays.append(null_array)
-                    mapped_names.append(name)
-
-            if self.partition_info:
-                partition_arrays_map = {
-                    inter_names[i]: inter_arrays[i]
-                    for i in range(len(inter_names))
-                    if inter_names[i] in partition_names
-                }
-
-                if self.requested_field_names:
-                    final_arrays = []
-                    final_names = []
-                    mapped_name_to_array = {name: arr for name, arr in zip(mapped_names, mapped_arrays)}
-
-                    for name in self.requested_field_names:
-                        if name in mapped_name_to_array:
-                            final_arrays.append(mapped_name_to_array[name])
-                            final_names.append(name)
-                        elif name in partition_arrays_map:
-                            final_arrays.append(partition_arrays_map[name])
-                            final_names.append(name)
-                        else:
-                            # Field not in file (e.g. index_mapping -1): output null column
-                            field = self.schema_map.get(name)
-                            null_arr = pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
-                            final_arrays.append(null_arr)
-                            final_names.append(name)
-
-                    inter_arrays = final_arrays
-                    inter_names = final_names
-                else:
-                    mapped_name_set = set(mapped_names)
-                    for name, arr in partition_arrays_map.items():
-                        if name not in mapped_name_set:
-                            mapped_arrays.append(arr)
-                            mapped_names.append(name)
-                    inter_arrays = mapped_arrays
-                    inter_names = mapped_names
-            else:
-                inter_arrays = mapped_arrays
-                inter_names = mapped_names
+                    mapped_names.append(f"null_col_{i}")
 
             if self.system_primary_key:
                 for i in range(len(self.system_primary_key)):
-                    if i < len(inter_names) and not inter_names[i].startswith(_KEY_PREFIX):
-                        inter_names[i] = f"{_KEY_PREFIX}{inter_names[i]}"
+                    if not mapped_names[i].startswith("_KEY_"):
+                        mapped_names[i] = f"_KEY_{mapped_names[i]}"
 
-        if self.requested_field_names is not None and len(inter_arrays) < len(self.requested_field_names):
-            for name in self.requested_field_names[len(inter_arrays):]:
-                field = self.schema_map.get(name)
-                inter_arrays.append(
-                    pa.nulls(num_rows, type=field.type) if field is not None else pa.nulls(num_rows)
-                )
-                inter_names.append(name)
-
-        for i, name in enumerate(inter_names):
-            target_field = self.schema_map.get(name)
-            if target_field is not None and inter_arrays[i].type != target_field.type:
-                try:
-                    inter_arrays[i] = inter_arrays[i].cast(target_field.type)
-                except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
-                    inter_arrays[i] = pa.nulls(num_rows, type=target_field.type)
+            inter_arrays = mapped_arrays
+            inter_names = mapped_names
 
         # to contains 'not null' property
         final_fields = []
@@ -337,28 +205,18 @@ class DataFileBatchReader(RecordBatchReader):
     def _assign_row_tracking(self, record_batch: RecordBatch) -> RecordBatch:
         """Assign row tracking meta fields (_ROW_ID and _SEQUENCE_NUMBER)."""
         arrays = list(record_batch.columns)
-        num_cols = len(arrays)
 
         # Handle _ROW_ID field
         if SpecialFields.ROW_ID.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.ROW_ID.name]
             # Create a new array that fills with computed row IDs
-            if idx < num_cols:
-                if self.first_row_id is None:
-                    raise ValueError(
-                        "Row tracking requires first_row_id on the file; "
-                        "got None. Ensure file metadata has first_row_id when reading _ROW_ID."
-                    )
-                arrays[idx] = pa.array(
-                    range(self.first_row_id, self.first_row_id + record_batch.num_rows),
-                    type=pa.int64())
+            arrays[idx] = pa.array(range(self.first_row_id, self.first_row_id + record_batch.num_rows), type=pa.int64())
 
         # Handle _SEQUENCE_NUMBER field
         if SpecialFields.SEQUENCE_NUMBER.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.SEQUENCE_NUMBER.name]
             # Create a new array that fills with max_sequence_number
-            if idx < num_cols:
-                arrays[idx] = pa.repeat(self.max_sequence_number, record_batch.num_rows)
+            arrays[idx] = pa.repeat(self.max_sequence_number, record_batch.num_rows)
 
         names = record_batch.schema.names
         table = None
