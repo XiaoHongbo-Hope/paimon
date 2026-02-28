@@ -221,10 +221,10 @@ class DataFileBatchReader(RecordBatchReader):
         names = record_batch.schema.names
         table = None
         for i, name in enumerate(names):
-            field = pa.field(
-                name, arrays[i].type,
-                nullable=record_batch.schema.field(name).nullable
-            )
+            nullable = record_batch.schema.field(name).nullable
+            if SpecialFields.is_system_field(name):
+                nullable = False
+            field = pa.field(name, arrays[i].type, nullable=nullable)
             if table is None:
                 table = pa.table({name: arrays[i]}, schema=pa.schema([field]))
             else:

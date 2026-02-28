@@ -33,10 +33,12 @@ class FormatPyArrowReader(RecordBatchReader):
     """
 
     def __init__(self, file_io: FileIO, file_format: str, file_path: str, read_fields: List[str],
-                 push_down_predicate: Any, batch_size: int = 1024):
+                 push_down_predicate: Any, batch_size: int = 1024,
+                 output_schema: Optional[pa.Schema] = None):
         file_path_for_pyarrow = file_io.to_filesystem_path(file_path)
         self.dataset = ds.dataset(file_path_for_pyarrow, format=file_format, filesystem=file_io.filesystem)
         self.read_fields = read_fields
+        self.output_schema = output_schema
 
         # Identify which fields exist in the file and which are missing
         file_schema_names = set(self.dataset.schema.names)
@@ -57,8 +59,17 @@ class FormatPyArrowReader(RecordBatchReader):
             if not self.missing_fields:
                 return batch
 
-            # Create columns for missing fields with null values
-            missing_columns = [pa.nulls(batch.num_rows, type=pa.null()) for _ in self.missing_fields]
+            def _type_for_missing(name: str) -> pa.DataType:
+                if self.output_schema is not None:
+                    idx = self.output_schema.get_field_index(name)
+                    if idx >= 0:
+                        return self.output_schema.field(idx).type
+                return pa.null()
+
+            missing_columns = [
+                pa.nulls(batch.num_rows, type=_type_for_missing(name))
+                for name in self.missing_fields
+            ]
 
             # Reconstruct the batch with all fields in the correct order
             all_columns = []
@@ -72,8 +83,9 @@ class FormatPyArrowReader(RecordBatchReader):
                 else:
                     # Get the column from missing fields
                     column_idx = self.missing_fields.index(field_name)
+                    col_type = _type_for_missing(field_name)
                     all_columns.append(missing_columns[column_idx])
-                    out_fields.append(pa.field(field_name, pa.null(), nullable=True))
+                    out_fields.append(pa.field(field_name, col_type, nullable=True))
             # Create a new RecordBatch with all columns
             return pa.RecordBatch.from_arrays(all_columns, schema=pa.schema(out_fields))
 
