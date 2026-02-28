@@ -149,6 +149,8 @@ class DataEvolutionMergeReader(RecordBatchReader):
         field_offsets: List[int],
         readers: List[Optional[RecordBatchReader]],
         schema: pa.Schema,
+        first_row_id: Optional[int] = None,
+        max_sequence_number: Optional[int] = None,
     ):
         if row_offsets is None:
             raise ValueError("Row offsets must not be null")
@@ -164,6 +166,8 @@ class DataEvolutionMergeReader(RecordBatchReader):
         self.field_offsets = field_offsets
         self.readers = readers
         self.schema = schema
+        self.first_row_id = first_row_id
+        self.max_sequence_number = max_sequence_number
         self._buffers: List[Optional[RecordBatch]] = [None] * len(readers)
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
@@ -206,10 +210,11 @@ class DataEvolutionMergeReader(RecordBatchReader):
         columns = []
         for i in range(len(self.row_offsets)):
             batch_index = self.row_offsets[i]
+            field_offset = self.field_offsets[i]
             if batch_index >= 0 and batches[batch_index] is not None:
                 batch = batches[batch_index]
-                if i < batch.num_columns:
-                    columns.append(batch.column(i).slice(0, min_rows))
+                if 0 <= field_offset < batch.num_columns:
+                    columns.append(batch.column(field_offset).slice(0, min_rows))
                 else:
                     columns.append(pa.nulls(min_rows, type=self.schema.field(i).type))
             else:
@@ -219,7 +224,28 @@ class DataEvolutionMergeReader(RecordBatchReader):
             if batches[i] is not None and batches[i].num_rows > min_rows:
                 self._buffers[i] = batches[i].slice(min_rows, batches[i].num_rows - min_rows)
 
-        return pa.RecordBatch.from_arrays(columns, schema=self.schema)
+        batch = pa.RecordBatch.from_arrays(columns, schema=self.schema)
+        if self.first_row_id is not None and self.max_sequence_number is not None:
+            batch = self._fill_row_tracking(batch)
+        return batch
+
+    def _fill_row_tracking(self, batch: RecordBatch) -> RecordBatch:
+        nrows = batch.num_rows
+        arrays = list(batch.columns)
+        filled = False
+        for i in range(len(batch.schema)):
+            name = batch.schema.field(i).name
+            if name == "_ROW_ID":
+                arrays[i] = pa.array(
+                    range(self.first_row_id, self.first_row_id + nrows), type=pa.int64()
+                )
+                filled = True
+            elif name == "_SEQUENCE_NUMBER":
+                arrays[i] = pa.repeat(self.max_sequence_number, nrows)
+                filled = True
+        if not filled:
+            return batch
+        return pa.RecordBatch.from_arrays(arrays, schema=batch.schema)
 
     def close(self) -> None:
         try:

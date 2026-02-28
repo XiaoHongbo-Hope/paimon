@@ -211,18 +211,19 @@ class DataFileBatchReader(RecordBatchReader):
     def _assign_row_tracking(self, record_batch: RecordBatch) -> RecordBatch:
         """Assign row tracking meta fields (_ROW_ID and _SEQUENCE_NUMBER)."""
         arrays = list(record_batch.columns)
+        num_rows = record_batch.num_rows
 
-        # Handle _ROW_ID field
+        # Handle _ROW_ID field (only if batch has that column index)
         if SpecialFields.ROW_ID.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.ROW_ID.name]
-            # Create a new array that fills with computed row IDs
-            arrays[idx] = pa.array(range(self.first_row_id, self.first_row_id + record_batch.num_rows), type=pa.int64())
+            if idx < len(arrays):
+                arrays[idx] = pa.array(range(self.first_row_id, self.first_row_id + num_rows), type=pa.int64())
 
-        # Handle _SEQUENCE_NUMBER field
+        # Handle _SEQUENCE_NUMBER field (only if batch has that column index)
         if SpecialFields.SEQUENCE_NUMBER.name in self.system_fields.keys():
             idx = self.system_fields[SpecialFields.SEQUENCE_NUMBER.name]
-            # Create a new array that fills with max_sequence_number
-            arrays[idx] = pa.repeat(self.max_sequence_number, record_batch.num_rows)
+            if idx < len(arrays):
+                arrays[idx] = pa.repeat(self.max_sequence_number, num_rows)
 
         names = record_batch.schema.names
         table = None

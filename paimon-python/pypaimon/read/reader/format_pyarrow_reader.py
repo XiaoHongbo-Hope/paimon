@@ -86,7 +86,7 @@ class FormatPyArrowReader(RecordBatchReader):
                     column_idx = self.missing_fields.index(field_name)
                     col_type = _type_for_missing(field_name)
                     all_columns.append(missing_columns[column_idx])
-                    nullable = not SpecialFields.is_system_field(field_name)
+                    nullable = True if col_type == pa.null() else not SpecialFields.is_system_field(field_name)
                     out_fields.append(pa.field(field_name, col_type, nullable=nullable))
             # Create a new RecordBatch with all columns
             return pa.RecordBatch.from_arrays(all_columns, schema=pa.schema(out_fields))

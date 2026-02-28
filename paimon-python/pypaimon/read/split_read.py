@@ -124,7 +124,12 @@ class SplitRead(ABC):
         file_format = extension[1:]
         is_blob_file = file_format == CoreOptions.FILE_FORMAT_BLOB
 
-        if merge_output_fields is not None and not is_blob_file:
+        # Only when used inside a merge (for_merge_read): each reader returns just its columns.
+        # Single-file read still expands to full schema so row tracking has enough columns.
+        if for_merge_read and merge_output_fields is not None and not is_blob_file:
+            columns_for_format = read_file_fields
+            output_schema_pa = None
+        elif merge_output_fields is not None and not is_blob_file:
             partition_keys = set(self.table.partition_keys or [])
             columns_for_format = [f.name for f in merge_output_fields if f.name not in partition_keys]
             output_schema_pa = PyarrowFieldParser.from_paimon_schema(merge_output_fields)
@@ -158,30 +163,17 @@ class SplitRead(ABC):
         blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
         blob_descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
 
-        if merge_output_fields is not None and is_blob_file:
-            full_names = [f.name for f in merge_output_fields]
-            index_mapping = [
-                read_file_fields.index(name) if name in read_file_fields else NULL_FIELD_INDEX
-                for name in full_names
-            ]
-            output_field_names = full_names
-            table_schema_fields = merge_output_fields
-        elif merge_output_fields is not None and not is_blob_file:
-            index_mapping = None
-            output_field_names = None
-            table_schema_fields = (
-                SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
-                if row_tracking_enabled else self.table.table_schema.fields
-            )
-        else:
-            index_mapping = self.create_index_mapping()
-            output_field_names = None
-            table_schema_fields = (
-                SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
-                if row_tracking_enabled else self.table.table_schema.fields
-            )
+        index_mapping = (
+            None
+            if (merge_output_fields is not None and not is_blob_file)
+            else self.create_index_mapping()
+        )
         partition_info = self._create_partition_info()
         system_fields = SpecialFields.find_system_fields(self.read_fields)
+        table_schema_fields = (
+            SpecialFields.row_type_with_row_tracking(self.table.table_schema.fields)
+            if row_tracking_enabled else self.table.table_schema.fields
+        )
         if for_merge_read:
             return DataFileBatchReader(
                 format_reader,
@@ -195,8 +187,7 @@ class SplitRead(ABC):
                 system_fields,
                 blob_as_descriptor=blob_as_descriptor,
                 blob_descriptor_fields=blob_descriptor_fields,
-                file_io=self.table.file_io,
-                output_field_names=output_field_names)
+                file_io=self.table.file_io)
         else:
             return DataFileBatchReader(
                 format_reader,
@@ -210,8 +201,7 @@ class SplitRead(ABC):
                 system_fields,
                 blob_as_descriptor=blob_as_descriptor,
                 blob_descriptor_fields=blob_descriptor_fields,
-                file_io=self.table.file_io,
-                output_field_names=output_field_names)
+                file_io=self.table.file_io)
 
     def _get_fields_and_predicate(self, schema_id: int, read_fields):
         key = (schema_id, tuple(read_fields))
@@ -617,6 +607,10 @@ class DataEvolutionSplitRead(SplitRead):
 
             read_fields = []
             for j, read_field_id in enumerate(read_field_index):
+                # In merge, _ROW_ID and _SEQUENCE_NUMBER are filled from merge metadata, not from file
+                if (SpecialFields.ROW_ID.name == all_read_fields[j].name or
+                        SpecialFields.SEQUENCE_NUMBER.name == all_read_fields[j].name):
+                    continue
                 for field_id in field_ids:
                     if read_field_id == field_id:
                         if row_offsets[j] == -1:
@@ -637,7 +631,7 @@ class DataEvolutionSplitRead(SplitRead):
                 if len(bunch.files()) == 1:
                     suppliers = [
                         lambda f=bunch.files()[0], rn=read_field_names, mof=merge_output_fields: (
-                            self._create_file_reader(f, rn, merge_output_fields=mof)
+                            self._create_file_reader(f, rn, merge_output_fields=mof, for_merge_read=True)
                         )
                     ]
                     file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
@@ -646,28 +640,36 @@ class DataEvolutionSplitRead(SplitRead):
                     suppliers = [
                         partial(self._create_file_reader, file=file,
                                 read_fields=read_field_names,
-                                merge_output_fields=merge_output_fields)
+                                merge_output_fields=merge_output_fields,
+                                for_merge_read=True)
                         for file in bunch.files()
                     ]
                     file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 self.read_fields = table_fields
 
-        # Validate that all required fields are found
+        # Validate that all required fields are found (system fields are filled by merge reader)
         for i, field in enumerate(all_read_fields):
             if row_offsets[i] == -1:
+                if field.name in (SpecialFields.ROW_ID.name, SpecialFields.SEQUENCE_NUMBER.name):
+                    continue
                 if not field.type.nullable:
                     raise ValueError(f"Field {field} is not null but can't find any file contains it.")
 
+        max_sequence_number = max(f.max_sequence_number for f in need_merge_files)
         output_schema = PyarrowFieldParser.from_paimon_schema(all_read_fields)
-        return DataEvolutionMergeReader(row_offsets, field_offsets, file_record_readers, schema=output_schema)
+        return DataEvolutionMergeReader(
+            row_offsets, field_offsets, file_record_readers, schema=output_schema,
+            first_row_id=first_row_id, max_sequence_number=max_sequence_number
+        )
 
     def _create_file_reader(self, file: DataFileMeta, read_fields: [str],
-                            merge_output_fields: Optional[List[DataField]] = None) -> Optional[RecordReader]:
+                            merge_output_fields: Optional[List[DataField]] = None,
+                            for_merge_read: bool = False) -> Optional[RecordReader]:
         """Create a file reader for a single file."""
         def create_record_reader():
             return self.file_reader_supplier(
                 file=file,
-                for_merge_read=False,
+                for_merge_read=for_merge_read,
                 read_fields=read_fields,
                 row_tracking_enabled=True,
                 merge_output_fields=merge_output_fields)
