@@ -158,7 +158,11 @@ class SplitRead(ABC):
         blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
         blob_descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
 
-        index_mapping = None if merge_output_fields is not None else self.create_index_mapping()
+        index_mapping = (
+            None
+            if (merge_output_fields is not None and not is_blob_file)
+            else self.create_index_mapping()
+        )
         partition_info = self._create_partition_info()
         system_fields = SpecialFields.find_system_fields(self.read_fields)
         table_schema_fields = (

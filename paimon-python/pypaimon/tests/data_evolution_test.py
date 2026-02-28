@@ -1272,6 +1272,65 @@ class DataEvolutionTest(unittest.TestCase):
         self.assertEqual(actual_data, expect_data)
         self.assertEqual(len(actual_data.schema), len(expect_data.schema), 'Read output column count must match schema')
 
+    def test_with_blob(self):
+        from pypaimon.table.row.blob import BlobDescriptor
+
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('picture', pa.large_binary()),
+        ])
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true',
+                'blob-as-descriptor': 'true',
+            },
+        )
+        self.catalog.create_table('default.test_with_blob', schema, False)
+        table = self.catalog.get_table('default.test_with_blob')
+
+        blob_path = os.path.join(self.tempdir, 'blob_ev')
+        with open(blob_path, 'wb') as f:
+            f.write(b'x')
+        descriptor = BlobDescriptor(blob_path, 0, 1)
+
+        wb = table.new_batch_write_builder()
+        tw = wb.new_write()
+        tc = wb.new_commit()
+        tw.write_arrow(pa.Table.from_pydict(
+            {'id': [1], 'picture': [descriptor.serialize()]},
+            schema=pa_schema,
+        ))
+        cmts = tw.prepare_commit()
+        if cmts and cmts[0].new_files:
+            for nf in cmts[0].new_files:
+                nf.first_row_id = 0
+            tc.commit(cmts)
+        tw.close()
+        tc.close()
+
+        tw = wb.new_write()
+        tc = wb.new_commit()
+        tw.write_arrow(pa.Table.from_pydict(
+            {'id': [2], 'picture': [descriptor.serialize()]},
+            schema=pa_schema,
+        ))
+        cmts = tw.prepare_commit()
+        if cmts and cmts[0].new_files:
+            for nf in cmts[0].new_files:
+                nf.first_row_id = 1
+            tc.commit(cmts)
+        tw.close()
+        tc.close()
+
+        rb = table.new_read_builder()
+        rb.with_projection(['id', '_ROW_ID', 'picture', '_SEQUENCE_NUMBER'])
+        actual = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        self.assertEqual(actual.num_rows, 2)
+        self.assertEqual(actual.column('id').to_pylist(), [1, 2])
+        self.assertEqual(actual.column('_ROW_ID').to_pylist(), [0, 1])
+
     def test_from_arrays_without_schema(self):
         schema = pa.schema([
             ('f0', pa.int8()),
