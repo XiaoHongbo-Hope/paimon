@@ -616,7 +616,9 @@ class DataEvolutionSplitRead(SplitRead):
                 # Create reader for this bunch
                 if len(bunch.files()) == 1:
                     suppliers = [
-                        lambda f=bunch.files()[0], rn=read_field_names, mof=merge_output_fields: self._create_file_reader(f, rn, merge_output_fields=mof)
+                        lambda f=bunch.files()[0], rn=read_field_names, mof=merge_output_fields: (
+                            self._create_file_reader(f, rn, merge_output_fields=mof)
+                        )
                     ]
                     file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 else:
