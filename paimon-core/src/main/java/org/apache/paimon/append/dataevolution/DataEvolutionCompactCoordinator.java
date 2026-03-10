@@ -216,7 +216,21 @@ public class DataEvolutionCompactCoordinator {
                                 dataFiles);
                         long currentGroupWeight =
                                 fileGroup.stream()
-                                        .mapToLong(d -> Math.max(d.fileSize(), openFileCost))
+                                        .mapToLong(
+                                                d -> {
+                                                    long blobSize =
+                                                            dataFileToBlobFiles
+                                                                    .getOrDefault(
+                                                                            d,
+                                                                            Collections
+                                                                                    .emptyList())
+                                                                    .stream()
+                                                                    .mapToLong(
+                                                                            DataFileMeta::fileSize)
+                                                                    .sum();
+                                                    return Math.max(
+                                                            d.fileSize() + blobSize, openFileCost);
+                                                })
                                         .sum();
                         if (currentGroupWeight > targetFileSize) {
                             // compact current file group to merge field files
