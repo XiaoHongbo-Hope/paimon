@@ -57,11 +57,14 @@ class ReadBuilder:
         )
 
     def new_read(self) -> TableRead:
-        return TableRead(
+        read = TableRead(
             table=self.table,
             predicate=self._predicate,
             read_type=self.read_type()
         )
+        if self._limit is not None:
+            read.with_limit(self._limit)
+        return read
 
     def new_predicate_builder(self) -> PredicateBuilder:
         return PredicateBuilder(self.read_type())

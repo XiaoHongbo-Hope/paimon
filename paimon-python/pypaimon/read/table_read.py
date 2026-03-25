@@ -48,6 +48,11 @@ class TableRead:
         self.predicate = predicate
         self.read_type = read_type
         self.include_row_kind = include_row_kind
+        self.limit = None
+
+    def with_limit(self, limit: int) -> 'TableRead':
+        self.limit = limit
+        return self
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
         def _record_generator():
@@ -259,7 +264,7 @@ class TableRead:
 
     def _create_split_read(self, split: Split) -> SplitRead:
         if self.table.is_primary_key_table and not split.raw_convertible:
-            return MergeFileSplitRead(
+            split_read = MergeFileSplitRead(
                 table=self.table,
                 predicate=self.predicate,
                 read_type=self.read_type,
@@ -267,7 +272,7 @@ class TableRead:
                 row_tracking_enabled=False
             )
         elif self.table.options.data_evolution_enabled():
-            return DataEvolutionSplitRead(
+            split_read = DataEvolutionSplitRead(
                 table=self.table,
                 predicate=self.predicate,
                 read_type=self.read_type,
@@ -275,13 +280,15 @@ class TableRead:
                 row_tracking_enabled=True
             )
         else:
-            return RawFileSplitRead(
+            split_read = RawFileSplitRead(
                 table=self.table,
                 predicate=self.predicate,
                 read_type=self.read_type,
                 split=split,
                 row_tracking_enabled=self.table.options.row_tracking_enabled()
             )
+        split_read.with_limit(self.limit)
+        return split_read
 
     @staticmethod
     def convert_rows_to_arrow_batch(row_tuples: List[tuple], schema: pyarrow.Schema) -> pyarrow.RecordBatch:
