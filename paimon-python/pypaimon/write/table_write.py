@@ -98,6 +98,28 @@ class TableWrite:
             ray_remote_args=ray_remote_args,
         )
 
+    def write_maxframe(
+        self,
+        dataframe: "maxframe.dataframe.DataFrame",
+        overwrite: bool = False,
+        concurrency: Optional[int] = None,
+    ) -> None:
+        """
+        Write a MaxFrame DataFrame to Paimon table.
+
+        The write is distributed: each MaxFrame worker writes data files in
+        parallel using ``apply_chunk``, and a single atomic commit is performed
+        on the client after all workers finish.
+
+        Args:
+            dataframe: MaxFrame DataFrame to write.  This is a distributed,
+                lazily-evaluated DataFrame from the ``maxframe`` package.
+            overwrite: Whether to overwrite existing data.  Defaults to False.
+            concurrency: Reserved for future use.
+        """
+        from pypaimon.write.maxframe_datasink import maxframe_write
+        maxframe_write(self.table, dataframe, overwrite=overwrite)
+
     def close(self):
         self.file_store_write.close()
 
