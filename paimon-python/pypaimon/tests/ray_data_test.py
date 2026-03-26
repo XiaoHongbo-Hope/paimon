@@ -656,6 +656,76 @@ class RayDataTest(unittest.TestCase):
         )
         self.assertEqual(list(df_sorted['value']), [150, 250, 300, 400], "Value column should reflect updates")
 
+    def test_ray_data_with_limit(self):
+        """Test that with_limit() enforces row-level limit across read paths.
+
+        The Python SDK acts as both library and execution engine for direct
+        API callers (unlike Java where Spark/Flink enforce LIMIT). This test
+        verifies that with_limit(N) returns at most N rows via to_arrow(),
+        to_ray() (single block), and to_iterator().
+        """
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('value', pa.int64()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(pa_schema)
+        self.catalog.create_table('default.test_ray_limit', schema, False)
+        table = self.catalog.get_table('default.test_ray_limit')
+
+        # Write 3 commits → 3 splits, 100 rows each → 300 rows total
+        rows_per_commit = 100
+        num_commits = 3
+        for batch_idx in range(num_commits):
+            start = batch_idx * rows_per_commit
+            data = pa.Table.from_pydict({
+                'id': list(range(start, start + rows_per_commit)),
+                'value': [i * 100 for i in range(start, start + rows_per_commit)],
+            }, schema=pa_schema)
+            write_builder = table.new_batch_write_builder()
+            writer = write_builder.new_write()
+            writer.write_arrow(data)
+            commit_messages = writer.prepare_commit()
+            commit = write_builder.new_commit()
+            commit.commit(commit_messages)
+            writer.close()
+
+        # Baseline: no limit → all 300 rows
+        read_builder_all = table.new_read_builder()
+        splits_all = read_builder_all.new_scan().plan().splits()
+        total_rows = rows_per_commit * num_commits
+        self.assertEqual(len(splits_all), num_commits)
+        all_rows = read_builder_all.new_read().to_arrow(splits_all).num_rows
+        self.assertEqual(all_rows, total_rows)
+
+        # with_limit(150): scan keeps splits covering >= 150 rows,
+        # read-level limit truncates to exactly 150 rows
+        limit_value = 150
+        read_builder_limited = table.new_read_builder().with_limit(limit_value)
+        splits_limited = read_builder_limited.new_scan().plan().splits()
+        table_read_limited = read_builder_limited.new_read()
+
+        self.assertEqual(table_read_limited.limit, limit_value)
+        self.assertGreater(len(splits_limited), 1,
+                           "scan should keep multiple splits to cover the limit")
+
+        # to_arrow: single-threaded, global limit → exactly limit_value rows
+        arrow_result = table_read_limited.to_arrow(splits_limited)
+        self.assertEqual(arrow_result.num_rows, limit_value,
+                         "to_arrow should return exactly limit rows")
+
+        # to_iterator: row-by-row, global limit → exactly limit_value rows
+        table_read_iter = table.new_read_builder().with_limit(limit_value).new_read()
+        rows = list(table_read_iter.to_iterator(splits_limited))
+        self.assertEqual(len(rows), limit_value,
+                         "to_iterator should return exactly limit rows")
+
+        # to_ray (single block): all splits in one worker → exactly limit_value rows
+        table_read_ray = table.new_read_builder().with_limit(limit_value).new_read()
+        ray_dataset = table_read_ray.to_ray(splits_limited, override_num_blocks=1)
+        self.assertEqual(ray_dataset.count(), limit_value,
+                         "to_ray (single block) should return exactly limit rows")
+
     def test_ray_data_invalid_parallelism(self):
         pa_schema = pa.schema([
             ('id', pa.int32()),

@@ -122,6 +122,7 @@ class RayDatasource(Datasource):
         table = self.table_read.table
         predicate = self.table_read.predicate
         read_type = self.table_read.read_type
+        limit = self.table_read.limit
         schema = self._schema
 
         # Create a partial function to avoid capturing self in closure
@@ -131,11 +132,14 @@ class RayDatasource(Datasource):
                 table=table,
                 predicate=predicate,
                 read_type=read_type,
+                limit=limit,
                 schema=schema,
         ) -> Iterable[pyarrow.Table]:
             """Read function that will be executed by Ray workers."""
             from pypaimon.read.table_read import TableRead
             worker_table_read = TableRead(table, predicate, read_type)
+            if limit is not None:
+                worker_table_read.with_limit(limit)
 
             batch_reader = worker_table_read.to_arrow_batch_reader(splits)
             has_data = False
@@ -157,6 +161,7 @@ class RayDatasource(Datasource):
             table=table,
             predicate=predicate,
             read_type=read_type,
+            limit=limit,
             schema=schema,
         )
 

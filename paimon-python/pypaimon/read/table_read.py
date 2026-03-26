@@ -56,11 +56,18 @@ class TableRead:
 
     def to_iterator(self, splits: List[Split]) -> Iterator:
         def _record_generator():
+            count = 0
             for split in splits:
+                if self.limit is not None and count >= self.limit:
+                    return
                 reader = self._create_split_read(split).create_reader()
                 try:
                     for batch in iter(reader.read_batch, None):
-                        yield from iter(batch.next, None)
+                        for row in iter(batch.next, None):
+                            if self.limit is not None and count >= self.limit:
+                                return
+                            yield row
+                            count += 1
                 finally:
                     reader.close()
 
@@ -70,7 +77,7 @@ class TableRead:
         schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
         if self.include_row_kind:
             schema = self._add_row_kind_to_schema(schema)
-        batch_iterator = self._arrow_batch_generator(splits, schema)
+        batch_iterator = self._limit_batches(self._arrow_batch_generator(splits, schema))
         return pyarrow.ipc.RecordBatchReader.from_batches(schema, batch_iterator)
 
     @staticmethod
@@ -78,6 +85,32 @@ class TableRead:
         """Add _row_kind column to the schema as the first column."""
         row_kind_field = pyarrow.field(ROW_KIND_COLUMN, pyarrow.string())
         return pyarrow.schema([row_kind_field] + list(schema))
+
+    def _limit_batches(
+        self,
+        batch_iterator: Iterator[pyarrow.RecordBatch]
+    ) -> Iterator[pyarrow.RecordBatch]:
+        """Enforce row-level limit on a batch stream.
+
+        Unlike Java Paimon where query engines (Spark/Flink) enforce LIMIT,
+        the Python SDK serves as both library and execution engine for direct
+        API callers. This method truncates the batch stream to return at most
+        ``self.limit`` rows, slicing the final batch for exact precision.
+        """
+        if self.limit is None:
+            yield from batch_iterator
+            return
+
+        remaining = self.limit
+        for batch in batch_iterator:
+            if remaining <= 0:
+                break
+            if batch.num_rows <= remaining:
+                yield batch
+                remaining -= batch.num_rows
+            else:
+                yield batch.slice(0, remaining)
+                break
 
     @staticmethod
     def _try_to_pad_batch_by_schema(batch: pyarrow.RecordBatch, target_schema):
