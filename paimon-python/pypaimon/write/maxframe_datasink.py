@@ -93,11 +93,12 @@ def maxframe_write(table: "Table", dataframe, overwrite: bool = False):
 
     def _write_chunk_to_paimon(pdf):
         """Executed on each MaxFrame worker with a pandas chunk."""
+        import os
         import pyarrow as pa
         from pypaimon.schema.data_types import PyarrowFieldParser
 
         if pdf.empty:
-            return pd.DataFrame({"_paimon_commit_msg": [""]})
+            return pd.DataFrame({"_paimon_commit_msg": [""], "_paimon_worker_info": ["empty"]})
 
         # Create a fresh writer per chunk (same pattern as Ray datasink)
         write_builder = _table.new_batch_write_builder()
@@ -115,18 +116,36 @@ def maxframe_write(table: "Table", dataframe, overwrite: bool = False):
             table_write.close()
 
         serialized = _serialize_commit_messages(commit_messages)
-        return pd.DataFrame({"_paimon_commit_msg": [serialized]})
+        worker_info = (
+            f"pid={os.getpid()}, "
+            f"rows={len(pdf)}, "
+            f"files={sum(len(m.new_files) for m in commit_messages)}"
+        )
+        return pd.DataFrame({
+            "_paimon_commit_msg": [serialized],
+            "_paimon_worker_info": [worker_info],
+        })
 
     logger.info("MaxFrame write phase 1: distributing data-file writes")
 
     commit_result_df = dataframe.mf.apply_chunk(
         _write_chunk_to_paimon,
         output_type="dataframe",
-        dtypes={"_paimon_commit_msg": "object"},
+        dtypes={"_paimon_commit_msg": "object", "_paimon_worker_info": "object"},
         skip_infer=True,
     ).execute()
 
     # --- Phase 2: serial commit on client ----------------------------------
+
+    # Log distributed execution summary
+    worker_infos = commit_result_df.get("_paimon_worker_info", [])
+    num_workers = sum(1 for w in worker_infos if w and w != "empty")
+    logger.info(
+        "MaxFrame write phase 1 completed: %d workers participated", num_workers
+    )
+    for i, info in enumerate(worker_infos):
+        if info and info != "empty":
+            logger.info("  chunk %d: %s", i, info)
 
     all_commit_messages = []
     for msg_str in commit_result_df["_paimon_commit_msg"]:
