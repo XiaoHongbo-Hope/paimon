@@ -98,6 +98,15 @@ class TableWrite:
             ray_remote_args=ray_remote_args,
         )
 
+    def write_maxframe(
+        self,
+        dataframe: "maxframe.dataframe.DataFrame",
+        overwrite: bool = False,
+        concurrency: Optional[int] = None,
+    ) -> None:
+        from pypaimon.write.maxframe_datasink import maxframe_write
+        maxframe_write(self.table, dataframe, overwrite=overwrite)
+
     def close(self):
         self.file_store_write.close()
 
