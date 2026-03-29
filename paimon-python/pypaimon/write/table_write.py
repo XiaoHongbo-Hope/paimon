@@ -24,6 +24,7 @@ from pypaimon.schema.data_types import PyarrowFieldParser
 from pypaimon.snapshot.snapshot import BATCH_COMMIT_IDENTIFIER
 from pypaimon.write.commit_message import CommitMessage
 from pypaimon.write.file_store_write import FileStoreWrite
+from pypaimon.write.row_key_extractor import DynamicBucketRowKeyExtractor
 
 if TYPE_CHECKING:
     from ray.data import Dataset
@@ -45,8 +46,11 @@ class TableWrite:
             self.write_arrow_batch(batch)
 
     def write_arrow_batch(self, data: pa.RecordBatch):
-        self._validate_pyarrow_schema(data.schema)
-        partitions, buckets = self.row_key_extractor.extract_partition_bucket_batch(data)
+        if isinstance(self.row_key_extractor, DynamicBucketRowKeyExtractor):
+            partitions = self.row_key_extractor._extract_partitions_batch(data)
+            buckets = [0] * data.num_rows
+        else:
+            partitions, buckets = self.row_key_extractor.extract_partition_bucket_batch(data)
 
         partition_bucket_groups = defaultdict(list)
         for i in range(data.num_rows):

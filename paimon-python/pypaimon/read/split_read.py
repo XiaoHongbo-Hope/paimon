@@ -123,6 +123,9 @@ class SplitRead(ABC):
         else:
             return self.predicate
 
+    def with_limit(self, limit: Optional[int]) -> 'SplitRead':
+        return self
+
     @abstractmethod
     def create_reader(self) -> RecordReader:
         """Create a record reader for the given split."""
@@ -375,6 +378,15 @@ class SplitRead(ABC):
 
 
 class RawFileSplitRead(SplitRead):
+
+    def __init__(self, table, predicate, read_type, split, row_tracking_enabled):
+        super().__init__(table, predicate, read_type, split, row_tracking_enabled)
+        self.limit = None
+
+    def with_limit(self, limit: Optional[int]) -> 'RawFileSplitRead':
+        self.limit = limit
+        return self
+
     def raw_reader_supplier(self, file: DataFileMeta, dv_factory: Optional[Callable] = None) -> Optional[RecordReader]:
         read_fields = self._get_final_read_data_fields()
         # If the current file needs to be further divided for reading, use ShardBatchReader
