@@ -79,7 +79,7 @@ class FunctionDefinition:
     @staticmethod
     def sql(body: str) -> "FunctionDefinition":
         defn = FunctionDefinition(Types.SQL)
-        defn._data = {"body": body}
+        defn._data = {"definition": body}
         return defn
 
     @staticmethod

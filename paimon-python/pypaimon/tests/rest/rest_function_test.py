@@ -109,7 +109,7 @@ class RESTFunctionTest(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_function(self):
-        self.catalog.create_database("rest_catalog_db", False)
+        self.catalog.create_database("rest_catalog_db", True)
 
         # Invalid function name with slash
         identifier_with_slash = Identifier.create("rest_catalog_db", "function/")
@@ -168,8 +168,8 @@ class RESTFunctionTest(unittest.TestCase):
         identifier2 = Identifier.create(db2, "list_function")
         identifier3 = Identifier.create(db2, "function")
 
-        self.catalog.create_database(db1, False)
-        self.catalog.create_database(db2, False)
+        self.catalog.create_database(db1, True)
+        self.catalog.create_database(db2, True)
         self.catalog.create_function(identifier, _mock_function(identifier), True)
         self.catalog.create_function(identifier1, _mock_function(identifier1), True)
         self.catalog.create_function(identifier2, _mock_function(identifier2), True)
@@ -246,7 +246,8 @@ class RESTFunctionTest(unittest.TestCase):
 
     def test_alter_function(self):
         identifier = Identifier.create("rest_catalog_db", "alter_function_name")
-        self.catalog.create_database(identifier.get_database_name(), False)
+        self.catalog.create_database(identifier.get_database_name(), True)
+        self.catalog.drop_function(identifier, True)
         function = _mock_function(identifier)
         definition = FunctionDefinition.sql("x * y + 1")
         add_definition = FunctionChange.add_definition("flink_1", definition)
