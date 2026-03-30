@@ -36,12 +36,22 @@ from pypaimon.common.identifier import Identifier
 from pypaimon.common.options import Options
 from pypaimon.function.function import FunctionImpl
 from pypaimon.function.function_change import FunctionChange
-from pypaimon.function.function_definition import FunctionDefinition, FunctionFileResource
+from pypaimon.function.function_definition import (
+    FunctionDefinition, FunctionFileResource,
+)
+from pypaimon.schema.data_types import AtomicType, DataField
 from pypaimon.tests.rest.rest_server import RESTCatalogServer
 
 
 def _mock_function(identifier: Identifier) -> FunctionImpl:
     """Create a mock function for testing."""
+    input_params = [
+        DataField(0, "length", AtomicType("DOUBLE")),
+        DataField(1, "width", AtomicType("DOUBLE")),
+    ]
+    return_params = [
+        DataField(0, "area", AtomicType("DOUBLE")),
+    ]
     flink_function = FunctionDefinition.file(
         file_resources=[FunctionFileResource("jar", "/a/b/c.jar")],
         language="java",
@@ -59,8 +69,8 @@ def _mock_function(identifier: Identifier) -> FunctionImpl:
     }
     return FunctionImpl(
         identifier=identifier,
-        input_params=None,
-        return_params=None,
+        input_params=input_params,
+        return_params=return_params,
         deterministic=False,
         definitions=definitions,
         comment="comment",
@@ -180,6 +190,14 @@ class RESTFunctionTest(unittest.TestCase):
             [identifier.get_object_name(), identifier1.get_object_name()],
         )
 
+        # list with pageToken
+        result = self.catalog.list_functions_paged(
+            db1, 1, identifier1.get_object_name(), None)
+        self.assertEqual(
+            result.elements,
+            [identifier.get_object_name()],
+        )
+
         # list with pattern
         result = self.catalog.list_functions_paged(db1, None, None, "func%")
         self.assertEqual(result.elements, [identifier1.get_object_name()])
@@ -190,11 +208,21 @@ class RESTFunctionTest(unittest.TestCase):
         self.assertEqual(result.elements[0].get_full_name(), identifier3.get_full_name())
 
         # list globally with max_results
-        result = self.catalog.list_functions_paged_globally("db2_rest%", None, 1, None)
+        result = self.catalog.list_functions_paged_globally(
+            "db2_rest%", None, 1, None)
         self.assertEqual(len(result.elements), 1)
         self.assertIn(
             result.elements[0].get_full_name(),
             [identifier2.get_full_name(), identifier3.get_full_name()],
+        )
+
+        # list globally with pageToken
+        result = self.catalog.list_functions_paged_globally(
+            "db2_rest%", None, 1, identifier3.get_full_name())
+        self.assertEqual(len(result.elements), 1)
+        self.assertEqual(
+            result.elements[0].get_full_name(),
+            identifier2.get_full_name(),
         )
 
         # list function details paged
@@ -207,7 +235,14 @@ class RESTFunctionTest(unittest.TestCase):
 
         result = self.catalog.list_function_details_paged(db2, 4, None, "func%")
         self.assertEqual(len(result.elements), 1)
-        self.assertEqual(result.elements[0].full_name(), identifier3.get_full_name())
+        self.assertEqual(
+            result.elements[0].full_name(), identifier3.get_full_name())
+
+        # list function details with pageToken
+        result = self.catalog.list_function_details_paged(
+            db2, 1, identifier3.get_object_name(), None)
+        full_names = [f.full_name() for f in result.elements]
+        self.assertIn(identifier2.get_full_name(), full_names)
 
     def test_alter_function(self):
         identifier = Identifier.create("rest_catalog_db", "alter_function_name")
