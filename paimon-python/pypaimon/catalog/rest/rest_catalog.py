@@ -459,7 +459,6 @@ class RESTCatalog(Catalog):
             function_name_pattern=None,
     ):
         try:
-            from pypaimon.api.api_response import PagedList as PL
             result = self.rest_api.list_function_details_paged(
                 database_name, max_results, page_token, function_name_pattern)
             functions = [

@@ -15,7 +15,7 @@
 #  specific language governing permissions and limitations
 #  under the License.
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 class Types:
