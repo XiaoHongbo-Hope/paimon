@@ -41,7 +41,7 @@ from pypaimon.tests.rest.rest_server import RESTCatalogServer
 
 
 def _mock_function(identifier: Identifier) -> FunctionImpl:
-    """Create a mock function mirroring Java MockRESTMessage.function()."""
+    """Create a mock function for testing."""
     flink_function = FunctionDefinition.file(
         file_resources=[FunctionFileResource("jar", "/a/b/c.jar")],
         language="java",
@@ -69,7 +69,7 @@ def _mock_function(identifier: Identifier) -> FunctionImpl:
 
 
 class RESTFunctionTest(unittest.TestCase):
-    """Tests mirroring Java RESTCatalogTest function tests."""
+    """Tests for REST function operations."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="function_test_")
@@ -99,7 +99,6 @@ class RESTFunctionTest(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_function(self):
-        """Mirroring Java testFunction()."""
         self.catalog.create_database("rest_catalog_db", False)
 
         # Invalid function name with slash
@@ -152,7 +151,6 @@ class RESTFunctionTest(unittest.TestCase):
             self.catalog.get_function(identifier)
 
     def test_list_functions(self):
-        """Mirroring Java testListFunctions()."""
         db1 = "db_rest_catalog_db"
         db2 = "db2_rest_catalog"
         identifier = Identifier.create(db1, "list_function")
@@ -212,7 +210,6 @@ class RESTFunctionTest(unittest.TestCase):
         self.assertEqual(result.elements[0].full_name(), identifier3.get_full_name())
 
     def test_alter_function(self):
-        """Mirroring Java testAlterFunction()."""
         identifier = Identifier.create("rest_catalog_db", "alter_function_name")
         self.catalog.create_database(identifier.get_database_name(), False)
         function = _mock_function(identifier)
@@ -289,7 +286,6 @@ class RESTFunctionTest(unittest.TestCase):
             self.catalog.alter_function(identifier, [drop_definition], False)
 
     def test_validate_function_name(self):
-        """Mirroring Java testValidateFunctionName()."""
         # Valid names
         self.assertTrue(RESTApi.is_valid_function_name("a"))
         self.assertTrue(RESTApi.is_valid_function_name("a1_"))

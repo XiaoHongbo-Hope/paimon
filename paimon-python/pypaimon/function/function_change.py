@@ -30,7 +30,7 @@ class Actions:
 
 
 class FunctionChange:
-    """Represents a change to a function, mirroring Java FunctionChange interface."""
+    """Represents a change to a function."""
 
     def __init__(self, action: str):
         self._action = action

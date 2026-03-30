@@ -61,7 +61,7 @@ class RESTApi:
     PARTITION_NAME_PATTERN = "partitionNamePattern"
     TOKEN_EXPIRATION_SAFE_TIME_MILLIS = 3_600_000
 
-    # Function name validation pattern (mirroring Java RESTFunctionValidator)
+    # Function name validation pattern
     _FUNCTION_NAME_PATTERN = re.compile(r'^(?=.*[A-Za-z])[A-Za-z0-9._-]+$')
 
     def __init__(self, options: Union[Options, Dict[str, str]], config_required: bool = True):

@@ -23,7 +23,7 @@ from pypaimon.schema.data_types import DataField
 
 
 class Function:
-    """Interface for a function in Paimon, mirroring Java Function interface."""
+    """Interface for a function in Paimon."""
 
     def name(self) -> str:
         raise NotImplementedError
@@ -57,7 +57,7 @@ class Function:
 
 
 class FunctionImpl(Function):
-    """Implementation of Function, mirroring Java FunctionImpl."""
+    """Implementation of Function."""
 
     def __init__(
         self,

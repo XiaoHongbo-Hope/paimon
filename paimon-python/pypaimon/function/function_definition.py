@@ -25,7 +25,7 @@ class Types:
 
 
 class FunctionFileResource:
-    """Represents a file resource for a function, mirroring Java FunctionFileResource."""
+    """Represents a file resource for a function."""
 
     def __init__(self, resource_type: str, uri: str):
         self.resource_type = resource_type
@@ -54,7 +54,7 @@ class FunctionFileResource:
 
 
 class FunctionDefinition:
-    """Represents a function definition, mirroring Java FunctionDefinition interface."""
+    """Represents a function definition."""
 
     def __init__(self, definition_type: str, **kwargs):
         self._type = definition_type
