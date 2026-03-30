@@ -436,18 +436,14 @@ class RESTApi:
         partitions = response.data() or []
         return PagedList(partitions, response.get_next_page_token())
 
-    # ======================= Function API ===============================
-
     @staticmethod
     def is_valid_function_name(name: str) -> bool:
-        """Validate function name, mirroring Java RESTFunctionValidator."""
         if not name:
             return False
         return RESTApi._FUNCTION_NAME_PATTERN.match(name) is not None
 
     @staticmethod
     def check_function_name(name: str) -> None:
-        """Check function name validity, raise IllegalArgumentError if invalid."""
         if not RESTApi.is_valid_function_name(name):
             raise IllegalArgumentError("Invalid function name: " + str(name))
 
@@ -594,5 +590,4 @@ class RESTApi:
 
 
 class IllegalArgumentError(Exception):
-    """Mirrors Java IllegalArgumentException for function name validation."""
     pass
