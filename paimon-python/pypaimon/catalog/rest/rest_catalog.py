@@ -369,8 +369,6 @@ class RESTCatalog(Catalog):
         except ForbiddenException as e:
             raise TableNoPermissionException(identifier) from e
 
-    # ======================= Function Operations ===============================
-
     def list_functions(self, database_name: str) -> List[str]:
         try:
             return self.rest_api.list_functions(database_name)

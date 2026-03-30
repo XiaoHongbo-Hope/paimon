@@ -542,10 +542,7 @@ class RESTApi:
             input_params=function.input_params(),
             return_params=function.return_params(),
             deterministic=function.is_deterministic(),
-            definitions={
-                k: v.to_dict() if hasattr(v, 'to_dict') else v
-                for k, v in function.definitions().items()
-            } if function.definitions() else None,
+            definitions=function.definitions(),
             comment=function.comment(),
             options=function.options(),
         )
