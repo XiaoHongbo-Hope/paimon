@@ -135,6 +135,22 @@ public class DataEvolutionTableTest extends DataEvolutionTestBase {
     }
 
     @Test
+    void testRowIdProjection() throws Exception {
+        createTableDefault();
+        FileStoreTable table = getTableDefault();
+        ReadBuilder readBuilder = table.newReadBuilder();
+        assertThat(readBuilder.readType()).isEqualTo(table.rowType());
+        assertThat(readBuilder.readType().getFieldNames().contains(SpecialFields.ROW_ID.name()))
+                .isFalse();
+
+        RowType withRowId = SpecialFields.rowTypeWithRowId(table.rowType());
+        readBuilder = table.newReadBuilder().withReadType(withRowId);
+        assertThat(readBuilder.readType()).isEqualTo(withRowId);
+        assertThat(readBuilder.readType().getFieldNames().contains(SpecialFields.ROW_ID.name()))
+                .isTrue();
+    }
+
+    @Test
     public void testMultipleAppends() throws Exception {
         createTableDefault();
 

@@ -199,6 +199,46 @@ class DataEvolutionTest(unittest.TestCase):
         second_commit = next((m for m in all_manifests if m.min_row_id == 2 and m.max_row_id == 3), None)
         self.assertIsNotNone(second_commit, "Should have a manifest with min_row_id=2, max_row_id=3")
 
+    def test_row_id_projection(self):
+        simple_pa_schema = pa.schema([
+            ('f0', pa.int8()),
+            ('f1', pa.int16()),
+        ])
+        schema = Schema.from_pyarrow_schema(
+            simple_pa_schema,
+            options={'row-tracking.enabled': 'true', 'data-evolution.enabled': 'true'},
+        )
+        self.catalog.create_table('default.test_read_type_schema', schema, False)
+        table = self.catalog.get_table('default.test_read_type_schema')
+
+        write_builder = table.new_batch_write_builder()
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        table_write.write_arrow(
+            pa.Table.from_pydict({'f0': [1, 2], 'f1': [10, 20]}, schema=simple_pa_schema)
+        )
+        table_commit.commit(table_write.prepare_commit())
+        table_write.close()
+        table_commit.close()
+
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+        result_default = rb.new_read().to_arrow(splits)
+        self.assertNotIn(
+            '_ROW_ID',
+            result_default.column_names,
+            'Default read must not expose system column _ROW_ID',
+        )
+        self.assertEqual(result_default.column_names, ['f0', 'f1'])
+
+        rb_proj = table.new_read_builder().with_projection(['f0', 'f1', '_ROW_ID'])
+        result_proj = rb_proj.new_read().to_arrow(rb_proj.new_scan().plan().splits())
+        self.assertEqual(
+            result_proj.column_names,
+            ['f0', 'f1', '_ROW_ID'],
+            'Projection with _ROW_ID must return exactly requested columns',
+        )
+
     def test_merge_reader(self):
         from pypaimon.read.reader.concat_batch_reader import MergeAllBatchReader
 
