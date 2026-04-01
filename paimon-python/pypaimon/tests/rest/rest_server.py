@@ -669,21 +669,10 @@ class RESTCatalogServer:
         if details:
             max_results = self._get_max_results(parameters)
             page_token = parameters.get(PAGE_TOKEN)
-            # Sort by name for paging
-            sorted_details = sorted(details, key=lambda d: d.name)
-            paged_details = []
-            for d in sorted_details:
-                if len(paged_details) < max_results:
-                    if not page_token or d.name > page_token:
-                        paged_details.append(d)
-                else:
-                    break
-            next_token = None
-            if len(paged_details) == max_results and len(sorted_details) > max_results:
-                next_token = paged_details[-1].name
+            paged = self._build_paged_entities(details, max_results, page_token)
             response = ListFunctionDetailsResponse(
-                function_details=paged_details,
-                next_page_token=next_token,
+                function_details=paged.elements,
+                next_page_token=paged.next_page_token,
             )
         else:
             response = ListFunctionDetailsResponse(function_details=[], next_page_token=None)

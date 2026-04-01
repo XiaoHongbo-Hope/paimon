@@ -395,8 +395,6 @@ class RESTCatalog(Catalog):
             if ignore_if_exists:
                 return
             raise FunctionAlreadyExistException(identifier) from e
-        except IllegalArgumentError:
-            raise
 
     def drop_function(self, identifier, ignore_if_not_exists=False):
         if not isinstance(identifier, Identifier):
@@ -407,8 +405,6 @@ class RESTCatalog(Catalog):
             if ignore_if_not_exists:
                 return
             raise FunctionNotExistException(identifier) from e
-        except IllegalArgumentError:
-            raise
 
     def alter_function(self, identifier, changes, ignore_if_not_exists=False):
         if not isinstance(identifier, Identifier):
