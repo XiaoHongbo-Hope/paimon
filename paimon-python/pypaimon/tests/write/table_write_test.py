@@ -28,6 +28,8 @@ import pyarrow as pa
 from parameterized import parameterized
 
 from pypaimon.common.json_util import JSON
+from pypaimon.common.options.core_options import CoreOptions
+from pypaimon.write.writer.append_only_data_writer import AppendOnlyDataWriter
 
 
 class TableWriteTest(unittest.TestCase):
@@ -436,3 +438,29 @@ class TableWriteTest(unittest.TestCase):
         splits = read_builder.new_scan().plan().splits()
         actual = table_read.to_arrow(splits)
         self.assertEqual(expected, actual)
+
+    def test_rolling_single_chunk(self):
+        pa_schema = pa.schema([('name', pa.string())])
+        schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=[])
+        self.catalog.create_table(
+            'default.test_rolling_nbytes', schema, True)
+        table = self.catalog.get_table('default.test_rolling_nbytes')
+
+        # target = 10KB, but a 500-row batch is ~52KB (single chunk)
+        target = 10 * 1024
+        options = CoreOptions.copy(table.options)
+        options.set(CoreOptions.TARGET_FILE_SIZE, str(target))
+        writer = AppendOnlyDataWriter(
+            table=table, partition=(), bucket=0,
+            max_seq_number=0, options=options,
+        )
+
+        row_value = 'x' * 100
+        batch = pa.RecordBatch.from_pydict(
+            {'name': pa.array([row_value] * 500, type=pa.string())})
+        writer.write(batch)
+
+        # Rolling should split 52KB into multiple ~10KB files
+        self.assertGreater(len(writer.committed_files), 0)
+        if writer.pending_data is not None:
+            self.assertLess(writer.pending_data.num_rows, 500)
