@@ -69,4 +69,5 @@ class FormatLanceReader(RecordBatchReader):
         if self._lance_reader is not None:
             self._lance_reader.close()
             self._lance_reader = None
-        self.reader = None
+        if self.reader is not None:
+            self.reader = None
