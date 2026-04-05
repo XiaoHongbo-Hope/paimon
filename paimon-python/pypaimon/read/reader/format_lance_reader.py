@@ -35,11 +35,11 @@ class FormatLanceReader(RecordBatchReader):
 
         file_path_for_lance, storage_options = to_lance_specified(file_io, file_path)
 
-        columns = read_fields if read_fields else None
+        columns_for_lance = read_fields if read_fields else None
         self._lance_reader = lance.file.LanceFileReader(
             file_path_for_lance,
             storage_options=storage_options,
-            columns=columns)
+            columns=columns_for_lance)
         reader_results = self._lance_reader.read_all(batch_size=batch_size)
 
         if push_down_predicate is not None:
