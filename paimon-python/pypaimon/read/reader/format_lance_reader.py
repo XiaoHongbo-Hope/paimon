@@ -56,9 +56,11 @@ class FormatLanceReader(RecordBatchReader):
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         try:
+            # Handle both scanner reader and iterator
             if hasattr(self.reader, 'read_next_batch'):
                 return self.reader.read_next_batch()
             else:
+                # Iterator of batches
                 return next(self.reader)
         except StopIteration:
             return None
