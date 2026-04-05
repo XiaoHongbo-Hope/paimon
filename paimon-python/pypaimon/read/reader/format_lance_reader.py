@@ -46,16 +46,16 @@ class FormatLanceReader(RecordBatchReader):
             pa_table = reader_results.to_table()
             in_memory_dataset = ds.InMemoryDataset(pa_table)
             scanner = in_memory_dataset.scanner(filter=push_down_predicate, batch_size=batch_size)
-            self._reader = scanner.to_reader()
+            self.reader = scanner.to_reader()
         else:
-            self._reader = reader_results.to_batches()
+            self.reader = reader_results.to_batches()
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         try:
-            if hasattr(self._reader, 'read_next_batch'):
-                return self._reader.read_next_batch()
+            if hasattr(self.reader, 'read_next_batch'):
+                return self.reader.read_next_batch()
             else:
-                return next(self._reader)
+                return next(self.reader)
         except StopIteration:
             return None
 
@@ -63,4 +63,4 @@ class FormatLanceReader(RecordBatchReader):
         if self._lance_reader is not None:
             self._lance_reader.close()
             self._lance_reader = None
-        self._reader = None
+        self.reader = None
