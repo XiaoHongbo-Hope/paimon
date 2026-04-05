@@ -439,7 +439,6 @@ class TableWriteTest(unittest.TestCase):
         actual = table_read.to_arrow(splits)
         self.assertEqual(expected, actual)
 
-<<<<<<< HEAD
     def test_rolling(self):
         pa_schema = pa.schema([('name', pa.string())])
         schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=[])
@@ -452,18 +451,6 @@ class TableWriteTest(unittest.TestCase):
         ])
         # Set target just above single chunk nbytes so best_split=1 every time
         target = sample.nbytes + 1
-
-=======
-    def test_rolling_single_chunk(self):
-        pa_schema = pa.schema([('name', pa.string())])
-        schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=[])
-        self.catalog.create_table(
-            'default.test_rolling_nbytes', schema, True)
-        table = self.catalog.get_table('default.test_rolling_nbytes')
-
-        # target = 10KB, but a 500-row batch is ~52KB (single chunk)
-        target = 10 * 1024
->>>>>>> 8ec79ac6b (add test_rolling_single_chunk)
         options = CoreOptions.copy(table.options)
         options.set(CoreOptions.TARGET_FILE_SIZE, str(target))
         writer = AppendOnlyDataWriter(
@@ -471,7 +458,6 @@ class TableWriteTest(unittest.TestCase):
             max_seq_number=0, options=options,
         )
 
-<<<<<<< HEAD
         num_rows = 1500
         big_batch = pa.RecordBatch.from_pydict(
             {'name': pa.array([row_value] * num_rows, type=pa.string())}
@@ -484,14 +470,3 @@ class TableWriteTest(unittest.TestCase):
         self.assertGreater(len(writer.committed_files), 0)
         if writer.pending_data is not None:
             self.assertLessEqual(writer.pending_data.nbytes, target)
-=======
-        row_value = 'x' * 100
-        batch = pa.RecordBatch.from_pydict(
-            {'name': pa.array([row_value] * 500, type=pa.string())})
-        writer.write(batch)
-
-        # Rolling should split 52KB into multiple ~10KB files
-        self.assertGreater(len(writer.committed_files), 0)
-        if writer.pending_data is not None:
-            self.assertLess(writer.pending_data.num_rows, 500)
->>>>>>> 8ec79ac6b (add test_rolling_single_chunk)
