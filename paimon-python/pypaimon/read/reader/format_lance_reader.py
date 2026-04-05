@@ -27,10 +27,14 @@ from pypaimon.read.reader.lance_utils import to_lance_specified
 
 
 class FormatLanceReader(RecordBatchReader):
-    """A Format Reader that reads record batches from a Lance file."""
+    """
+    A Format Reader that reads record batch from a Lance file using PyArrow,
+    and filters it based on the provided predicate and projection.
+    """
 
     def __init__(self, file_io: FileIO, file_path: str, read_fields: List[str],
                  push_down_predicate: Any, batch_size: int = 1024):
+        """Initialize Lance reader."""
         import lance
 
         file_path_for_lance, storage_options = to_lance_specified(file_io, file_path)
