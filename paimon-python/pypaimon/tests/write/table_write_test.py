@@ -470,3 +470,31 @@ class TableWriteTest(unittest.TestCase):
         self.assertGreater(len(writer.committed_files), 0)
         if writer.pending_data is not None:
             self.assertLessEqual(writer.pending_data.nbytes, target)
+
+    def test_rolling_single_chunk(self):
+        pa_schema = pa.schema([('name', pa.string())])
+        schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=[])
+        self.catalog.create_table('default.test_rolling_nbytes', schema, True)
+        table = self.catalog.get_table('default.test_rolling_nbytes')
+
+        # target = 10KB, but a 500-row batch is ~52KB (single chunk)
+        target = 10 * 1024
+        options = CoreOptions.copy(table.options)
+        options.set(CoreOptions.TARGET_FILE_SIZE, str(target))
+        writer = AppendOnlyDataWriter(
+            table=table, partition=(), bucket=0,
+            max_seq_number=0, options=options,
+        )
+
+        num_rows = 500
+        row_value = 'x' * 100
+        batch = pa.RecordBatch.from_pydict(
+            {'name': pa.array([row_value] * num_rows, type=pa.string())})
+        writer.write(batch)
+
+        pending_rows = writer.pending_data.num_rows if writer.pending_data is not None else 0
+        committed_rows = sum(f.row_count for f in writer.committed_files)
+        self.assertEqual(committed_rows + pending_rows, num_rows)
+        self.assertGreater(len(writer.committed_files), 1)
+        if writer.pending_data is not None:
+            self.assertLessEqual(writer.pending_data.nbytes, target)
