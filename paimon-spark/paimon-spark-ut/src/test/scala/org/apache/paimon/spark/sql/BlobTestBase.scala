@@ -25,9 +25,9 @@ import org.apache.paimon.fs.local.LocalFileIO
 import org.apache.paimon.options.Options
 import org.apache.paimon.spark.PaimonSparkTestBase
 import org.apache.paimon.utils.UriReaderFactory
-
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
+import org.apache.spark.sql.paimon.Utils
 
 import java.util
 import java.util.Random
@@ -314,27 +314,7 @@ class BlobTestBase extends PaimonSparkTestBase {
     }
   }
 
-  /**
-   * Test reading blob descriptor that references an external file outside the catalog bucket.
-   *
-   * Uses blob-descriptor-field so descriptors are stored directly in parquet (no .blob copy).
-   * Writing the descriptor succeeds because path_to_descriptor just serializes the URI. Reading
-   * with blob-as-descriptor=false triggers ColumnarRow.getBlob() which resolves the descriptor and
-   * reads actual data from the external URI.
-   *
-   * Bug: ColumnarRow.getBlob() uses UriReader.fromFile(fileIO) with the table's FileIO
-   * (RESTTokenFileIO in DLF), whose STS token only covers the catalog bucket. External bucket URIs
-   * get 403 AccessDenied.
-   *
-   * To reproduce with real REST catalog:
-   *   1. Configure Spark catalog pointing to a DLF REST catalog
-   *   2. Set EXTERNAL_BLOB_URI to an OSS file in a DIFFERENT bucket than the catalog
-   *   3. Run this test — INSERT succeeds, SELECT with blob-as-descriptor=false fails with 403
-   */
   test("Blob: descriptor read from external path outside warehouse") {
-    // To test against real OSS, set this to an OSS URI in a different bucket than catalog
-    // e.g. "oss://your-external-bucket/blob_test/test_blob_data"
-    // and make sure catalog options include fs.oss.accessKeyId/accessKeySecret for that bucket.
     val externalUri = System.getProperty(
       "paimon.test.external-blob-uri",
       "file://" + Utils.createTempDir.getCanonicalPath + "/external_blob_data")
@@ -351,7 +331,6 @@ class BlobTestBase extends PaimonSparkTestBase {
     // For OSS URIs, the file should already exist at the specified path
 
     withTable("t") {
-      // blob-descriptor-field: store descriptor in parquet, no .blob file created
       sql(
         "CREATE TABLE t (id INT, name STRING, picture BINARY) TBLPROPERTIES (" +
           "'row-tracking.enabled'='true', 'data-evolution.enabled'='true', " +
@@ -371,8 +350,6 @@ class BlobTestBase extends PaimonSparkTestBase {
       assert(readDescriptor.uri() == externalUri)
 
       // blob-as-descriptor=false: reads actual data from external URI
-      // This fails with 403 on real REST catalog (DLF) when external URI is in a
-      // different bucket, because ColumnarRow.getBlob() uses table's FileIO directly.
       sql("ALTER TABLE t SET TBLPROPERTIES ('blob-as-descriptor'='false')")
       val result = sql("SELECT picture FROM t").collect()
       assert(result.length == 1)
