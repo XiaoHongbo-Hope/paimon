@@ -314,6 +314,75 @@ class BlobTestBase extends PaimonSparkTestBase {
     }
   }
 
+  /**
+   * Test reading blob descriptor that references an external file outside the catalog bucket.
+   *
+   * Uses blob-descriptor-field so descriptors are stored directly in parquet (no .blob copy).
+   * Writing the descriptor succeeds because path_to_descriptor just serializes the URI. Reading
+   * with blob-as-descriptor=false triggers ColumnarRow.getBlob() which resolves the descriptor and
+   * reads actual data from the external URI.
+   *
+   * Bug: ColumnarRow.getBlob() uses UriReader.fromFile(fileIO) with the table's FileIO
+   * (RESTTokenFileIO in DLF), whose STS token only covers the catalog bucket. External bucket URIs
+   * get 403 AccessDenied.
+   *
+   * To reproduce with real REST catalog:
+   *   1. Configure Spark catalog pointing to a DLF REST catalog
+   *   2. Set EXTERNAL_BLOB_URI to an OSS file in a DIFFERENT bucket than the catalog
+   *   3. Run this test — INSERT succeeds, SELECT with blob-as-descriptor=false fails with 403
+   */
+  test("Blob: descriptor read from external path outside warehouse") {
+    // To test against real OSS, set this to an OSS URI in a different bucket than catalog
+    // e.g. "oss://your-external-bucket/blob_test/test_blob_data"
+    // and make sure catalog options include fs.oss.accessKeyId/accessKeySecret for that bucket.
+    val externalUri = System.getProperty(
+      "paimon.test.external-blob-uri",
+      "file://" + Utils.createTempDir.getCanonicalPath + "/external_blob_data")
+
+    val blobData = "Hello Paimon Blob Test".getBytes("UTF-8")
+
+    // Write blob data to external path
+    val fileIO = new LocalFileIO
+    if (externalUri.startsWith("file://")) {
+      val outputStream = fileIO.newOutputStream(new Path(externalUri), true)
+      try outputStream.write(blobData)
+      finally outputStream.close()
+    }
+    // For OSS URIs, the file should already exist at the specified path
+
+    withTable("t") {
+      // blob-descriptor-field: store descriptor in parquet, no .blob file created
+      sql(
+        "CREATE TABLE t (id INT, name STRING, picture BINARY) TBLPROPERTIES (" +
+          "'row-tracking.enabled'='true', 'data-evolution.enabled'='true', " +
+          "'blob-field'='picture', 'blob-descriptor-field'='picture')")
+
+      // Write descriptor pointing to external file
+      val descriptor = new BlobDescriptor(externalUri, 0, blobData.length)
+      sql(s"INSERT INTO t VALUES (1, 'test', X'${bytesToHex(descriptor.serialize())}')")
+
+      // blob-as-descriptor=true: returns descriptor bytes (no external read, always works)
+      sql("ALTER TABLE t SET TBLPROPERTIES ('blob-as-descriptor'='true')")
+      val descBytes = sql("SELECT picture FROM t")
+        .collect()(0)
+        .get(0)
+        .asInstanceOf[Array[Byte]]
+      val readDescriptor = BlobDescriptor.deserialize(descBytes)
+      assert(readDescriptor.uri() == externalUri)
+
+      // blob-as-descriptor=false: reads actual data from external URI
+      // This fails with 403 on real REST catalog (DLF) when external URI is in a
+      // different bucket, because ColumnarRow.getBlob() uses table's FileIO directly.
+      sql("ALTER TABLE t SET TBLPROPERTIES ('blob-as-descriptor'='false')")
+      val result = sql("SELECT picture FROM t").collect()
+      assert(result.length == 1)
+      val readData = result(0).get(0).asInstanceOf[Array[Byte]]
+      assert(
+        util.Arrays.equals(blobData, readData),
+        "Blob data read from external path should match original data")
+    }
+  }
+
   private val HEX_ARRAY = "0123456789ABCDEF".toCharArray
 
   def bytesToHex(bytes: Array[Byte]): String = {
