@@ -20,10 +20,10 @@ package org.apache.paimon.spark.sql
 
 import org.apache.paimon.catalog.CatalogContext
 import org.apache.paimon.data.{Blob, BlobDescriptor}
-import org.apache.paimon.fs.{FileIO, Path}
+import org.apache.paimon.fs.Path
 import org.apache.paimon.fs.local.LocalFileIO
 import org.apache.paimon.options.Options
-import org.apache.paimon.spark.PaimonSparkTestBase
+import org.apache.paimon.spark.{PaimonSparkTestBase, PaimonSparkTestWithRestCatalogBase}
 import org.apache.paimon.utils.UriReaderFactory
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
@@ -32,7 +32,7 @@ import org.apache.spark.sql.paimon.Utils
 import java.util
 import java.util.Random
 
-class BlobTestBase extends PaimonSparkTestBase {
+class RestBlobTestBase extends PaimonSparkTestWithRestCatalogBase {
 
   private val RANDOM = new Random
 
@@ -314,6 +314,52 @@ class BlobTestBase extends PaimonSparkTestBase {
     }
   }
 
+  test("Blob: descriptor read from external path outside warehouse") {
+    val externalUri = System.getProperty(
+      "paimon.test.external-blob-uri",
+      "file://" + Utils.createTempDir.getCanonicalPath + "/external_blob_data")
+
+    val blobData = "Hello Paimon Blob Test".getBytes("UTF-8")
+
+    // Write blob data to external path
+    val fileIO = new LocalFileIO
+    if (externalUri.startsWith("file://")) {
+      val outputStream = fileIO.newOutputStream(new Path(externalUri), true)
+      try outputStream.write(blobData)
+      finally outputStream.close()
+    }
+    // For OSS URIs, the file should already exist at the specified path
+
+    withTable("t") {
+      sql(
+        "CREATE TABLE t (id INT, name STRING, picture BINARY) TBLPROPERTIES (" +
+          "'row-tracking.enabled'='true', 'data-evolution.enabled'='true', " +
+          "'blob-field'='picture', 'blob-descriptor-field'='picture')")
+
+      // Write descriptor pointing to external file
+      val descriptor = new BlobDescriptor(externalUri, 0, blobData.length)
+      sql(s"INSERT INTO t VALUES (1, 'test', X'${bytesToHex(descriptor.serialize())}')")
+
+      // blob-as-descriptor=true: returns descriptor bytes (no external read, always works)
+      sql("ALTER TABLE t SET TBLPROPERTIES ('blob-as-descriptor'='true')")
+      val descBytes = sql("SELECT picture FROM t")
+        .collect()(0)
+        .get(0)
+        .asInstanceOf[Array[Byte]]
+      val readDescriptor = BlobDescriptor.deserialize(descBytes)
+      assert(readDescriptor.uri() == externalUri)
+
+      // blob-as-descriptor=false: reads actual data from external URI
+      sql("ALTER TABLE t SET TBLPROPERTIES ('blob-as-descriptor'='false')")
+      val result = sql("SELECT picture FROM t").collect()
+      assert(result.length == 1)
+      val readData = result(0).get(0).asInstanceOf[Array[Byte]]
+      assert(
+        util.Arrays.equals(blobData, readData),
+        "Blob data read from external path should match original data")
+    }
+  }
+
   private val HEX_ARRAY = "0123456789ABCDEF".toCharArray
 
   def bytesToHex(bytes: Array[Byte]): String = {
@@ -327,7 +373,7 @@ class BlobTestBase extends PaimonSparkTestBase {
   }
 }
 
-class BlobTestWithV2Write extends BlobTestBase {
+class RestBlobTestWithV2Write extends RestBlobTestBase {
   override def sparkConf: SparkConf = {
     super.sparkConf.set("spark.paimon.write.use-v2-write", "true")
   }
