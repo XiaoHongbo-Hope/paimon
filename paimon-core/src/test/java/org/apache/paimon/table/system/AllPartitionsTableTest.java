@@ -108,4 +108,32 @@ public class AllPartitionsTableTest extends TableTestBase {
             }
         }
     }
+
+    @Test
+    void testAllPartitionsTableWithProjection() throws Exception {
+        ReadonlyTable table = allPartitionsTable;
+
+        RowType readType =
+                new RowType(
+                        java.util.Arrays.asList(
+                                TABLE_TYPE.getField(0), // database_name
+                                TABLE_TYPE.getField(1), // table_name
+                                TABLE_TYPE.getField(5))); // file_count (field ID 5)
+
+        InnerTableScan scan = table.newScan();
+        InnerTableRead read = table.newRead().withReadType(readType);
+
+        List<InternalRow> rows = new java.util.ArrayList<>();
+        try (RecordReader<InternalRow> reader = read.createReader(scan.plan())) {
+            reader.forEachRemaining(rows::add);
+        }
+
+        assertThat(rows).isNotEmpty();
+        for (InternalRow row : rows) {
+            assertThat(row.getFieldCount()).isEqualTo(3);
+            if (!row.isNullAt(2)) {
+                row.getLong(2);
+            }
+        }
+    }
 }
