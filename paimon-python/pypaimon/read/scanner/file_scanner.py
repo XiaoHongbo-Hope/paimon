@@ -289,6 +289,9 @@ class FileScanner:
         if row_ranges is not None:
             entries = _filter_manifest_entries_by_row_ranges(entries, row_ranges)
 
+        # Post-filter: group by row ID range, merge stats, filter by predicate
+        entries = self._post_filter_manifest_entries(entries)
+
         return entries, DataEvolutionSplitGenerator(
             self.table,
             self.target_split_size,
@@ -338,6 +341,39 @@ class FileScanner:
             self._filter_manifest_entry,
             max_workers=max_workers
         )
+
+    def _post_filter_manifest_entries(self, entries: List[ManifestEntry]) -> List[ManifestEntry]:
+        """Post-filter manifest entries for data-evolution tables.
+
+        Groups entries by overlapping row ID ranges, computes merged evolution
+        stats for each group, and filters groups by predicate.
+
+        Aligned with Java's DataEvolutionFileStoreScan.postFilterManifestEntries.
+        """
+        if not self.predicate_for_stats or not entries:
+            return entries
+
+        groups = _merge_overlapping_ranges(entries)
+
+        result = []
+        for group in groups:
+            if self._filter_group_by_stats(group):
+                result.extend(group)
+        return result
+
+    def _filter_group_by_stats(self, entries: List[ManifestEntry]) -> bool:
+        """Filter a group of entries by merged evolution stats.
+
+        Aligned with Java's DataEvolutionFileStoreScan.filterByStats(List).
+        """
+        stats = _evolution_stats(
+            self.table.table_schema.fields,
+            lambda sid: self.table.schema_manager.get_schema(sid).fields,
+            entries
+        )
+        if stats is None:
+            return True
+        return self.predicate_for_stats.test_by_simple_stats(stats, stats.row_count)
 
     def with_shard(self, idx_of_this_subtask: int, number_of_para_subtasks: int) -> 'FileScanner':
         if idx_of_this_subtask >= number_of_para_subtasks:
@@ -424,7 +460,8 @@ class FileScanner:
                 return True
             if self.predicate_for_stats is None:
                 return True
-            # Data evolution: file stats may be from another schema, skip stats filter and filter in reader.
+            # Data evolution: defer stats filtering to post-filter stage
+            # (postFilterManifestEntries groups files by row ID range and merges stats)
             if self.data_evolution:
                 return True
             if entry.file.value_stats_cols is None and entry.file.write_cols is not None:
@@ -501,3 +538,168 @@ class FileScanner:
             deletion_files[data_file_name] = deletion_file
 
         return deletion_files
+
+
+def _merge_overlapping_ranges(entries: List[ManifestEntry]) -> List[List[ManifestEntry]]:
+    """Group manifest entries by overlapping row ID ranges.
+
+    Aligned with Java's RangeHelper.mergeOverlappingRanges.
+    """
+    if not entries:
+        return []
+
+    indexed = []
+    for i, entry in enumerate(entries):
+        r = entry.file.row_id_range()
+        if r is None:
+            indexed.append((entry, i, 0, 0))
+        else:
+            indexed.append((entry, i, r.from_, r.to))
+
+    indexed.sort(key=lambda x: (x[2], x[3]))
+
+    groups: List[List[tuple]] = []
+    current_group = [indexed[0]]
+    current_end = indexed[0][3]
+
+    for item in indexed[1:]:
+        start = item[2]
+        end = item[3]
+        if start <= current_end:
+            current_group.append(item)
+            if end > current_end:
+                current_end = end
+        else:
+            groups.append(current_group)
+            current_group = [item]
+            current_end = end
+    groups.append(current_group)
+
+    result = []
+    for group in groups:
+        group.sort(key=lambda x: x[1])
+        result.append([item[0] for item in group])
+    return result
+
+
+class _EvolutionStats:
+    """Merged stats across multiple data-evolution files for predicate evaluation.
+
+    Aligned with Java's DataEvolutionFileStoreScan.EvolutionStats.
+    """
+    __slots__ = ('row_count', 'min_values', 'max_values', 'null_counts')
+
+    def __init__(self, row_count, min_values, max_values, null_counts):
+        self.row_count = row_count
+        self.min_values = min_values
+        self.max_values = max_values
+        self.null_counts = null_counts
+
+
+class _DataEvolutionRow:
+    """Composite row view over multiple files' stats rows.
+
+    Routes field access to the correct file's stats by rowOffsets/fieldOffsets.
+    Aligned with Java's DataEvolutionRow.
+    """
+    __slots__ = ('rows', 'row_offsets', 'field_offsets')
+
+    def __init__(self, row_offsets, field_offsets):
+        self.rows = None
+        self.row_offsets = row_offsets
+        self.field_offsets = field_offsets
+
+    def set_rows(self, rows):
+        self.rows = rows
+
+    def get_field(self, pos):
+        row_idx = self.row_offsets[pos]
+        if row_idx < 0:
+            return None
+        field_idx = self.field_offsets[pos]
+        return self.rows[row_idx].get_field(field_idx)
+
+
+def _evolution_stats(
+        table_fields,
+        schema_fields_func,
+        entries: List[ManifestEntry]):
+    """Compute merged evolution stats across multiple files.
+
+    Aligned with Java's DataEvolutionFileStoreScan.evolutionStats.
+    """
+    from pypaimon.manifest.schema.data_file_meta import DataFileMeta
+
+    metas = [e for e in entries
+             if not DataFileMeta.is_blob_file(e.file.file_name)]
+    if not metas:
+        return None
+
+    metas.sort(key=lambda e: e.file.max_sequence_number, reverse=True)
+
+    all_field_ids = [f.id for f in table_fields]
+    fields_count = len(table_fields)
+    row_offsets = [-1] * fields_count
+    field_offsets = [-1] * fields_count
+
+    min_rows = []
+    max_rows = []
+    null_counts_list = []
+
+    for entry in metas:
+        stats = entry.file.value_stats
+        min_rows.append(stats.min_values)
+        max_rows.append(stats.max_values)
+        null_counts_list.append(stats.null_counts)
+
+    for i, entry in enumerate(metas):
+        file_meta = entry.file
+
+        data_fields = schema_fields_func(file_meta.schema_id)
+        if file_meta.write_cols is not None:
+            data_field_ids = [f.id for f in data_fields if f.name in file_meta.write_cols]
+        else:
+            data_field_ids = [f.id for f in data_fields]
+
+        if file_meta.value_stats_cols is not None:
+            stats_data_fields = [f for f in data_fields if f.name in file_meta.value_stats_cols]
+        else:
+            stats_data_fields = [f for f in data_fields
+                                 if file_meta.write_cols is None or f.name in file_meta.write_cols]
+        stats_field_ids = [f.id for f in stats_data_fields]
+
+        for j in range(fields_count):
+            if row_offsets[j] != -1:
+                continue
+            target_field_id = all_field_ids[j]
+            if target_field_id in data_field_ids:
+                found_in_stats = False
+                for k, stats_fid in enumerate(stats_field_ids):
+                    if target_field_id == stats_fid:
+                        row_offsets[j] = i
+                        field_offsets[j] = k
+                        found_in_stats = True
+                        break
+                if not found_in_stats:
+                    row_offsets[j] = -2
+
+    final_min = _DataEvolutionRow(row_offsets, field_offsets)
+    final_max = _DataEvolutionRow(row_offsets, field_offsets)
+    final_min.set_rows(min_rows)
+    final_max.set_rows(max_rows)
+
+    final_null_counts = []
+    for j in range(fields_count):
+        row_idx = row_offsets[j]
+        if row_idx < 0:
+            final_null_counts.append(None)
+        else:
+            field_idx = field_offsets[j]
+            nc = null_counts_list[row_idx]
+            if nc and field_idx < len(nc):
+                final_null_counts.append(nc[field_idx])
+            else:
+                final_null_counts.append(None)
+
+    row_count = metas[0].file.row_count
+    return _EvolutionStats(row_count, final_min, final_max, final_null_counts)

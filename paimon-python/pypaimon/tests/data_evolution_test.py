@@ -1633,3 +1633,69 @@ class DataEvolutionTest(unittest.TestCase):
         tc = wb.new_commit()
         tc.commit(msgs)
         tc.close()
+
+    def test_stats_filter(self):
+        pa_schema = pa.schema([("id", pa.int64()), ("val", pa.int32())])
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={"row-tracking.enabled": "true", "data-evolution.enabled": "true"},
+        )
+        self.catalog.create_table("default.test_stats_filter", schema, False)
+        table = self.catalog.get_table("default.test_stats_filter")
+        wb = table.new_batch_write_builder()
+
+        # 3 commits with non-overlapping id ranges: [1-100], [101-200], [201-300]
+        row_id = 0
+        for start in [1, 101, 201]:
+            w = wb.new_write()
+            c = wb.new_commit()
+            data = pa.Table.from_pydict(
+                {"id": list(range(start, start + 100)),
+                 "val": list(range(start, start + 100))},
+                schema=pa_schema,
+            )
+            w.write_arrow(data)
+            cmts = w.prepare_commit()
+            for cmt in cmts:
+                for nf in cmt.new_files:
+                    nf.first_row_id = row_id
+                    row_id += nf.row_count
+            c.commit(cmts)
+            w.close()
+            c.close()
+
+        # overwrite val for [101-200] with partial column write (cross-file columns)
+        w_ov = wb.new_write().with_write_type(["val"])
+        c_ov = wb.new_commit()
+        w_ov.write_arrow(pa.Table.from_pydict(
+            {"val": list(range(1101, 1201))},
+            schema=pa.schema([("val", pa.int32())]),
+        ))
+        cmts_ov = w_ov.prepare_commit()
+        for cmt in cmts_ov:
+            for nf in cmt.new_files:
+                nf.first_row_id = 100
+        c_ov.commit(cmts_ov)
+        w_ov.close()
+        c_ov.close()
+
+        rb = table.new_read_builder()
+        pb = rb.new_predicate_builder()
+
+        # without filter: 4 files (3 original + 1 overlay)
+        splits_all = rb.new_scan().plan().splits()
+        self.assertEqual(sum(len(s.files) for s in splits_all), 4)
+
+        # id == 150: should prune to files covering row_id [100-199]
+        rb1 = table.new_read_builder().with_filter(pb.equal("id", 150))
+        splits1 = rb1.new_scan().plan().splits()
+        filtered_files = sum(len(s.files) for s in splits1)
+        self.assertEqual(filtered_files, 2)
+        result = rb1.new_read().to_pandas(splits1)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result["id"].iloc[0], 150)
+
+        # val > 1200: after evolution, only [101-200] has val [1101-1200], no match
+        rb2 = table.new_read_builder().with_filter(pb.greater_than("val", 1200))
+        splits2 = rb2.new_scan().plan().splits()
+        self.assertEqual(len(splits2), 0)
