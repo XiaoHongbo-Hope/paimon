@@ -656,6 +656,86 @@ class RayDataTest(unittest.TestCase):
         )
         self.assertEqual(list(df_sorted['value']), [150, 250, 300, 400], "Value column should reflect updates")
 
+    def test_ray_data_with_limit(self):
+        """Test that with_limit() enforces row-level limit across read paths.
+
+        Uses a partitioned table (3 partitions) to guarantee multiple splits.
+        """
+        pa_schema = pa.schema([
+            ('pt', pa.int32()),
+            ('id', pa.int32()),
+            ('value', pa.int64()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=['pt'])
+        self.catalog.create_table('default.test_ray_limit', schema, False)
+        table = self.catalog.get_table('default.test_ray_limit')
+
+        # Write 3 partitions, 100 rows each → 300 rows total, 3 splits
+        rows_per_partition = 100
+        num_partitions = 3
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        for pt in range(num_partitions):
+            data = pa.Table.from_pydict({
+                'pt': [pt] * rows_per_partition,
+                'id': list(range(rows_per_partition)),
+                'value': [i * 100 for i in range(rows_per_partition)],
+            }, schema=pa_schema)
+            writer.write_arrow(data)
+        commit_messages = writer.prepare_commit()
+        commit = write_builder.new_commit()
+        commit.commit(commit_messages)
+        writer.close()
+
+        # Baseline: no limit → all 300 rows, 3 splits
+        read_builder_all = table.new_read_builder()
+        splits_all = read_builder_all.new_scan().plan().splits()
+        total_rows = rows_per_partition * num_partitions
+        self.assertEqual(len(splits_all), num_partitions)
+        all_rows = read_builder_all.new_read().to_arrow(splits_all).num_rows
+        self.assertEqual(all_rows, total_rows)
+
+        # with_limit(150): scan keeps splits covering >= 150 rows,
+        # read-level limit truncates to exactly 150 rows
+        limit_value = 150
+        read_builder_limited = table.new_read_builder().with_limit(limit_value)
+        splits_limited = read_builder_limited.new_scan().plan().splits()
+        table_read_limited = read_builder_limited.new_read()
+
+        self.assertEqual(table_read_limited.limit, limit_value)
+        self.assertGreater(len(splits_limited), 1,
+                           "scan should keep multiple splits to cover the limit")
+        self.assertLess(len(splits_limited), num_partitions,
+                        "scan should prune splits beyond the limit")
+
+        # to_arrow: global limit → exactly limit_value rows
+        arrow_result = table_read_limited.to_arrow(splits_limited)
+        self.assertEqual(arrow_result.num_rows, limit_value,
+                         "to_arrow should return exactly limit rows")
+
+        # to_iterator: global limit → exactly limit_value rows
+        table_read_iter = table.new_read_builder().with_limit(limit_value).new_read()
+        rows = list(table_read_iter.to_iterator(splits_limited))
+        self.assertEqual(len(rows), limit_value,
+                         "to_iterator should return exactly limit rows")
+
+        # to_ray: scan prunes splits, .limit() on dataset for precise truncation
+        # single block
+        table_read_ray = table.new_read_builder().with_limit(limit_value).new_read()
+        ray_dataset = table_read_ray.to_ray(splits_limited, override_num_blocks=1)
+        self.assertGreater(ray_dataset.count(), limit_value,
+                           "to_ray without .limit() returns more than limit (split granularity)")
+        self.assertEqual(ray_dataset.limit(limit_value).count(), limit_value,
+                         "to_ray + .limit() should return exactly limit rows")
+
+        # multi block
+        table_read_ray_multi = table.new_read_builder().with_limit(limit_value).new_read()
+        ray_dataset_multi = table_read_ray_multi.to_ray(
+            splits_limited, override_num_blocks=len(splits_limited))
+        self.assertEqual(ray_dataset_multi.limit(limit_value).count(), limit_value,
+                         "to_ray (multi block) + .limit() should return exactly limit rows")
+
     def test_ray_data_invalid_parallelism(self):
         pa_schema = pa.schema([
             ('id', pa.int32()),
