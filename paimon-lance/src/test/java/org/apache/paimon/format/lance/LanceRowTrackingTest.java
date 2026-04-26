@@ -108,6 +108,51 @@ public class LanceRowTrackingTest extends DataEvolutionTestBase {
     }
 
     @Test
+    public void testAutoRowIdAssignment() throws Exception {
+        createTableDefault();
+
+        Schema schema = schemaDefault();
+        BatchWriteBuilder builder = getTableDefault().newBatchWriteBuilder();
+
+        try (BatchTableWrite write = builder.newWrite().withWriteType(schema.rowType())) {
+            for (int i = 0; i < 5; i++) {
+                write.write(
+                        GenericRow.of(
+                                i,
+                                BinaryString.fromString("a" + i),
+                                BinaryString.fromString("b" + i)));
+            }
+            BatchTableCommit commit = builder.newCommit();
+            commit.commit(write.prepareCommit());
+        }
+
+        try (BatchTableWrite write = builder.newWrite().withWriteType(schema.rowType())) {
+            for (int i = 5; i < 10; i++) {
+                write.write(
+                        GenericRow.of(
+                                i,
+                                BinaryString.fromString("a" + i),
+                                BinaryString.fromString("b" + i)));
+            }
+            BatchTableCommit commit = builder.newCommit();
+            commit.commit(write.prepareCommit());
+        }
+
+        ReadBuilder readBuilder = getTableDefault().newReadBuilder();
+        RecordReader<InternalRow> reader =
+                readBuilder.newRead().createReader(readBuilder.newScan().plan());
+        AtomicInteger count = new AtomicInteger(0);
+        reader.forEachRemaining(
+                r -> {
+                    int idx = r.getInt(0);
+                    assertThat(r.getString(1).toString()).isEqualTo("a" + idx);
+                    assertThat(r.getString(2).toString()).isEqualTo("b" + idx);
+                    count.incrementAndGet();
+                });
+        assertThat(count.get()).isEqualTo(10);
+    }
+
+    @Test
     public void testDataEvolutionBasic() throws Exception {
         createTableDefault();
 
