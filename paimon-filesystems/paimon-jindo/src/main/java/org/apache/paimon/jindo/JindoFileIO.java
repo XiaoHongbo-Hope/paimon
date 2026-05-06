@@ -100,6 +100,9 @@ public class JindoFileIO extends HadoopCompliantFileIO implements HadoopOptionsP
         super.configure(context);
         allowCache = context.options().get(FILE_IO_ALLOW_CACHE);
         hadoopOptions = new Options();
+        context.hadoopConf()
+                .iterator()
+                .forEachRemaining(entry -> hadoopOptions.set(entry.getKey(), entry.getValue()));
         // read all configuration with prefix 'CONFIG_PREFIXES'
         for (String key : context.options().keySet()) {
             for (String prefix : CONFIG_PREFIXES) {
@@ -130,9 +133,6 @@ public class JindoFileIO extends HadoopCompliantFileIO implements HadoopOptionsP
             hadoopOptions.set("fs.oss.credentials.provider", SimpleCredentialsProvider.NAME);
         } else {
             LOG.info("Using hadoop conf init Jindo.");
-            context.hadoopConf()
-                    .iterator()
-                    .forEachRemaining(entry -> hadoopOptions.set(entry.getKey(), entry.getValue()));
         }
 
         String dlfAccessTrackingExtendedInfo =
