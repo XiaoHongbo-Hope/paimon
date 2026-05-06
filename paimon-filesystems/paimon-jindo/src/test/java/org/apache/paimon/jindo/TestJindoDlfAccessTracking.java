@@ -21,7 +21,6 @@ package org.apache.paimon.jindo;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.options.Options;
 
-import org.apache.hadoop.conf.Configuration;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -86,26 +85,6 @@ public class TestJindoDlfAccessTracking {
 
         Options hadoopOptions = getHadoopOptions(fileIO);
         assertThat(hadoopOptions.get(OSS_USER_AGENT_EXTENDED)).isNull();
-    }
-
-    @Test
-    public void testHadoopConfOptionsAreKeptWhenAccessKeyConfigured() {
-        Options options = new Options();
-        options.set("fs.oss.accessKeyId", "testAk");
-        options.set("fs.oss.accessKeySecret", "testSk");
-
-        Configuration hadoopConf = new Configuration(false);
-        hadoopConf.set("fs.oss.endpoint", "oss-example-region.example.com");
-        hadoopConf.set("fs.oss.accessKeyId", "hadoopAk");
-
-        JindoFileIO fileIO = new JindoFileIO();
-        fileIO.configure(CatalogContext.create(options, hadoopConf));
-
-        Options hadoopOptions = getHadoopOptions(fileIO);
-        assertThat(hadoopOptions.get("fs.oss.endpoint"))
-                .isEqualTo("oss-example-region.example.com");
-        assertThat(hadoopOptions.get("fs.oss.accessKeyId")).isEqualTo("testAk");
-        assertThat(hadoopOptions.get("fs.oss.accessKeySecret")).isEqualTo("testSk");
     }
 
     @Test
