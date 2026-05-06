@@ -25,13 +25,19 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.rest.RESTTokenFileIO;
 import org.apache.paimon.utils.Pair;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.net.URI;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 
 /** Utils for lance all. */
 public class LanceUtils {
+
+    private static final Logger LOG = LoggerFactory.getLogger(LanceUtils.class);
 
     // OSS configuration keys
     public static final String FS_OSS_ENDPOINT = "fs.oss.endpoint";
@@ -126,6 +132,15 @@ public class LanceUtils {
             }
         }
 
+        Iterator<Map.Entry<String, String>> iterator = storageOptions.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, String> entry = iterator.next();
+            if (entry.getValue() == null) {
+                LOG.warn(
+                        "Removing null Lance storage option value for key '{}'.", entry.getKey());
+                iterator.remove();
+            }
+        }
         return Pair.of(converted, storageOptions);
     }
 }

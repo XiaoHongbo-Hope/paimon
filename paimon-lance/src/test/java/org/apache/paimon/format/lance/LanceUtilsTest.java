@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LanceUtilsTest {
@@ -103,5 +104,28 @@ class LanceUtilsTest {
         assertEquals("test-token", storageOptions.get(LanceUtils.STORAGE_OPTION_SESSION_TOKEN));
         assertEquals("test-token", storageOptions.get(LanceUtils.STORAGE_OPTION_OSS_SESSION_TOKEN));
         assertTrue(storageOptions.containsKey(LanceUtils.FS_OSS_SECURITY_TOKEN));
+    }
+
+    @Test
+    void testOssStorageOptionsFilterNullValues() {
+        Path path = new Path("oss://my-bucket/path/to/file.lance");
+        Options options = new Options();
+        options.set(LanceUtils.FS_OSS_ENDPOINT, "oss-example-region.example.com");
+        options.set(LanceUtils.FS_OSS_ACCESS_KEY_ID, "test-access-key");
+        options.set(LanceUtils.FS_OSS_ACCESS_KEY_SECRET, "test-secret-key");
+        options.set(LanceUtils.FS_OSS_SECURITY_TOKEN, null);
+        options.set("fs.oss.null-value", null);
+
+        TestFileIO fileIO = new TestFileIO();
+        fileIO.setOptions(options);
+
+        Pair<Path, Map<String, String>> result = LanceUtils.toLanceSpecifiedForWriter(fileIO, path);
+
+        Map<String, String> storageOptions = result.getValue();
+        assertFalse(storageOptions.containsKey(LanceUtils.FS_OSS_SECURITY_TOKEN));
+        assertFalse(storageOptions.containsKey(LanceUtils.STORAGE_OPTION_SESSION_TOKEN));
+        assertFalse(storageOptions.containsKey(LanceUtils.STORAGE_OPTION_OSS_SESSION_TOKEN));
+        assertFalse(storageOptions.containsKey("fs.oss.null-value"));
+        assertFalse(storageOptions.containsValue(null));
     }
 }
