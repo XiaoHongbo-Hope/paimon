@@ -30,8 +30,10 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 /** Utils for lance all. */
@@ -72,10 +74,13 @@ public class LanceUtils {
 
         URI uri = path.toUri();
         String schema = uri.getScheme();
+        Map<String, String> tokenOptions = null;
 
         if (fileIO instanceof RESTTokenFileIO) {
+            RESTTokenFileIO restTokenFileIO = (RESTTokenFileIO) fileIO;
+            tokenOptions = restTokenFileIO.validToken().token();
             try {
-                fileIO = ((RESTTokenFileIO) fileIO).fileIO();
+                fileIO = restTokenFileIO.fileIO();
             } catch (IOException e) {
                 throw new RuntimeException("Can't get fileIO from RESTTokenFileIO", e);
             }
@@ -88,6 +93,13 @@ public class LanceUtils {
         } else {
             originOptions = new Options();
         }
+        if (tokenOptions != null) {
+            for (Map.Entry<String, String> entry : tokenOptions.entrySet()) {
+                if (entry.getKey().startsWith(FS_PREFIX) && entry.getValue() != null) {
+                    originOptions.set(entry.getKey(), entry.getValue());
+                }
+            }
+        }
 
         Path converted = path;
         Map<String, String> storageOptions = new HashMap<>();
@@ -98,9 +110,7 @@ public class LanceUtils {
                 converted = new Path(uriString.replace("traceable:/", "file:/"));
             }
         } else if ("oss".equals(schema)) {
-            assert originOptions.containsKey(FS_OSS_ENDPOINT);
-            assert originOptions.containsKey(FS_OSS_ACCESS_KEY_ID);
-            assert originOptions.containsKey(FS_OSS_ACCESS_KEY_SECRET);
+            validateRequiredOssOptions(originOptions, path);
 
             for (String key : originOptions.keySet()) {
                 if (key.startsWith(FS_PREFIX)) {
@@ -142,5 +152,27 @@ public class LanceUtils {
             }
         }
         return Pair.of(converted, storageOptions);
+    }
+
+    private static void validateRequiredOssOptions(Options originOptions, Path path) {
+        List<String> missingOptions = new ArrayList<>();
+        addMissingOption(originOptions, FS_OSS_ENDPOINT, missingOptions);
+        addMissingOption(originOptions, FS_OSS_ACCESS_KEY_ID, missingOptions);
+        addMissingOption(originOptions, FS_OSS_ACCESS_KEY_SECRET, missingOptions);
+        if (!missingOptions.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Missing required Lance OSS storage options "
+                            + missingOptions
+                            + " for path "
+                            + path
+                            + ".");
+        }
+    }
+
+    private static void addMissingOption(
+            Options originOptions, String key, List<String> missingOptions) {
+        if (!originOptions.containsKey(key) || originOptions.get(key) == null) {
+            missingOptions.add(key);
+        }
     }
 }
