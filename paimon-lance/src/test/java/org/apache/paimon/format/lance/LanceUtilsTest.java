@@ -194,6 +194,25 @@ class LanceUtilsTest {
     }
 
     @Test
+    void testRestTokenOptionsDoNotMutateFileIOOptions() {
+        Path path = new Path("oss://my-bucket/path/to/file.lance");
+        Options fileIOOptions = new Options();
+        TestFileIO fileIO = new TestFileIO();
+        fileIO.setOptions(fileIOOptions);
+
+        Map<String, String> tokenOptions = new HashMap<>();
+        tokenOptions.put(LanceUtils.FS_OSS_ENDPOINT, "oss-example-region.example.com");
+        tokenOptions.put(LanceUtils.FS_OSS_ACCESS_KEY_ID, "test-access-key");
+        tokenOptions.put(LanceUtils.FS_OSS_ACCESS_KEY_SECRET, "test-secret-key");
+
+        LanceUtils.toLanceSpecifiedForReader(new TestRESTTokenFileIO(fileIO, tokenOptions), path);
+
+        assertFalse(fileIOOptions.containsKey(LanceUtils.FS_OSS_ENDPOINT));
+        assertFalse(fileIOOptions.containsKey(LanceUtils.FS_OSS_ACCESS_KEY_ID));
+        assertFalse(fileIOOptions.containsKey(LanceUtils.FS_OSS_ACCESS_KEY_SECRET));
+    }
+
+    @Test
     void testOssStorageOptionsRequireEndpoint() {
         Path path = new Path("oss://my-bucket/path/to/file.lance");
         Options options = new Options();

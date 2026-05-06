@@ -93,6 +93,7 @@ public class LanceUtils {
         } else {
             originOptions = new Options();
         }
+        originOptions = new Options(originOptions.toMap());
         if (tokenOptions != null) {
             for (Map.Entry<String, String> entry : tokenOptions.entrySet()) {
                 if (entry.getKey().startsWith(FS_PREFIX) && entry.getValue() != null) {
