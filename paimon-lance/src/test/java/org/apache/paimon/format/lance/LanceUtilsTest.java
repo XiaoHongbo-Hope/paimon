@@ -36,7 +36,6 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LanceUtilsTest {
@@ -213,7 +212,7 @@ class LanceUtilsTest {
     }
 
     @Test
-    void testOssStorageOptionsRequireEndpoint() {
+    void testOssStorageOptionsSkipMissingEndpoint() {
         Path path = new Path("oss://my-bucket/path/to/file.lance");
         Options options = new Options();
         options.set(LanceUtils.FS_OSS_ACCESS_KEY_ID, "test-access-key");
@@ -222,10 +221,15 @@ class LanceUtilsTest {
         TestFileIO fileIO = new TestFileIO();
         fileIO.setOptions(options);
 
-        IllegalArgumentException exception =
-                assertThrows(
-                        IllegalArgumentException.class,
-                        () -> LanceUtils.toLanceSpecifiedForWriter(fileIO, path));
-        assertTrue(exception.getMessage().contains(LanceUtils.FS_OSS_ENDPOINT));
+        Pair<Path, Map<String, String>> result = LanceUtils.toLanceSpecifiedForWriter(fileIO, path);
+
+        Map<String, String> storageOptions = result.getValue();
+        assertFalse(storageOptions.containsKey(LanceUtils.STORAGE_OPTION_ENDPOINT));
+        assertFalse(storageOptions.containsKey(LanceUtils.STORAGE_OPTION_OSS_ENDPOINT));
+        assertEquals(
+                "test-access-key", storageOptions.get(LanceUtils.STORAGE_OPTION_ACCESS_KEY_ID));
+        assertEquals(
+                "test-secret-key", storageOptions.get(LanceUtils.STORAGE_OPTION_SECRET_ACCESS_KEY));
+        assertFalse(storageOptions.containsValue(null));
     }
 }

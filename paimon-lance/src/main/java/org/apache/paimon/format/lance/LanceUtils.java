@@ -30,10 +30,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 
 /** Utils for lance all. */
@@ -78,12 +76,12 @@ public class LanceUtils {
 
         if (fileIO instanceof RESTTokenFileIO) {
             RESTTokenFileIO restTokenFileIO = (RESTTokenFileIO) fileIO;
-            tokenOptions = restTokenFileIO.validToken().token();
             try {
                 fileIO = restTokenFileIO.fileIO();
             } catch (IOException e) {
                 throw new RuntimeException("Can't get fileIO from RESTTokenFileIO", e);
             }
+            tokenOptions = restTokenFileIO.validToken().token();
         }
 
         Options originOptions;
@@ -111,7 +109,9 @@ public class LanceUtils {
                 converted = new Path(uriString.replace("traceable:/", "file:/"));
             }
         } else if ("oss".equals(schema)) {
-            validateRequiredOssOptions(originOptions, path);
+            logMissingOssOption(originOptions, FS_OSS_ENDPOINT, path);
+            logMissingOssOption(originOptions, FS_OSS_ACCESS_KEY_ID, path);
+            logMissingOssOption(originOptions, FS_OSS_ACCESS_KEY_SECRET, path);
 
             for (String key : originOptions.keySet()) {
                 if (key.startsWith(FS_PREFIX)) {
@@ -119,27 +119,33 @@ public class LanceUtils {
                 }
             }
 
-            storageOptions.put(
-                    STORAGE_OPTION_ENDPOINT,
-                    "https://" + uri.getHost() + "." + originOptions.get(FS_OSS_ENDPOINT));
-            storageOptions.put(
-                    STORAGE_OPTION_ACCESS_KEY_ID, originOptions.get(FS_OSS_ACCESS_KEY_ID));
-            storageOptions.put(
-                    STORAGE_OPTION_OSS_ACCESS_KEY_ID, originOptions.get(FS_OSS_ACCESS_KEY_ID));
-            storageOptions.put(
-                    STORAGE_OPTION_SECRET_ACCESS_KEY, originOptions.get(FS_OSS_ACCESS_KEY_SECRET));
-            storageOptions.put(
-                    STORAGE_OPTION_OSS_SECRET_ACCESS_KEY,
-                    originOptions.get(FS_OSS_ACCESS_KEY_SECRET));
+            if (originOptions.get(FS_OSS_ENDPOINT) != null) {
+                storageOptions.put(
+                        STORAGE_OPTION_ENDPOINT,
+                        "https://" + uri.getHost() + "." + originOptions.get(FS_OSS_ENDPOINT));
+                storageOptions.put(
+                        STORAGE_OPTION_OSS_ENDPOINT, originOptions.get(FS_OSS_ENDPOINT));
+            }
+            if (originOptions.get(FS_OSS_ACCESS_KEY_ID) != null) {
+                storageOptions.put(
+                        STORAGE_OPTION_ACCESS_KEY_ID, originOptions.get(FS_OSS_ACCESS_KEY_ID));
+                storageOptions.put(
+                        STORAGE_OPTION_OSS_ACCESS_KEY_ID, originOptions.get(FS_OSS_ACCESS_KEY_ID));
+            }
+            if (originOptions.get(FS_OSS_ACCESS_KEY_SECRET) != null) {
+                storageOptions.put(
+                        STORAGE_OPTION_SECRET_ACCESS_KEY,
+                        originOptions.get(FS_OSS_ACCESS_KEY_SECRET));
+                storageOptions.put(
+                        STORAGE_OPTION_OSS_SECRET_ACCESS_KEY,
+                        originOptions.get(FS_OSS_ACCESS_KEY_SECRET));
+            }
             storageOptions.put(STORAGE_OPTION_VIRTUAL_HOSTED_STYLE, "true");
-            if (originOptions.containsKey(FS_OSS_SECURITY_TOKEN)) {
+            if (originOptions.get(FS_OSS_SECURITY_TOKEN) != null) {
                 storageOptions.put(
                         STORAGE_OPTION_SESSION_TOKEN, originOptions.get(FS_OSS_SECURITY_TOKEN));
                 storageOptions.put(
                         STORAGE_OPTION_OSS_SESSION_TOKEN, originOptions.get(FS_OSS_SECURITY_TOKEN));
-            }
-            if (originOptions.containsKey(FS_OSS_ENDPOINT)) {
-                storageOptions.put(STORAGE_OPTION_OSS_ENDPOINT, originOptions.get(FS_OSS_ENDPOINT));
             }
         }
 
@@ -155,25 +161,14 @@ public class LanceUtils {
         return Pair.of(converted, storageOptions);
     }
 
-    private static void validateRequiredOssOptions(Options originOptions, Path path) {
-        List<String> missingOptions = new ArrayList<>();
-        addMissingOption(originOptions, FS_OSS_ENDPOINT, missingOptions);
-        addMissingOption(originOptions, FS_OSS_ACCESS_KEY_ID, missingOptions);
-        addMissingOption(originOptions, FS_OSS_ACCESS_KEY_SECRET, missingOptions);
-        if (!missingOptions.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "Missing required Lance OSS storage options "
-                            + missingOptions
-                            + " for path "
-                            + path
-                            + ".");
-        }
-    }
-
-    private static void addMissingOption(
-            Options originOptions, String key, List<String> missingOptions) {
+    private static void logMissingOssOption(Options originOptions, String key, Path path) {
         if (!originOptions.containsKey(key) || originOptions.get(key) == null) {
-            missingOptions.add(key);
+            LOG.warn(
+                    "Lance OSS storage option '{}' is missing for path '{}'. "
+                            + "Lance native may fall back to environment variables or report "
+                            + "a missing option error.",
+                    key,
+                    path);
         }
     }
 }
