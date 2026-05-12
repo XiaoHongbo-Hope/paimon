@@ -42,6 +42,11 @@ from pypaimon.utils.roaring_bitmap import RoaringBitmap64
 # ----------------------------- table stubs ---------------------------------
 
 
+class _StubOptions:
+    def global_index_thread_num(self):
+        return None
+
+
 class _StubSchema:
     def __init__(self):
         self.options = {}
@@ -56,6 +61,7 @@ class _StubTable:
         self.partition_keys: List[str] = [
             f.name for f in self.partition_keys_fields]
         self.table_schema = _StubSchema()
+        self.options = _StubOptions()
         self.file_io = object()
         self._entries = entries
 
