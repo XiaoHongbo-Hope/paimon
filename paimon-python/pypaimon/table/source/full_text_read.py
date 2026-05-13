@@ -18,7 +18,9 @@
 
 """Full-text read to read index files."""
 
+import os
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 from pypaimon.globalindex.full_text_search import FullTextSearch
@@ -60,12 +62,19 @@ class FullTextReadImpl(FullTextRead):
         if not splits:
             return GlobalIndexResult.create_empty()
 
+        thread_num = self._table.options.global_index_thread_num() or os.cpu_count()
+
+        with ThreadPoolExecutor(max_workers=thread_num) as executor:
+            futures = [
+                executor.submit(
+                    self._eval, s.row_range_start, s.row_range_end,
+                    s.full_text_index_files)
+                for s in splits
+            ]
+
         merged_scores = {}
-        for split in splits:
-            split_result = self._eval(
-                split.row_range_start, split.row_range_end,
-                split.full_text_index_files
-            )
+        for future in futures:
+            split_result = future.result()
             if split_result is not None:
                 score_getter = split_result.score_getter()
                 for row_id in split_result.results():
