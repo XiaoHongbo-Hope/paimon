@@ -65,10 +65,6 @@ class DataFileBatchReader(RecordBatchReader):
             for field_name in self.blob_descriptor_fields
             if field_name in self.blob_field_names
         }
-        self.blob_field_indices = {
-            i for i, field in enumerate(fields)
-            if hasattr(field.type, 'type') and field.type.type == 'BLOB'
-        }
 
     def read_arrow_batch(self, start_idx=None, end_idx=None) -> Optional[RecordBatch]:
         if isinstance(self.format_reader, FormatBlobReader):
