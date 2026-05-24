@@ -74,16 +74,6 @@ class TableRead:
 
         return _record_generator()
 
-    def to_blob_iterator(self, splits: List[Split]) -> Iterator:
-        """Alias of to_iterator(); kept for API parity.
-
-        Java has no separate blob iterator: rows always expose get_blob(pos).
-        After alignment, OffsetRow carries file_io and resolves descriptor
-        cells lazily, so the same iterator works for descriptor and inline
-        storage alike.
-        """
-        return self.to_iterator(splits)
-
     def to_arrow_batch_reader(self, splits: List[Split]) -> pyarrow.ipc.RecordBatchReader:
         schema = PyarrowFieldParser.from_paimon_schema(self.read_type)
         if self.include_row_kind:

@@ -3229,7 +3229,7 @@ class GetBlobTest(unittest.TestCase):
         read = read_builder.new_read()
 
         results = []
-        for row in read.to_blob_iterator(splits):
+        for row in read.to_iterator(splits):
             blob = row.get_blob(2)
             self.assertIsNotNone(blob)
             results.append((row.get_field(0), blob.to_data()))
@@ -3245,7 +3245,7 @@ class GetBlobTest(unittest.TestCase):
         splits = read_builder.new_scan().plan().splits()
         read = read_builder.new_read()
 
-        for row in read.to_blob_iterator(splits):
+        for row in read.to_iterator(splits):
             blob = row.get_blob(2)
             with blob.new_input_stream() as stream:
                 data = stream.read()
@@ -3257,7 +3257,7 @@ class GetBlobTest(unittest.TestCase):
         splits = read_builder.new_scan().plan().splits()
         read = read_builder.new_read()
 
-        for row in read.to_blob_iterator(splits):
+        for row in read.to_iterator(splits):
             with self.assertRaises(TypeError):
                 row.get_blob(0)
             break
