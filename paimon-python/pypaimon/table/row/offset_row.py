@@ -34,9 +34,6 @@ class OffsetRow(InternalRow):
         self._file_io = file_io
         return self
 
-    def with_blob_context(self, file_io, blob_field_indices=None) -> 'OffsetRow':
-        return self.set_file_io(file_io)
-
     def replace(self, row_tuple: tuple) -> 'OffsetRow':
         self.row_tuple = row_tuple
         if self.offset + self.arity > len(row_tuple):
