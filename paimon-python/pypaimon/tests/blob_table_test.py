@@ -3364,14 +3364,21 @@ class GetBlobNonBlobColumnSecurityTest(unittest.TestCase):
         shutil.rmtree(cls.temp_dir, ignore_errors=True)
 
     def test_get_blob_on_non_blob_column_with_magic_bytes_raises(self):
+        from unittest.mock import patch
+
         read_builder = self.table.new_read_builder()
         splits = read_builder.new_scan().plan().splits()
         read = read_builder.new_read()
 
-        for row in read.to_iterator(splits):
-            with self.assertRaises(TypeError):
-                row.get_blob(1)
-            break
+        with patch.object(
+            self.table.file_io.uri_reader_factory, 'create',
+            side_effect=AssertionError("URI resolution must not happen on non-BLOB column")
+        ) as mock_create:
+            for row in read.to_iterator(splits):
+                with self.assertRaises(TypeError):
+                    row.get_blob(1)
+                break
+            mock_create.assert_not_called()
 
 
 if __name__ == '__main__':

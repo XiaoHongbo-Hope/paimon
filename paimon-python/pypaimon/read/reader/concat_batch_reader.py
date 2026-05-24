@@ -169,14 +169,9 @@ class DataEvolutionMergeReader(RecordBatchReader):
         self.readers = readers
         self.schema = schema
         self._buffers: List[Optional[RecordBatch]] = [None] * len(readers)
-        # Inherit file_io / blob_field_indices from any inner reader (all share the same FileIO).
         for r in readers:
             if r is not None and getattr(r, 'file_io', None) is not None:
                 self.file_io = r.file_io
-                break
-        for r in readers:
-            if r is not None and getattr(r, 'blob_field_indices', None) is not None:
-                self.blob_field_indices = r.blob_field_indices
                 break
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
