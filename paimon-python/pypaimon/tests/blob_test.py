@@ -144,22 +144,17 @@ class BlobTest(unittest.TestCase):
         self.assertIsNone(Blob.from_bytes(None))
 
     def test_from_bytes_with_descriptor(self):
-        import tempfile
-        import os
-        data = b"actual blob content"
-        tmp = tempfile.NamedTemporaryFile(delete=False)
-        tmp.write(data)
-        tmp.close()
-
-        descriptor = BlobDescriptor(tmp.name, 0, len(data))
-        serialized = descriptor.serialize()
-
         from pypaimon.common.file_io import FileIO
-        file_io = FileIO.get(f"file://{os.path.dirname(tmp.name)}", {})
-        blob = Blob.from_bytes(serialized, file_io)
-        self.assertIsInstance(blob, BlobRef)
-        self.assertEqual(blob.to_data(), data)
-        os.unlink(tmp.name)
+        data = b"actual blob content"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            blob_path = os.path.join(tmp_dir, "blob.bin")
+            with open(blob_path, 'wb') as f:
+                f.write(data)
+            descriptor = BlobDescriptor(blob_path, 0, len(data))
+            file_io = FileIO.get(f"file://{tmp_dir}", {})
+            blob = Blob.from_bytes(descriptor.serialize(), file_io)
+            self.assertIsInstance(blob, BlobRef)
+            self.assertEqual(blob.to_data(), data)
 
     def test_from_bytes_descriptor_without_file_io_raises(self):
         descriptor = BlobDescriptor("/tmp/fake", 0, 10)
