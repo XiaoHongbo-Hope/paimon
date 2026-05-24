@@ -283,7 +283,12 @@ class Blob(ABC):
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError(f"Blob.from_bytes expects bytes, got {type(data)}")
         data = bytes(data)
-        if BlobDescriptor.is_blob_descriptor(data) or not allow_blob_data:
+        is_descriptor = BlobDescriptor.is_blob_descriptor(data)
+        if not allow_blob_data and not is_descriptor:
+            raise ValueError(
+                "Expected BlobDescriptor bytes, got raw bytes (allow_blob_data=False)"
+            )
+        if is_descriptor or not allow_blob_data:
             if file_io is None:
                 raise ValueError("file_io is required to resolve BlobDescriptor bytes")
             descriptor = BlobDescriptor.deserialize(data)

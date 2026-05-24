@@ -180,8 +180,7 @@ class DataFileBatchReader(RecordBatchReader):
             return None
         if not isinstance(value, bytes):
             return value
-        blob = Blob.from_bytes(value, self.file_io)
-        return blob.to_data() if blob is not None else None
+        return Blob.from_bytes(value, self.file_io).to_data()
 
     def _assign_row_tracking(self, record_batch: RecordBatch) -> RecordBatch:
         """Assign row tracking meta fields (_ROW_ID and _SEQUENCE_NUMBER)."""
