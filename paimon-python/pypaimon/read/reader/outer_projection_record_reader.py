@@ -41,6 +41,7 @@ class OuterProjectionRecordReader(RecordReader[InternalRow]):
         inner: RecordReader[InternalRow],
         inner_top_names: List[str],
         name_paths: List[List[str]],
+        file_io=None,
     ):
         if not name_paths:
             raise ValueError("name_paths must be non-empty")
@@ -58,12 +59,14 @@ class OuterProjectionRecordReader(RecordReader[InternalRow]):
             self._specs.append(_PathSpec(name_to_top_idx[top_name], list(path[1:])))
         self._inner = inner
         self._flat_arity = len(name_paths)
+        self._file_io = file_io
 
     def read_batch(self) -> Optional[RecordIterator[InternalRow]]:
         inner_batch = self._inner.read_batch()
         if inner_batch is None:
             return None
-        return _OuterProjectionIterator(inner_batch, self._specs, self._flat_arity)
+        return _OuterProjectionIterator(
+            inner_batch, self._specs, self._flat_arity, self._file_io)
 
     def close(self) -> None:
         self._inner.close()
@@ -77,11 +80,14 @@ class _OuterProjectionIterator(RecordIterator[InternalRow]):
         inner: RecordIterator[InternalRow],
         specs: List["_PathSpec"],
         flat_arity: int,
+        file_io=None,
     ):
         self._inner = inner
         self._specs = specs
         self._flat_arity = flat_arity
         self._reused_row = OffsetRow(None, 0, flat_arity)
+        if file_io is not None:
+            self._reused_row.set_file_io(file_io)
 
     def next(self) -> Optional[InternalRow]:
         inner_row = self._inner.next()

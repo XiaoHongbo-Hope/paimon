@@ -625,6 +625,18 @@ class BlobTest(unittest.TestCase):
 class BlobEndToEndTest(unittest.TestCase):
     """End-to-end tests for blob functionality with schema definition, file writing, and reading."""
 
+    @staticmethod
+    def _resolve(cell, file_io):
+        """Resolve a descriptor blob cell to actual bytes (post-Java-alignment).
+
+        FormatBlobReader emits BlobDescriptor bytes for non-null rows; tests that
+        previously asserted on raw blob content must now go through the lazy
+        Blob.from_bytes() path to obtain the resolved bytes for comparison.
+        """
+        if cell is None:
+            return None
+        return Blob.from_bytes(cell, file_io, allow_blob_data=False).to_data()
+
     def setUp(self):
         """Set up test environment."""
         self.temp_dir = tempfile.mkdtemp()
@@ -682,8 +694,8 @@ class BlobEndToEndTest(unittest.TestCase):
             self.assertIsNotNone(batch, f"{field_name} batch should not be None")
             self.assertEqual(batch.num_rows, 1, f"{field_name} should have 1 row")
 
-            # Verify data integrity
-            read_blob_data = batch.column(0)[0].as_py()
+            # Verify data integrity (FormatBlobReader emits descriptor bytes after Java alignment)
+            read_blob_data = self._resolve(batch.column(0)[0].as_py(), file_io)
             expected_blob_data = test_data[field_name].to_data()
             self.assertEqual(read_blob_data, expected_blob_data, f"{field_name} data should match")
 
@@ -801,7 +813,7 @@ class BlobEndToEndTest(unittest.TestCase):
         )
         null_batch = null_reader.read_arrow_batch()
         self.assertEqual(null_batch.num_rows, 2)
-        self.assertEqual(null_batch.column(0)[0].as_py(), b"data")
+        self.assertEqual(self._resolve(null_batch.column(0)[0].as_py(), file_io), b"data")
         self.assertIsNone(null_batch.column(0)[1].as_py())
         null_reader.close()
 
@@ -960,8 +972,8 @@ class BlobEndToEndTest(unittest.TestCase):
         self.assertIsNotNone(zero_batch)
         self.assertEqual(zero_batch.num_rows, 1)
 
-        # Verify empty blob content
-        read_zero_blob = zero_batch.column(0)[0].as_py()
+        # Verify empty blob content (resolved via descriptor after Java alignment)
+        read_zero_blob = self._resolve(zero_batch.column(0)[0].as_py(), file_io)
         self.assertEqual(read_zero_blob, b"")
         self.assertEqual(len(read_zero_blob), 0)
         zero_reader.close()
@@ -1003,7 +1015,7 @@ class BlobEndToEndTest(unittest.TestCase):
         self.assertEqual(large_sim_batch.num_rows, 1)
 
         # Verify large blob content (check prefix to avoid loading all into memory for comparison)
-        read_large_blob = large_sim_batch.column(0)[0].as_py()
+        read_large_blob = self._resolve(large_sim_batch.column(0)[0].as_py(), file_io)
         self.assertTrue(read_large_blob.startswith(b"LARGE_BLOB_CHUNK:"))
         self.assertEqual(len(read_large_blob), len(large_blob_content) * 10)
         large_sim_reader.close()
@@ -1094,9 +1106,9 @@ class BlobEndToEndTest(unittest.TestCase):
         )
         null_batch = null_reader.read_arrow_batch()
         self.assertEqual(null_batch.num_rows, 3)
-        self.assertEqual(null_batch.column(0)[0].as_py(), b"data")
+        self.assertEqual(self._resolve(null_batch.column(0)[0].as_py(), file_io), b"data")
         self.assertIsNone(null_batch.column(0)[1].as_py())
-        self.assertEqual(null_batch.column(0)[2].as_py(), b"more_data")
+        self.assertEqual(self._resolve(null_batch.column(0)[2].as_py(), file_io), b"more_data")
         null_reader.close()
 
     def test_blob_write_with_raw_bytes_starting_with_v1_prefix(self):
@@ -1123,7 +1135,7 @@ class BlobEndToEndTest(unittest.TestCase):
         try:
             batch = reader.read_arrow_batch()
             self.assertIsNotNone(batch)
-            self.assertEqual(batch.column(0)[0].as_py(), raw_bytes)
+            self.assertEqual(self._resolve(batch.column(0)[0].as_py(), file_io), raw_bytes)
         finally:
             reader.close()
 
@@ -1214,8 +1226,9 @@ class BlobEndToEndTest(unittest.TestCase):
         self.assertEqual(batch_content.num_rows, 1)
         read_content_bytes = batch_content.column(0)[0].as_py()
         self.assertIsInstance(read_content_bytes, bytes)
-        # With blob_as_descriptor=False, we should get the actual blob content
-        self.assertEqual(read_content_bytes, test_content)
+        # After Java alignment, FormatBlobReader emits descriptor bytes regardless
+        # of blob_as_descriptor; resolve via Blob.from_bytes for content comparison.
+        self.assertEqual(self._resolve(read_content_bytes, file_io), test_content)
         reader_content.close()
 
     def test_null_blob_write(self):
@@ -1261,9 +1274,9 @@ class BlobEndToEndTest(unittest.TestCase):
         batch = reader.read_arrow_batch()
         self.assertIsNotNone(batch)
         self.assertEqual(batch.num_rows, 3)
-        self.assertEqual(batch.column(0)[0].as_py(), b"hello")
+        self.assertEqual(self._resolve(batch.column(0)[0].as_py(), file_io), b"hello")
         self.assertIsNone(batch.column(0)[1].as_py())
-        self.assertEqual(batch.column(0)[2].as_py(), b"world")
+        self.assertEqual(self._resolve(batch.column(0)[2].as_py(), file_io), b"world")
         reader.close()
 
     def test_null_blob_read_as_descriptor(self):
