@@ -53,7 +53,12 @@ class BinaryRow(InternalRow):
 
     def get_blob(self, pos: int):
         from pypaimon.table.row.blob import Blob
-        return Blob.from_bytes(self.get_field(pos))
+        value = self.get_field(pos)
+        if value is None:
+            return None
+        if isinstance(value, Blob):
+            return value
+        raise TypeError(f"Cannot get Blob from {type(value)} at position {pos}")
 
     def get_row_kind(self) -> RowKind:
         return self.row_kind

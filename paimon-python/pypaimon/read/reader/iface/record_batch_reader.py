@@ -35,6 +35,7 @@ class RecordBatchReader(RecordReader):
     """
 
     file_io = None
+    blob_field_indices = None
 
     @abstractmethod
     def read_arrow_batch(self) -> Optional[RecordBatch]:
@@ -63,15 +64,19 @@ class RecordBatchReader(RecordReader):
         df = self.read_next_df()
         if df is None:
             return None
-        return InternalRowWrapperIterator(df.iter_rows(), df.width, self.file_io)
+        return InternalRowWrapperIterator(
+            df.iter_rows(), df.width, self.file_io, self.blob_field_indices)
 
 
 class InternalRowWrapperIterator(RecordIterator[InternalRow]):
-    def __init__(self, iterator: Iterator[tuple], width: int, file_io=None):
+    def __init__(self, iterator: Iterator[tuple], width: int,
+                 file_io=None, blob_field_indices=None):
         self._iterator = iterator
         self._reused_row = OffsetRow(None, 0, width)
         if file_io is not None:
             self._reused_row.set_file_io(file_io)
+        if blob_field_indices is not None:
+            self._reused_row.set_blob_field_indices(blob_field_indices)
 
     def next(self) -> Optional[InternalRow]:
         row_tuple = next(self._iterator, None)

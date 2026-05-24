@@ -556,7 +556,13 @@ class RawFileSplitRead(SplitRead):
         if not data_readers:
             return EmptyFileRecordReader()
 
-        concat_reader = ConcatBatchReader(data_readers, file_io=self.table.file_io)
+        blob_field_indices = {
+            i for i, f in enumerate(self.read_fields)
+            if hasattr(f.type, 'type') and f.type.type == 'BLOB'
+        }
+        concat_reader = ConcatBatchReader(
+            data_readers, file_io=self.table.file_io,
+            blob_field_indices=blob_field_indices)
         # if the table is appendonly table, we don't need extra filter, all predicates has pushed down
         if self.table.is_primary_key_table and self.predicate_for_reader:
             return FilterRecordReader(concat_reader, self.predicate_for_reader)
@@ -630,10 +636,16 @@ class MergeFileSplitRead(SplitRead):
         if self.outer_extract_name_paths:
             from pypaimon.read.reader.outer_projection_record_reader import \
                 OuterProjectionRecordReader
-            inner_top_names = [f.name for f in self.read_fields[-self.value_arity:]]
+            inner_value_fields = self.read_fields[-self.value_arity:]
+            inner_top_names = [f.name for f in inner_value_fields]
+            inner_blob_indices = {
+                i for i, f in enumerate(inner_value_fields)
+                if hasattr(f.type, 'type') and f.type.type == 'BLOB'
+            }
             reader = OuterProjectionRecordReader(
                 reader, inner_top_names, self.outer_extract_name_paths,
-                file_io=self.table.file_io)
+                file_io=self.table.file_io,
+                blob_field_indices=inner_blob_indices)
         if self.limit is not None:
             from pypaimon.read.reader.limited_record_reader import \
                 LimitedRecordReader
@@ -687,7 +699,13 @@ class DataEvolutionSplitRead(SplitRead):
                     lambda files=need_merge_files: self._create_union_reader(files)
                 )
 
-        merge_reader = ConcatBatchReader(suppliers, file_io=self.table.file_io)
+        de_blob_indices = {
+            i for i, f in enumerate(self.read_fields)
+            if hasattr(f.type, 'type') and f.type.type == 'BLOB'
+        }
+        merge_reader = ConcatBatchReader(
+            suppliers, file_io=self.table.file_io,
+            blob_field_indices=de_blob_indices)
         if self.predicate_for_reader is not None:
             reader = FilterRecordBatchReader(
                 merge_reader,

@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from typing import Optional
+from typing import Optional, Set
 
 from pypaimon.table.row.internal_row import InternalRow, RowKind
 
@@ -29,9 +29,14 @@ class OffsetRow(InternalRow):
         self.arity = arity
         self.row_kind_byte: int = 1
         self._file_io = None
+        self._blob_field_indices: Optional[Set[int]] = None
 
     def set_file_io(self, file_io) -> 'OffsetRow':
         self._file_io = file_io
+        return self
+
+    def set_blob_field_indices(self, indices: Set[int]) -> 'OffsetRow':
+        self._blob_field_indices = indices
         return self
 
     def replace(self, row_tuple: tuple) -> 'OffsetRow':
@@ -54,6 +59,8 @@ class OffsetRow(InternalRow):
     def get_blob(self, pos: int):
         from pypaimon.table.row.blob import Blob
 
+        if self._blob_field_indices is not None and pos not in self._blob_field_indices:
+            raise TypeError(f"Field at position {pos} is not a BLOB field")
         return Blob.from_bytes(self.get_field(pos), self._file_io)
 
     def get_row_kind(self) -> RowKind:

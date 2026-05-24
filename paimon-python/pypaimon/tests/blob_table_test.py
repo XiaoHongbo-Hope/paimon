@@ -3327,6 +3327,60 @@ class GetBlobMultiColumnTest(unittest.TestCase):
                                    (2, b'cover_2', b'thumb_2')])
 
 
+class GetBlobNonBlobColumnSecurityTest(unittest.TestCase):
+    """get_blob on a non-BLOB column must NOT trigger descriptor URI resolution,
+    even when the cell content starts with the BLOBDESC magic header. Otherwise
+    a table with attacker-controlled binary content could be weaponised into
+    SSRF on the reader's host."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.catalog = CatalogFactory.create({'warehouse': os.path.join(cls.temp_dir, 'warehouse')})
+        cls.catalog.create_database('test_db', False)
+
+        # Table has NO BLOB columns — payload is a plain VARBINARY column
+        # (pa.binary() maps to VARBINARY in pypaimon; pa.large_binary() would
+        # map to BLOB).
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('payload', pa.binary()),
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema)
+        cls.catalog.create_table('test_db.no_blob_col', schema, False)
+        cls.table = cls.catalog.get_table('test_db.no_blob_col')
+
+        # Craft a payload that starts with the BLOBDESC magic + a URI pointing
+        # to a (non-existent) location the reader must NOT touch.
+        from pypaimon.table.row.blob import BlobDescriptor
+        attacker_bytes = BlobDescriptor(
+            "/etc/should-never-be-read-by-paimon", 0, 32
+        ).serialize()
+
+        write_builder = cls.table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(pa.Table.from_pydict({
+            'id': [1],
+            'payload': [attacker_bytes],
+        }, schema=pa_schema))
+        write_builder.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_get_blob_on_non_blob_column_with_magic_bytes_raises(self):
+        read_builder = self.table.new_read_builder()
+        splits = read_builder.new_scan().plan().splits()
+        read = read_builder.new_read()
+
+        for row in read.to_iterator(splits):
+            # payload is at position 1 but it is NOT a BLOB column.
+            # get_blob MUST refuse instead of resolving the embedded URI.
+            with self.assertRaises(TypeError):
+                row.get_blob(1)
+            break
 
 
 if __name__ == '__main__':
