@@ -3327,6 +3327,64 @@ class GetBlobMultiColumnTest(unittest.TestCase):
                                    (2, b'cover_2', b'thumb_2')])
 
 
+class GetBlobThroughDescriptorConvertReaderTest(unittest.TestCase):
+    """Pin BlobDescriptorConvertReader's file_io / blob_field_indices
+    propagation. Configuring blob-descriptor-field puts the wrapper on the
+    read chain; reading via to_iterator() + row.get_blob() is the only path
+    that consumes those propagated attributes. Regressions on either line
+    would silently pass the to_arrow()-based blob_descriptor tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.catalog = CatalogFactory.create({'warehouse': os.path.join(cls.temp_dir, 'warehouse')})
+        cls.catalog.create_database('test_db', False)
+
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('pic1', pa.large_binary()),
+            ('pic2', pa.large_binary()),
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, options={
+            'row-tracking.enabled': 'true',
+            'data-evolution.enabled': 'true',
+            'blob-descriptor-field': 'pic2',
+        })
+        cls.catalog.create_table('test_db.get_blob_via_descriptor_convert', schema, False)
+        cls.table = cls.catalog.get_table('test_db.get_blob_via_descriptor_convert')
+
+        from pypaimon.table.row.blob import BlobDescriptor
+        cls.pic1_data = b'inline_pic1_payload'
+        cls.pic2_data = b'external_pic2_payload'
+        cls.pic2_path = os.path.join(cls.temp_dir, 'pic2_external_blob')
+        with open(cls.pic2_path, 'wb') as f:
+            f.write(cls.pic2_data)
+
+        write_builder = cls.table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(pa.Table.from_pydict({
+            'id': [1],
+            'pic1': [cls.pic1_data],
+            'pic2': [BlobDescriptor(cls.pic2_path, 0, len(cls.pic2_data)).serialize()],
+        }, schema=pa_schema))
+        write_builder.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_get_blob_resolves_through_descriptor_convert_reader(self):
+        read_builder = self.table.new_read_builder()
+        splits = read_builder.new_scan().plan().splits()
+        read = read_builder.new_read()
+
+        for row in read.to_iterator(splits):
+            self.assertEqual(row.get_blob(1).to_data(), self.pic1_data)
+            self.assertEqual(row.get_blob(2).to_data(), self.pic2_data)
+            break
+
+
 class GetBlobNonBlobColumnSecurityTest(unittest.TestCase):
     """SSRF defence: get_blob on a non-BLOB column must NOT resolve a
     descriptor URI even when the cell starts with the BLOBDESC magic header."""
