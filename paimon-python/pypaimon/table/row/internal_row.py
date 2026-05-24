@@ -46,9 +46,12 @@ class InternalRow(ABC):
         """
 
     def get_blob(self, pos: int) -> Optional[Any]:
-        """Returns the Blob at the given position, or None if null."""
+        """Returns the Blob at the given position, or None if null.
+
+        Requires a blob-aware row context. Use TableRead.to_blob_iterator().
+        """
         raise NotImplementedError(
-            "get_blob() is not supported by this row implementation."
+            "get_blob() requires a blob-aware row. Use TableRead.to_blob_iterator()."
         )
 
     def __str__(self) -> str:

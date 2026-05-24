@@ -39,6 +39,7 @@ from pypaimon.read.reader.empty_record_reader import EmptyFileRecordReader
 from pypaimon.read.reader.field_bunch import BlobBunch, DataBunch, FieldBunch
 from pypaimon.read.reader.filter_record_reader import FilterRecordReader
 from pypaimon.read.reader.format_avro_reader import FormatAvroReader
+from pypaimon.read.reader.blob_descriptor_convert_reader import BlobDescriptorConvertReader
 from pypaimon.read.reader.filter_record_batch_reader import FilterRecordBatchReader
 from pypaimon.read.reader.row_range_filter_record_reader import RowIdFilterRecordBatchReader
 from pypaimon.read.reader.format_blob_reader import FormatBlobReader
@@ -214,8 +215,9 @@ class SplitRead(ABC):
             if has_nested:
                 raise NotImplementedError(
                     "Nested-field projection is not supported on BLOB files")
+            blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
             format_reader = FormatBlobReader(self.table.file_io, file_path, read_file_fields,
-                                             self.read_fields, read_arrow_predicate,
+                                             self.read_fields, read_arrow_predicate, blob_as_descriptor,
                                              batch_size=batch_size)
         elif file_format == CoreOptions.FILE_FORMAT_LANCE:
             if has_nested:
@@ -253,6 +255,9 @@ class SplitRead(ABC):
         else:
             raise ValueError(f"Unexpected file format: {file_format}")
 
+        blob_as_descriptor = CoreOptions.blob_as_descriptor(self.table.options)
+        blob_descriptor_fields = CoreOptions.blob_descriptor_fields(self.table.options)
+
         index_mapping = self.create_index_mapping()
         partition_info = self._create_partition_info()
         system_fields = SpecialFields.find_system_fields(self.read_fields)
@@ -271,6 +276,8 @@ class SplitRead(ABC):
                 file.first_row_id,
                 row_tracking_enabled,
                 system_fields,
+                blob_as_descriptor=blob_as_descriptor,
+                blob_descriptor_fields=blob_descriptor_fields,
                 file_io=self.table.file_io)
         else:
             reader = DataFileBatchReader(
@@ -283,6 +290,8 @@ class SplitRead(ABC):
                 file.first_row_id,
                 row_tracking_enabled,
                 system_fields,
+                blob_as_descriptor=blob_as_descriptor,
+                blob_descriptor_fields=blob_descriptor_fields,
                 file_io=self.table.file_io)
 
         # For non-Vortex formats, wrap with RowIdFilterRecordBatchReader
@@ -547,7 +556,7 @@ class RawFileSplitRead(SplitRead):
         if not data_readers:
             return EmptyFileRecordReader()
 
-        concat_reader = ConcatBatchReader(data_readers, file_io=self.table.file_io)
+        concat_reader = ConcatBatchReader(data_readers)
         # if the table is appendonly table, we don't need extra filter, all predicates has pushed down
         if self.table.is_primary_key_table and self.predicate_for_reader:
             return FilterRecordReader(concat_reader, self.predicate_for_reader)
@@ -623,8 +632,7 @@ class MergeFileSplitRead(SplitRead):
                 OuterProjectionRecordReader
             inner_top_names = [f.name for f in self.read_fields[-self.value_arity:]]
             reader = OuterProjectionRecordReader(
-                reader, inner_top_names, self.outer_extract_name_paths,
-                file_io=self.table.file_io)
+                reader, inner_top_names, self.outer_extract_name_paths)
         if self.limit is not None:
             from pypaimon.read.reader.limited_record_reader import \
                 LimitedRecordReader
@@ -678,7 +686,7 @@ class DataEvolutionSplitRead(SplitRead):
                     lambda files=need_merge_files: self._create_union_reader(files)
                 )
 
-        merge_reader = ConcatBatchReader(suppliers, file_io=self.table.file_io)
+        merge_reader = ConcatBatchReader(suppliers)
         if self.predicate_for_reader is not None:
             reader = FilterRecordBatchReader(
                 merge_reader,
@@ -688,6 +696,10 @@ class DataEvolutionSplitRead(SplitRead):
             )
         else:
             reader = merge_reader
+
+        if (not CoreOptions.blob_as_descriptor(self.table.options)
+                and CoreOptions.blob_descriptor_fields(self.table.options)):
+            reader = BlobDescriptorConvertReader(reader, self.table)
 
         return reader
 
@@ -808,16 +820,14 @@ class DataEvolutionSplitRead(SplitRead):
                     suppliers = [lambda r=self._create_file_reader(
                         bunch.files()[0], read_field_names
                     ): r]
-                    file_record_readers[i] = MergeAllBatchReader(
-                        suppliers, batch_size=batch_size, file_io=self.table.file_io)
+                    file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 else:
                     # Create concatenated reader for multiple files
                     suppliers = [
                         partial(self._create_file_reader, file=file,
                                 read_fields=read_field_names) for file in bunch.files()
                     ]
-                    file_record_readers[i] = MergeAllBatchReader(
-                        suppliers, batch_size=batch_size, file_io=self.table.file_io)
+                    file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 self.read_fields = table_fields
 
         # Validate that all required fields are found

@@ -34,8 +34,6 @@ class RecordBatchReader(RecordReader):
     The reader that reads the pyarrow batches of records.
     """
 
-    file_io = None
-
     @abstractmethod
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         """
@@ -59,19 +57,21 @@ class RecordBatchReader(RecordReader):
             return None
         return df.iter_rows()
 
-    def read_batch(self) -> Optional[RecordIterator[InternalRow]]:
+    def read_batch(self, file_io=None, blob_field_indices=None) -> Optional[RecordIterator[InternalRow]]:
         df = self.read_next_df()
         if df is None:
             return None
-        return InternalRowWrapperIterator(df.iter_rows(), df.width, self.file_io)
+        return InternalRowWrapperIterator(
+            df.iter_rows(), df.width, file_io, blob_field_indices)
 
 
 class InternalRowWrapperIterator(RecordIterator[InternalRow]):
-    def __init__(self, iterator: Iterator[tuple], width: int, file_io=None):
+    def __init__(self, iterator: Iterator[tuple], width: int,
+                 file_io=None, blob_field_indices=None):
         self._iterator = iterator
         self._reused_row = OffsetRow(None, 0, width)
-        if file_io is not None:
-            self._reused_row.set_file_io(file_io)
+        if file_io is not None and blob_field_indices:
+            self._reused_row.with_blob_context(file_io, blob_field_indices)
 
     def next(self) -> Optional[InternalRow]:
         row_tuple = next(self._iterator, None)

@@ -29,10 +29,9 @@ _MIN_BATCH_SIZE_TO_REFILL = 1024
 
 class ConcatBatchReader(RecordBatchReader):
 
-    def __init__(self, reader_suppliers: List[Callable], file_io=None):
+    def __init__(self, reader_suppliers: List[Callable]):
         self.queue: collections.deque[Callable] = collections.deque(reader_suppliers)
         self.current_reader: Optional[RecordBatchReader] = None
-        self.file_io = file_io
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         while True:
@@ -62,12 +61,11 @@ class MergeAllBatchReader(RecordBatchReader):
     into a single batch for processing.
     """
 
-    def __init__(self, reader_suppliers: List[Callable], batch_size: int = 1024, file_io=None):
+    def __init__(self, reader_suppliers: List[Callable], batch_size: int = 1024):
         self.reader_suppliers = reader_suppliers
         self.merged_batch: Optional[RecordBatch] = None
         self.reader = None
         self._batch_size = batch_size
-        self.file_io = file_io
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         if self.reader:
@@ -166,11 +164,6 @@ class DataEvolutionMergeReader(RecordBatchReader):
         self.readers = readers
         self.schema = schema
         self._buffers: List[Optional[RecordBatch]] = [None] * len(readers)
-        # Inherit file_io from any inner reader (all share the same FileIO).
-        for r in readers:
-            if r is not None and getattr(r, 'file_io', None) is not None:
-                self.file_io = r.file_io
-                break
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         batches: List[Optional[RecordBatch]] = [None] * len(self.readers)
