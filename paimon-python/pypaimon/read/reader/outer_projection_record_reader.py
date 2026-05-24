@@ -61,16 +61,13 @@ class OuterProjectionRecordReader(RecordReader[InternalRow]):
         self._inner = inner
         self._flat_arity = len(name_paths)
         self._file_io = file_io
-        # Remap inner blob_field_indices into projected positions. Only top-level
-        # name paths (single-element paths) can preserve their BLOB-ness; nested
-        # extractions descend into ROW sub-structures and yield non-Blob values.
         self._blob_field_indices = None
         if blob_field_indices is not None:
-            projected = set()
-            for proj_pos, spec in enumerate(self._specs):
-                if not spec.sub_names and spec.top_idx in blob_field_indices:
-                    projected.add(proj_pos)
-            self._blob_field_indices = projected
+            self._blob_field_indices = {
+                proj_pos
+                for proj_pos, spec in enumerate(self._specs)
+                if not spec.sub_names and spec.top_idx in blob_field_indices
+            }
 
     def read_batch(self) -> Optional[RecordIterator[InternalRow]]:
         inner_batch = self._inner.read_batch()
