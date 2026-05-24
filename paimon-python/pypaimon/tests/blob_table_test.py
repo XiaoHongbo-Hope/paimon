@@ -3223,7 +3223,7 @@ class GetBlobTest(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.temp_dir, ignore_errors=True)
 
-    def test_get_blob_lazy_access(self):
+    def test_get_blob_access(self):
         read_builder = self.table.new_read_builder()
         splits = read_builder.new_scan().plan().splits()
         read = read_builder.new_read()

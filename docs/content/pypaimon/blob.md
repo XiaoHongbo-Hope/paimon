@@ -112,7 +112,7 @@ genuinely lazy depends on how the table is configured:
 This mirrors Java's `BlobFormatReader` semantics.
 
 For genuine on-demand streaming of large blobs (videos, model weights),
-write the table with `blob-as-descriptor=true`:
+configure `blob-as-descriptor=true` before reading:
 
 ```python
 schema = Schema.from_pyarrow_schema(
