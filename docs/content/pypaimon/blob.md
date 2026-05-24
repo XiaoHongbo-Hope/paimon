@@ -82,7 +82,7 @@ writer.close()
 ## Reading Blob Data
 
 Use `row.get_blob(pos)` to access blob columns. It returns a `Blob` object
-regardless of how the blob is stored (inline or as a descriptor).
+regardless of how the blob is stored.
 
 ```python
 read_builder = table.new_read_builder()
@@ -93,18 +93,41 @@ for row in read.to_iterator(splits):
     blob = row.get_blob(2)
     if blob is None:
         continue
-
-    # Option A: load the entire blob into memory
     data = blob.to_data()
-
-    # Option B: stream (recommended for large blobs)
-    with blob.new_input_stream() as stream:
-        chunk = stream.read(1024)
 ```
 
-`blob.new_input_stream()` returns a file-like object for streaming access —
-useful when blobs are large (videos, model weights) and loading the whole
-payload into memory is undesirable.
+## Streaming for Large Blobs
+
+`blob.new_input_stream()` returns a file-like object. Whether it is
+genuinely lazy depends on how the table is configured:
+
+- Default mode (`blob-as-descriptor=false`): the read path materialises
+  the payload before it reaches `row.get_blob(pos)`. `Blob` is a
+  `BlobData` and `new_input_stream()` wraps the in-memory bytes — not
+  true streaming. For large blobs this can still OOM.
+- Descriptor mode (`blob-as-descriptor=true`): the read path preserves
+  the descriptor. `Blob` is a `BlobRef` and `new_input_stream()` opens
+  the underlying file on demand.
+
+This mirrors Java's `BlobFormatReader` semantics.
+
+For genuine on-demand streaming of large blobs (videos, model weights),
+write the table with `blob-as-descriptor=true`:
+
+```python
+schema = Schema.from_pyarrow_schema(
+    pa_schema,
+    options={
+        'row-tracking.enabled': 'true',
+        'data-evolution.enabled': 'true',
+        'blob-as-descriptor': 'true',
+    },
+)
+# Reads of this table return BlobRef whose new_input_stream() is lazy.
+for row in read.to_iterator(splits):
+    with row.get_blob(2).new_input_stream() as stream:
+        chunk = stream.read(1024)
+```
 
 ## Lower-level: `Blob.from_bytes`
 
