@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from typing import Optional, Set
+from typing import Optional
 
 from pypaimon.table.row.internal_row import InternalRow, RowKind
 
@@ -29,12 +29,13 @@ class OffsetRow(InternalRow):
         self.arity = arity
         self.row_kind_byte: int = 1
         self._file_io = None
-        self._blob_field_indices: Optional[Set[int]] = None
 
-    def with_blob_context(self, file_io, blob_field_indices: Set[int]) -> 'OffsetRow':
+    def set_file_io(self, file_io) -> 'OffsetRow':
         self._file_io = file_io
-        self._blob_field_indices = blob_field_indices
         return self
+
+    def with_blob_context(self, file_io, blob_field_indices=None) -> 'OffsetRow':
+        return self.set_file_io(file_io)
 
     def replace(self, row_tuple: tuple) -> 'OffsetRow':
         self.row_tuple = row_tuple
@@ -54,22 +55,9 @@ class OffsetRow(InternalRow):
         return self.row_tuple[self.offset + pos]
 
     def get_blob(self, pos: int):
-        from pypaimon.table.row.blob import Blob, BlobDescriptor
+        from pypaimon.table.row.blob import Blob
 
-        if self._blob_field_indices is not None and pos not in self._blob_field_indices:
-            raise TypeError(f"Field at position {pos} is not a BLOB field")
-        value = self.get_field(pos)
-        if value is None:
-            return None
-        if isinstance(value, (bytes, bytearray)):
-            value = bytes(value)
-            if BlobDescriptor.is_blob_descriptor(value):
-                descriptor = BlobDescriptor.deserialize(value)
-                uri_reader = self._file_io.uri_reader_factory.create(descriptor.uri)
-                return Blob.from_descriptor(uri_reader, descriptor)
-            else:
-                return Blob.from_data(value)
-        raise TypeError(f"Cannot convert {type(value)} to Blob")
+        return Blob.from_bytes(self.get_field(pos), self._file_io)
 
     def get_row_kind(self) -> RowKind:
         return RowKind(self.row_kind_byte)

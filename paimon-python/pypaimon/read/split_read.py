@@ -556,7 +556,7 @@ class RawFileSplitRead(SplitRead):
         if not data_readers:
             return EmptyFileRecordReader()
 
-        concat_reader = ConcatBatchReader(data_readers)
+        concat_reader = ConcatBatchReader(data_readers, file_io=self.table.file_io)
         # if the table is appendonly table, we don't need extra filter, all predicates has pushed down
         if self.table.is_primary_key_table and self.predicate_for_reader:
             return FilterRecordReader(concat_reader, self.predicate_for_reader)
@@ -632,7 +632,8 @@ class MergeFileSplitRead(SplitRead):
                 OuterProjectionRecordReader
             inner_top_names = [f.name for f in self.read_fields[-self.value_arity:]]
             reader = OuterProjectionRecordReader(
-                reader, inner_top_names, self.outer_extract_name_paths)
+                reader, inner_top_names, self.outer_extract_name_paths,
+                file_io=self.table.file_io)
         if self.limit is not None:
             from pypaimon.read.reader.limited_record_reader import \
                 LimitedRecordReader
@@ -686,7 +687,7 @@ class DataEvolutionSplitRead(SplitRead):
                     lambda files=need_merge_files: self._create_union_reader(files)
                 )
 
-        merge_reader = ConcatBatchReader(suppliers)
+        merge_reader = ConcatBatchReader(suppliers, file_io=self.table.file_io)
         if self.predicate_for_reader is not None:
             reader = FilterRecordBatchReader(
                 merge_reader,
@@ -820,14 +821,16 @@ class DataEvolutionSplitRead(SplitRead):
                     suppliers = [lambda r=self._create_file_reader(
                         bunch.files()[0], read_field_names
                     ): r]
-                    file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
+                    file_record_readers[i] = MergeAllBatchReader(
+                        suppliers, batch_size=batch_size, file_io=self.table.file_io)
                 else:
                     # Create concatenated reader for multiple files
                     suppliers = [
                         partial(self._create_file_reader, file=file,
                                 read_fields=read_field_names) for file in bunch.files()
                     ]
-                    file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
+                    file_record_readers[i] = MergeAllBatchReader(
+                        suppliers, batch_size=batch_size, file_io=self.table.file_io)
                 self.read_fields = table_fields
 
         # Validate that all required fields are found
