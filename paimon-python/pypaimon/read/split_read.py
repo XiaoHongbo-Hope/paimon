@@ -832,16 +832,14 @@ class DataEvolutionSplitRead(SplitRead):
                     suppliers = [lambda r=self._create_file_reader(
                         bunch.files()[0], read_field_names
                     ): r]
-                    file_record_readers[i] = MergeAllBatchReader(
-                        suppliers, batch_size=batch_size, file_io=self.table.file_io)
+                    file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 else:
                     # Create concatenated reader for multiple files
                     suppliers = [
                         partial(self._create_file_reader, file=file,
                                 read_fields=read_field_names) for file in bunch.files()
                     ]
-                    file_record_readers[i] = MergeAllBatchReader(
-                        suppliers, batch_size=batch_size, file_io=self.table.file_io)
+                    file_record_readers[i] = MergeAllBatchReader(suppliers, batch_size=batch_size)
                 self.read_fields = table_fields
 
         # Validate that all required fields are found

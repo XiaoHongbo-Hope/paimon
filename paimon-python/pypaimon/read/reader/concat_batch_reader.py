@@ -63,14 +63,11 @@ class MergeAllBatchReader(RecordBatchReader):
     into a single batch for processing.
     """
 
-    def __init__(self, reader_suppliers: List[Callable], batch_size: int = 1024,
-                 file_io=None, blob_field_indices=None):
+    def __init__(self, reader_suppliers: List[Callable], batch_size: int = 1024):
         self.reader_suppliers = reader_suppliers
         self.merged_batch: Optional[RecordBatch] = None
         self.reader = None
         self._batch_size = batch_size
-        self.file_io = file_io
-        self.blob_field_indices = blob_field_indices
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         if self.reader:
@@ -169,10 +166,6 @@ class DataEvolutionMergeReader(RecordBatchReader):
         self.readers = readers
         self.schema = schema
         self._buffers: List[Optional[RecordBatch]] = [None] * len(readers)
-        for r in readers:
-            if r is not None and getattr(r, 'file_io', None) is not None:
-                self.file_io = r.file_io
-                break
 
     def read_arrow_batch(self) -> Optional[RecordBatch]:
         batches: List[Optional[RecordBatch]] = [None] * len(self.readers)
