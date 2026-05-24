@@ -51,6 +51,10 @@ class BinaryRow(InternalRow):
                                                             self.arity),
                                                         index, self.fields[index].type)
 
+    def get_blob(self, pos: int):
+        from pypaimon.table.row.blob import Blob
+        return Blob.from_bytes(self.get_field(pos))
+
     def get_row_kind(self) -> RowKind:
         return self.row_kind
 

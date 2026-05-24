@@ -45,11 +45,9 @@ class InternalRow(ABC):
         The number does not include RowKind. It is kept separately.
         """
 
+    @abstractmethod
     def get_blob(self, pos: int) -> Optional[Any]:
         """Returns the Blob at the given position, or None if null."""
-        raise NotImplementedError(
-            "get_blob() is not supported by this row implementation."
-        )
 
     def __str__(self) -> str:
         fields = []
