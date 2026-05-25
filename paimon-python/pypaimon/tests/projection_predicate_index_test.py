@@ -91,6 +91,27 @@ class ProjectionPredicateIndexTest(unittest.TestCase):
         w.close()
         return self.catalog.get_table(full)
 
+    def _populate_partitioned(self, table_name: str):
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('dt', pa.string()),
+        ])
+        schema = Schema.from_pyarrow_schema(pa_schema, partition_keys=['dt'])
+        full = 'default.{}'.format(table_name)
+        self.catalog.create_table(full, schema, False)
+        table = self.catalog.get_table(full)
+        wb = table.new_batch_write_builder()
+        w = wb.new_write()
+        w.write_arrow(pa.Table.from_pydict({
+            'id': [1, 2, 3],
+            'name': ['a', 'b', 'c'],
+            'dt': ['2026-01-01', '2026-01-02', '2026-01-03'],
+        }, schema=pa_schema))
+        wb.new_commit().commit(w.prepare_commit())
+        w.close()
+        return self.catalog.get_table(full)
+
     def _read(self, read_builder):
         scan = read_builder.new_scan()
         read = read_builder.new_read()
@@ -166,6 +187,18 @@ class ProjectionPredicateIndexTest(unittest.TestCase):
         self.assertEqual(actual.num_rows, 3)
         self.assertEqual(actual.column_names, ['id'])
         self.assertEqual(actual.column('id').to_pylist(), [1, 2, 3])
+
+    def test_partition_filter_with_projection_subset(self):
+        table = self._populate_partitioned('test_part_proj_subset')
+
+        rb = table.new_read_builder().with_projection(['id', 'dt'])
+        pb = rb.new_predicate_builder()
+        rb = rb.with_filter(pb.equal('dt', '2026-01-01'))
+        actual = self._read(rb).sort_by('id')
+
+        self.assertEqual(actual.num_rows, 1)
+        self.assertEqual(actual.column('id').to_pylist(), [1])
+        self.assertEqual(actual.column('dt').to_pylist(), ['2026-01-01'])
 
     def test_append_only_filter_with_projection_unchanged(self):
         """Append-only path uses arrow file-level pushdown by field name, not
