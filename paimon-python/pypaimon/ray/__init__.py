@@ -16,5 +16,6 @@
 # under the License.
 
 from pypaimon.ray.ray_paimon import read_paimon, write_paimon
+from pypaimon.ray.merge_into import merge_paimon
 
-__all__ = ["read_paimon", "write_paimon"]
+__all__ = ["read_paimon", "write_paimon", "merge_paimon"]
