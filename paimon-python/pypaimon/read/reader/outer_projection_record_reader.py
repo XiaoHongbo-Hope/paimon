@@ -95,11 +95,9 @@ class _OuterProjectionIterator(RecordIterator[InternalRow]):
         self._inner = inner
         self._specs = specs
         self._flat_arity = flat_arity
-        self._reused_row = OffsetRow(None, 0, flat_arity)
-        if file_io is not None:
-            self._reused_row.set_file_io(file_io)
-        if blob_field_indices is not None:
-            self._reused_row.set_blob_field_indices(blob_field_indices)
+        self._reused_row = OffsetRow(None, 0, flat_arity,
+                                     file_io=file_io,
+                                     blob_field_indices=blob_field_indices)
 
     def next(self) -> Optional[InternalRow]:
         inner_row = self._inner.next()

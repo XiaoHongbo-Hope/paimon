@@ -288,7 +288,7 @@ class Blob(ABC):
             raise ValueError(
                 "Expected BlobDescriptor bytes, got raw bytes (allow_blob_data=False)"
             )
-        if is_descriptor or not allow_blob_data:
+        if is_descriptor:
             if file_io is None:
                 raise ValueError("file_io is required to resolve BlobDescriptor bytes")
             descriptor = BlobDescriptor.deserialize(data)

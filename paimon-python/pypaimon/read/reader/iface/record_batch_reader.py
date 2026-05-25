@@ -72,11 +72,9 @@ class InternalRowWrapperIterator(RecordIterator[InternalRow]):
     def __init__(self, iterator: Iterator[tuple], width: int,
                  file_io=None, blob_field_indices=None):
         self._iterator = iterator
-        self._reused_row = OffsetRow(None, 0, width)
-        if file_io is not None:
-            self._reused_row.set_file_io(file_io)
-        if blob_field_indices is not None:
-            self._reused_row.set_blob_field_indices(blob_field_indices)
+        self._reused_row = OffsetRow(None, 0, width,
+                                     file_io=file_io,
+                                     blob_field_indices=blob_field_indices)
 
     def next(self) -> Optional[InternalRow]:
         row_tuple = next(self._iterator, None)

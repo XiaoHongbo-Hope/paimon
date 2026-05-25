@@ -23,21 +23,16 @@ from pypaimon.table.row.internal_row import InternalRow, RowKind
 class OffsetRow(InternalRow):
     """A InternalRow to wrap row with offset."""
 
-    def __init__(self, row_tuple: Optional[tuple], offset: int, arity: int):
+    def __init__(self, row_tuple: Optional[tuple], offset: int, arity: int,
+                 file_io=None, blob_field_indices: Optional[Iterable[int]] = None):
         self.row_tuple = row_tuple
         self.offset = offset
         self.arity = arity
         self.row_kind_byte: int = 1
-        self._file_io = None
-        self._blob_field_indices: FrozenSet[int] = frozenset()
-
-    def set_file_io(self, file_io) -> 'OffsetRow':
         self._file_io = file_io
-        return self
-
-    def set_blob_field_indices(self, indices: Iterable[int]) -> 'OffsetRow':
-        self._blob_field_indices = frozenset(indices)
-        return self
+        self._blob_field_indices: FrozenSet[int] = (
+            frozenset(blob_field_indices) if blob_field_indices is not None else frozenset()
+        )
 
     def replace(self, row_tuple: tuple) -> 'OffsetRow':
         self.row_tuple = row_tuple
