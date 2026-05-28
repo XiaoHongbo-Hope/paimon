@@ -26,7 +26,7 @@ import pyarrow as pa
 import ray
 
 from pypaimon import CatalogFactory, Schema
-from pypaimon.ray import merge_into
+from pypaimon.ray import WhenMatched, WhenNotMatched, merge_into
 
 
 class RayDataEvolutionMergeIntoTest(unittest.TestCase):
@@ -110,7 +110,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
                 source=self._source(),
                 catalog_options=self.catalog_options,
                 on=['id'],
-                when_matched_update='*',
+                when_matched=[WhenMatched(update='*')],
             )
         self.assertIn('data-evolution.enabled', str(ctx.exception))
 
@@ -122,7 +122,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
                 source=self._source(),
                 catalog_options=self.catalog_options,
                 on=['id'],
-                when_matched_update='*',
+                when_matched=[WhenMatched(update='*')],
             )
         self.assertIn('row-tracking.enabled', str(ctx.exception))
 
@@ -138,7 +138,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
                 source=bad_source,
                 catalog_options=self.catalog_options,
                 on=['id'],
-                when_matched_update='*',
+                when_matched=[WhenMatched(update='*')],
             )
         self.assertIn("'id'", str(ctx.exception))
 
@@ -170,7 +170,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             source=source,
             catalog_options=self.catalog_options,
             on=['id'],
-            when_matched_update='*',
+            when_matched=[WhenMatched(update='*')],
         )
 
         out = self._read_sorted(target)
@@ -206,7 +206,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             source=source,
             catalog_options=self.catalog_options,
             on=['id'],
-            when_matched_update={'age': 's.age'},
+            when_matched=[WhenMatched(update={'age': 's.age'})],
         )
 
         out = self._read_sorted(target)
@@ -242,23 +242,27 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             source=source,
             catalog_options=self.catalog_options,
             on=['id'],
-            when_matched_update={'age': 's.age'},
-            when_matched_update_condition=lambda r: r['s.age'] > r['t.age'],
+            when_matched=[
+                WhenMatched(
+                    update={'age': 's.age'},
+                    condition=lambda r: r['s.age'] > r['t.age'],
+                ),
+            ],
         )
 
         out = self._read_sorted(target)
         self.assertEqual(out['id'], [1, 2, 3])
         self.assertEqual(out['age'], [10, 100, 50])
 
-    def test_combined_update_and_insert(self):
+    def test_matched_multiple_clauses_first_match_wins(self):
         target = self._create_table()
         self._write(
             target,
             pa.Table.from_pydict(
                 {
-                    'id': pa.array([1, 2], type=pa.int32()),
-                    'name': ['a', 'b'],
-                    'age': pa.array([10, 20], type=pa.int32()),
+                    'id': pa.array([1, 2, 3], type=pa.int32()),
+                    'name': ['a', 'b', 'c'],
+                    'age': pa.array([10, 20, 30], type=pa.int32()),
                 },
                 schema=self.pa_schema,
             ),
@@ -266,9 +270,9 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
 
         source = pa.Table.from_pydict(
             {
-                'id': pa.array([2, 3], type=pa.int32()),
-                'name': ['b2', 'c'],
-                'age': pa.array([22, 30], type=pa.int32()),
+                'id': pa.array([1, 2, 3], type=pa.int32()),
+                'name': ['s1', 's2', 's3'],
+                'age': pa.array([5, 25, 100], type=pa.int32()),
             },
             schema=self.pa_schema,
         )
@@ -278,14 +282,18 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             source=source,
             catalog_options=self.catalog_options,
             on=['id'],
-            when_matched_update='*',
-            when_not_matched_insert='*',
+            when_matched=[
+                WhenMatched(
+                    update={'age': 1},
+                    condition=lambda r: r['s.age'] < r['t.age'],
+                ),
+                WhenMatched(update={'age': 999}),
+            ],
         )
 
         out = self._read_sorted(target)
         self.assertEqual(out['id'], [1, 2, 3])
-        self.assertEqual(out['name'], ['a', 'b2', 'c'])
-        self.assertEqual(out['age'], [10, 22, 30])
+        self.assertEqual(out['age'], [1, 999, 999])
 
     def test_not_matched_insert_appends_unmatched(self):
         target = self._create_table()
@@ -315,7 +323,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             source=source,
             catalog_options=self.catalog_options,
             on=['id'],
-            when_not_matched_insert='*',
+            when_not_matched=[WhenNotMatched(insert='*')],
         )
 
         out = self._read_sorted(target)
@@ -351,13 +359,134 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             source=source,
             catalog_options=self.catalog_options,
             on=['id'],
-            when_not_matched_insert='*',
-            when_not_matched_insert_condition=lambda r: r['s.age'] >= 50,
+            when_not_matched=[
+                WhenNotMatched(
+                    insert='*',
+                    condition=lambda r: r['s.age'] >= 50,
+                ),
+            ],
         )
 
         out = self._read_sorted(target)
         self.assertEqual(out['id'], [1, 3, 4])
         self.assertEqual(out['age'], [10, 50, 100])
+
+    def test_not_matched_multiple_clauses_first_match_wins(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['a'],
+                    'age': pa.array([10], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([2, 3], type=pa.int32()),
+                'name': ['b', 'c'],
+                'age': pa.array([5, 99], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_not_matched=[
+                WhenNotMatched(
+                    insert={'id': 's.id', 'name': 'small', 'age': 1},
+                    condition=lambda r: r['s.age'] < 10,
+                ),
+                WhenNotMatched(insert={'id': 's.id', 'name': 'big', 'age': 2}),
+            ],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2, 3])
+        self.assertEqual(out['name'], ['a', 'small', 'big'])
+        self.assertEqual(out['age'], [10, 1, 2])
+
+    def test_merge_condition_residual_predicate(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1, 2], type=pa.int32()),
+                    'name': ['a', 'b'],
+                    'age': pa.array([10, 20], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 2], type=pa.int32()),
+                'name': ['a2', 'b2'],
+                'age': pa.array([100, 5], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            merge_condition=lambda r: r['s.age'] > r['t.age'],
+            when_matched=[WhenMatched(update={'name': 's.name'})],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2])
+        self.assertEqual(out['name'], ['a2', 'b2'])
+        self.assertEqual(out['age'], [10, 5])
+
+    def test_combined_update_and_insert(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1, 2], type=pa.int32()),
+                    'name': ['a', 'b'],
+                    'age': pa.array([10, 20], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([2, 3], type=pa.int32()),
+                'name': ['b2', 'c'],
+                'age': pa.array([22, 30], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[WhenMatched(update='*')],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2, 3])
+        self.assertEqual(out['name'], ['a', 'b2', 'c'])
+        self.assertEqual(out['age'], [10, 22, 30])
 
 
 if __name__ == '__main__':
