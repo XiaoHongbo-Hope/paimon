@@ -351,10 +351,7 @@ def _align_for_union(target_ds, source_ds, *, side_col: str):
     for name, t in target_type_map.items():
         union_field_types[name] = t
     for name, t in source_type_map.items():
-        if name in union_field_types:
-            if union_field_types[name] != t:
-                union_field_types[name] = pa.null()
-        else:
+        if name not in union_field_types:
             union_field_types[name] = t
 
     aligned_target = target_ds.map_batches(
@@ -378,6 +375,12 @@ def _align_for_union(target_ds, source_ds, *, side_col: str):
     return aligned_target, aligned_source
 
 
+def _schema_type_map(schema: Optional[pa.Schema]) -> Dict[str, pa.DataType]:
+    if schema is None:
+        return {}
+    return dict(zip(schema.names, schema.types))
+
+
 def _align_batch(
     batch: pa.Table,
     *,
@@ -388,12 +391,12 @@ def _align_batch(
     n = batch.num_rows
     arrays = []
     fields = []
-    present = {f.name: batch.column(f.name) for f in batch.schema}
+    present = {name: batch.column(name) for name in batch.schema.names}
     for name, target_type in union_field_types.items():
         if name in present:
             col = present[name]
             if col.type != target_type:
-                col = col.cast(target_type, safe=False) if target_type != pa.null() else pa.nulls(n, type=pa.null())
+                col = col.cast(target_type, safe=False)
             arrays.append(col)
         else:
             arrays.append(pa.nulls(n, type=target_type))

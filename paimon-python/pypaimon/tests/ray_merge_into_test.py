@@ -211,7 +211,7 @@ class RayMergeIntoTest(unittest.TestCase):
         )
         full = f"default.{name}"
         self.catalog.create_table(full, schema, False)
-        return full
+        return full, pa_schema
 
     def test_delete_raises_not_implemented(self):
         full, pa_schema = self._make_pk_table("merge_delete_unsupported")
