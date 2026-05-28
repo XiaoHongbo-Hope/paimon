@@ -81,10 +81,82 @@ def merge_into(
     source_ds = _normalize_source(source, catalog_options)
     _validate_source_on_cols(source_ds, on)
 
-    if not_matched_insert is not None:
-        raise NotImplementedError("not-matched INSERT path not yet implemented.")
     if matched_update is not None:
         raise NotImplementedError("matched UPDATE path not yet implemented.")
+
+    if not_matched_insert is not None:
+        from pypaimon.schema.data_types import PyarrowFieldParser
+
+        target_pa_schema = PyarrowFieldParser.from_paimon_schema(
+            table.table_schema.fields
+        )
+        _do_not_matched_insert(
+            target_identifier=target,
+            source_ds=source_ds,
+            on=list(on),
+            target_field_names=target_field_names,
+            target_pa_schema=target_pa_schema,
+            spec=not_matched_insert,
+            condition=when_not_matched_insert_condition,
+            catalog_options=catalog_options,
+            ray_remote_args=ray_remote_args,
+            concurrency=concurrency,
+        )
+
+
+def _do_not_matched_insert(
+    *,
+    target_identifier: str,
+    source_ds,
+    on: Sequence[str],
+    target_field_names: Sequence[str],
+    target_pa_schema: pa.Schema,
+    spec: Dict[str, Any],
+    condition: Optional[Condition],
+    catalog_options: Dict[str, str],
+    ray_remote_args: Optional[Dict[str, Any]],
+    concurrency: Optional[int],
+) -> None:
+    from pypaimon.ray.ray_paimon import read_paimon, write_paimon
+    from pypaimon.ray.shuffle import _coerce_large_string_types
+
+    target_on_ds = read_paimon(
+        target_identifier, catalog_options, projection=list(on)
+    )
+    target_keys = set()
+    for batch in target_on_ds.iter_batches(batch_format="pyarrow"):
+        cols = [batch.column(c).to_pylist() for c in on]
+        for tup in zip(*cols):
+            target_keys.add(tup)
+
+    on_list = list(on)
+    field_names = list(target_field_names)
+    insert_spec = spec
+    insert_cond = condition
+    out_schema = target_pa_schema
+
+    def _transform(batch: pa.Table) -> pa.Table:
+        rows = batch.to_pylist()
+        out = []
+        for s_row in rows:
+            key = tuple(s_row.get(c) for c in on_list)
+            if key in target_keys:
+                continue
+            if insert_cond is not None and not insert_cond(_prefixed(s_row, None)):
+                continue
+            out.append(_apply_set(insert_spec, s_row, None, field_names))
+        aligned = [{name: r.get(name) for name in field_names} for r in out]
+        result = pa.Table.from_pylist(aligned, schema=out_schema)
+        return _coerce_large_string_types(result)
+
+    transformed = source_ds.map_batches(_transform, batch_format="pyarrow")
+    write_paimon(
+        transformed,
+        target_identifier,
+        catalog_options,
+        ray_remote_args=ray_remote_args,
+        concurrency=concurrency,
+    )
 
 
 def _normalize_set_spec(

@@ -78,6 +78,20 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             schema=self.pa_schema,
         )
 
+    def _write(self, target, data):
+        table = self.catalog.get_table(target)
+        wb = table.new_batch_write_builder()
+        writer = wb.new_write()
+        writer.write_arrow(data)
+        wb.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+    def _read_sorted(self, target):
+        table = self.catalog.get_table(target)
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+        return rb.new_read().to_arrow(splits).sort_by('id').to_pydict()
+
     def test_delete_clause_rejected(self):
         target = self._create_table()
         with self.assertRaises(NotImplementedError) as ctx:
@@ -168,17 +182,77 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             )
         self.assertIn('UPDATE', str(ctx.exception))
 
-    def test_not_matched_insert_stub_not_implemented(self):
+    def test_not_matched_insert_appends_unmatched(self):
         target = self._create_table()
-        with self.assertRaises(NotImplementedError) as ctx:
-            merge_into(
-                target=target,
-                source=self._source(),
-                catalog_options=self.catalog_options,
-                on=['id'],
-                when_not_matched_insert='*',
-            )
-        self.assertIn('INSERT', str(ctx.exception))
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1, 2, 3], type=pa.int32()),
+                    'name': ['a', 'b', 'c'],
+                    'age': pa.array([10, 20, 30], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([2, 3, 4], type=pa.int32()),
+                'name': ['b2', 'c2', 'd'],
+                'age': pa.array([22, 33, 40], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_not_matched_insert='*',
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2, 3, 4])
+        self.assertEqual(out['name'], ['a', 'b', 'c', 'd'])
+        self.assertEqual(out['age'], [10, 20, 30, 40])
+
+    def test_not_matched_insert_with_condition(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['a'],
+                    'age': pa.array([10], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([2, 3, 4], type=pa.int32()),
+                'name': ['b', 'c', 'd'],
+                'age': pa.array([5, 50, 100], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_not_matched_insert='*',
+            when_not_matched_insert_condition=lambda r: r['s.age'] >= 50,
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 3, 4])
+        self.assertEqual(out['age'], [10, 50, 100])
 
 
 if __name__ == '__main__':
