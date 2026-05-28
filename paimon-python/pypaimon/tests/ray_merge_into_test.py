@@ -234,6 +234,30 @@ class RayMergeIntoTest(unittest.TestCase):
                 when_not_matched_by_source_delete_condition=lambda r: True,
             )
 
+    def test_duplicate_source_rows_raise(self):
+        full, pa_schema = self._make_pk_table("merge_dup_source")
+        self._write(full, pa.Table.from_pydict({
+            "id": [1],
+            "name": ["Old"],
+            "value": [10],
+        }, schema=pa_schema))
+
+        source = pa.Table.from_pydict({
+            "id": [1, 1],
+            "name": ["A", "B"],
+            "value": [100, 200],
+        }, schema=pa_schema)
+
+        with self.assertRaises(ValueError) as ctx:
+            merge_paimon(
+                target=full,
+                source=source,
+                catalog_options=self.catalog_options,
+                on=["id"],
+                when_matched_update="*",
+            )
+        self.assertIn("source must be unique", str(ctx.exception))
+
     def test_validation_errors(self):
         # append-only table (no PK) → ValueError
         ao_schema = pa.schema([("id", pa.int32()), ("v", pa.int64())])

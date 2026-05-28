@@ -336,8 +336,8 @@ def _compute_target_projection(
 def _required_target_cols_for_passthrough(
     spec: Optional[Dict[str, Any]], target_field_names: Sequence[str]
 ) -> List[str]:
-    if not spec:
-        return list(target_field_names)
+    if spec is None:
+        return []
     return [col for col in target_field_names if col not in spec]
 
 
@@ -410,20 +410,26 @@ def _merge_groups(group: pa.Table, *, cfg: _MergeConfig) -> pa.Table:
     if group.num_rows == 0:
         return pa.Table.from_pylist([], schema=cfg.target_pa_schema)
     side_mask = pc.equal(group.column(cfg.side_col), _SIDE_TARGET)
-    target_table = group.filter(side_mask).drop([cfg.side_col])
-    source_table = group.filter(pc.invert(side_mask)).drop([cfg.side_col])
+    target_table = group.filter(side_mask).drop_columns([cfg.side_col])
+    source_table = group.filter(pc.invert(side_mask)).drop_columns([cfg.side_col])
     target_rows = target_table.to_pylist()
     source_rows = source_table.to_pylist()
     output_rows: List[Dict[str, Any]] = []
 
     if target_rows and source_rows:
         if cfg.matched_update is not None:
+            if len(source_rows) > 1:
+                raise ValueError(
+                    f"MERGE INTO matched {len(source_rows)} source rows against "
+                    f"the same target key on {list(cfg.on)}; source must be unique "
+                    f"on the 'on' columns."
+                )
+            s_row = source_rows[0]
             for t_row in target_rows:
-                for s_row in source_rows:
-                    combined = _prefixed(s_row, t_row)
-                    if cfg.matched_update_condition is not None and not cfg.matched_update_condition(combined):
-                        continue
-                    output_rows.append(_apply_set(cfg.matched_update, s_row, t_row, cfg.target_field_names))
+                combined = _prefixed(s_row, t_row)
+                if cfg.matched_update_condition is not None and not cfg.matched_update_condition(combined):
+                    continue
+                output_rows.append(_apply_set(cfg.matched_update, s_row, t_row, cfg.target_field_names))
     elif source_rows and not target_rows:
         if cfg.not_matched_insert is not None:
             for s_row in source_rows:
