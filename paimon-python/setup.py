@@ -152,7 +152,7 @@ setup(
     },
     extras_require={
         'ray': [
-            'ray>=2.10,<3; python_version>="3.7"',
+            'ray>=2.50,<3; python_version>="3.7"',
         ],
         'torch': [
             'torch',
