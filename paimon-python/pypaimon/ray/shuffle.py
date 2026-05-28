@@ -53,21 +53,15 @@ if TYPE_CHECKING:
 BUCKET_KEY_COL = "__paimon_bucket__"
 
 
-def _pick_collision_safe_col_name(existing_names, base: str) -> str:
-    """Return a column name guaranteed not to collide with ``existing_names``.
-
-    Prefer ``base`` itself; on collision, append a short uuid suffix.
-    """
-    if base not in existing_names:
-        return base
+def _pick_bucket_col_name(existing_names) -> str:
+    """Return a bucket column name guaranteed not to collide with
+    ``existing_names``. Falls back to a UUID suffix on collision."""
+    if BUCKET_KEY_COL not in existing_names:
+        return BUCKET_KEY_COL
     while True:
-        candidate = "{}_{}_".format(base.rstrip("_"), uuid.uuid4().hex[:8])
+        candidate = "__paimon_bucket_{}_".format(uuid.uuid4().hex[:8])
         if candidate not in existing_names:
             return candidate
-
-
-def _pick_bucket_col_name(existing_names) -> str:
-    return _pick_collision_safe_col_name(existing_names, BUCKET_KEY_COL)
 
 
 def maybe_apply_repartition(
