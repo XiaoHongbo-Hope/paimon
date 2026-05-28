@@ -81,15 +81,26 @@ def merge_into(
     source_ds = _normalize_source(source, catalog_options)
     _validate_source_on_cols(source_ds, on)
 
+    from pypaimon.schema.data_types import PyarrowFieldParser
+
+    target_pa_schema = PyarrowFieldParser.from_paimon_schema(
+        table.table_schema.fields
+    )
+
     if matched_update is not None:
-        raise NotImplementedError("matched UPDATE path not yet implemented.")
+        _do_matched_update(
+            target_table=table,
+            target_identifier=target,
+            source_ds=source_ds,
+            on=list(on),
+            target_field_names=target_field_names,
+            target_pa_schema=target_pa_schema,
+            spec=matched_update,
+            condition=when_matched_update_condition,
+            catalog_options=catalog_options,
+        )
 
     if not_matched_insert is not None:
-        from pypaimon.schema.data_types import PyarrowFieldParser
-
-        target_pa_schema = PyarrowFieldParser.from_paimon_schema(
-            table.table_schema.fields
-        )
         _do_not_matched_insert(
             target_identifier=target,
             source_ds=source_ds,
@@ -157,6 +168,89 @@ def _do_not_matched_insert(
         ray_remote_args=ray_remote_args,
         concurrency=concurrency,
     )
+
+
+def _do_matched_update(
+    *,
+    target_table,
+    target_identifier: str,
+    source_ds,
+    on: Sequence[str],
+    target_field_names: Sequence[str],
+    target_pa_schema: pa.Schema,
+    spec: Dict[str, Any],
+    condition: Optional[Condition],
+    catalog_options: Dict[str, str],
+) -> None:
+    from pypaimon.ray.ray_paimon import read_paimon
+    from pypaimon.table.special_fields import SpecialFields
+
+    row_id_name = SpecialFields.ROW_ID.name
+    update_cols = list(spec.keys())
+    needed_cols = _needed_target_cols(spec, on, update_cols, target_field_names, condition)
+    projection = [row_id_name] + [c for c in needed_cols if c != row_id_name]
+
+    target_ds = read_paimon(target_identifier, catalog_options, projection=projection)
+    target_by_key: Dict[tuple, Dict[str, Any]] = {}
+    for batch in target_ds.iter_batches(batch_format="pyarrow"):
+        for row in batch.to_pylist():
+            key = tuple(row.get(c) for c in on)
+            target_by_key[key] = row
+
+    if not target_by_key:
+        return
+
+    field_names = list(target_field_names)
+    output_row_ids: list = []
+    output_cols: Dict[str, list] = {c: [] for c in update_cols}
+
+    for batch in source_ds.iter_batches(batch_format="pyarrow"):
+        for s_row in batch.to_pylist():
+            key = tuple(s_row.get(c) for c in on)
+            t_row = target_by_key.get(key)
+            if t_row is None:
+                continue
+            if condition is not None and not condition(_prefixed(s_row, t_row)):
+                continue
+            new_values = _apply_set(spec, s_row, t_row, field_names)
+            output_row_ids.append(t_row[row_id_name])
+            for col in update_cols:
+                output_cols[col].append(new_values[col])
+
+    if not output_row_ids:
+        return
+
+    pydict = {row_id_name: output_row_ids}
+    pydict.update(output_cols)
+    schema_fields = [pa.field(row_id_name, pa.int64(), nullable=False)]
+    for col in update_cols:
+        schema_fields.append(target_pa_schema.field(col))
+    update_table = pa.Table.from_pydict(pydict, schema=pa.schema(schema_fields))
+
+    wb = target_table.new_batch_write_builder()
+    tu = wb.new_update().with_update_type(update_cols)
+    msgs = tu.update_by_arrow_with_row_id(update_table)
+    tc = wb.new_commit()
+    tc.commit(msgs)
+    tc.close()
+
+
+def _needed_target_cols(
+    spec: Dict[str, Any],
+    on: Sequence[str],
+    update_cols: Sequence[str],
+    all_target_cols: Sequence[str],
+    condition: Optional[Condition],
+) -> list:
+    if condition is not None:
+        return list(all_target_cols)
+    needed = set(on) | set(update_cols)
+    for value in spec.values():
+        if callable(value):
+            return list(all_target_cols)
+        if isinstance(value, str) and value.startswith("t."):
+            needed.add(value[2:])
+    return [c for c in all_target_cols if c in needed]
 
 
 def _normalize_set_spec(
