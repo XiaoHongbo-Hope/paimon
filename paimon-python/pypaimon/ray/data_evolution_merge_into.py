@@ -34,25 +34,11 @@ def merge_into(
     on: Sequence[str],
     when_matched_update: Optional[SetSpec] = None,
     when_matched_update_condition: Optional[Condition] = None,
-    when_matched_delete_condition: Optional[Condition] = None,
     when_not_matched_insert: Optional[SetSpec] = None,
     when_not_matched_insert_condition: Optional[Condition] = None,
-    when_not_matched_by_source_update: Optional[Dict[str, Any]] = None,
-    when_not_matched_by_source_update_condition: Optional[Condition] = None,
-    when_not_matched_by_source_delete_condition: Optional[Condition] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     concurrency: Optional[int] = None,
 ) -> None:
-    if when_matched_delete_condition is not None:
-        raise NotImplementedError("WHEN MATCHED THEN DELETE is not supported.")
-    if (
-        when_not_matched_by_source_update is not None
-        or when_not_matched_by_source_update_condition is not None
-        or when_not_matched_by_source_delete_condition is not None
-    ):
-        raise NotImplementedError(
-            "WHEN NOT MATCHED BY SOURCE clauses are not supported."
-        )
     if when_matched_update is None and when_not_matched_insert is None:
         raise ValueError(
             "At least one of when_matched_update or when_not_matched_insert "

@@ -92,34 +92,6 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         splits = rb.new_scan().plan().splits()
         return rb.new_read().to_arrow(splits).sort_by('id').to_pydict()
 
-    def test_delete_clause_rejected(self):
-        target = self._create_table()
-        with self.assertRaises(NotImplementedError) as ctx:
-            merge_into(
-                target=target,
-                source=self._source(),
-                catalog_options=self.catalog_options,
-                on=['id'],
-                when_matched_delete_condition=lambda r: True,
-            )
-        self.assertIn('DELETE', str(ctx.exception))
-
-    def test_not_matched_by_source_clauses_rejected(self):
-        target = self._create_table()
-        for kwargs in (
-            {'when_not_matched_by_source_update': {'age': 0}},
-            {'when_not_matched_by_source_update_condition': lambda r: True},
-            {'when_not_matched_by_source_delete_condition': lambda r: True},
-        ):
-            with self.assertRaises(NotImplementedError):
-                merge_into(
-                    target=target,
-                    source=self._source(),
-                    catalog_options=self.catalog_options,
-                    on=['id'],
-                    **kwargs,
-                )
-
     def test_no_clause_raises(self):
         target = self._create_table()
         with self.assertRaises(ValueError):
