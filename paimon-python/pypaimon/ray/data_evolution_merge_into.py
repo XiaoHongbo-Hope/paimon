@@ -118,7 +118,7 @@ def merge_into(
     base_snapshot = table.snapshot_manager().get_latest_snapshot()
     is_self_merge = isinstance(source, str) and source == target
 
-    update_arrow: Optional[pa.Table] = None
+    update_ds = None
     update_cols_union: List[str] = []
     write_update_cols: List[str] = []
     if matched_specs:
@@ -127,7 +127,7 @@ def merge_into(
             _check_global_index_collision(table, base_snapshot, update_cols_union)
         write_update_cols = [c for c in update_cols_union if c not in target_on_cols]
         if write_update_cols:
-            update_arrow = _compute_matched_update(
+            update_ds = _build_matched_update_ds(
                 target_identifier=target,
                 source_ds=source_ds,
                 target_on=target_on_cols,
@@ -168,11 +168,16 @@ def merge_into(
             matched_keys_override=matched_keys_override,
         )
 
-    wb = table.new_batch_write_builder()
     all_msgs: list = []
-    if update_arrow is not None and update_arrow.num_rows > 0:
-        tu = wb.new_update().with_update_type(write_update_cols)
-        all_msgs.extend(tu.update_by_arrow_with_row_id(update_arrow))
+    if update_ds is not None:
+        all_msgs.extend(
+            _distributed_update_apply(
+                update_ds,
+                table,
+                write_update_cols,
+                ray_remote_args=ray_remote_args,
+            )
+        )
     if insert_ds is not None:
         all_msgs.extend(
             _distributed_write_collect_msgs(
@@ -180,6 +185,7 @@ def merge_into(
             )
         )
     if all_msgs:
+        wb = table.new_batch_write_builder()
         tc = wb.new_commit()
         tc.commit(all_msgs)
         tc.close()
@@ -197,7 +203,7 @@ def _normalize_on(on: OnSpec) -> Tuple[List[str], List[str]]:
     return target_cols, source_cols
 
 
-def _compute_matched_update(
+def _build_matched_update_ds(
     *,
     target_identifier: str,
     source_ds,
@@ -211,7 +217,7 @@ def _compute_matched_update(
     catalog_options: Dict[str, str],
     is_self_merge: bool,
     num_partitions: int,
-) -> Optional[pa.Table]:
+):
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.table.special_fields import SpecialFields
 
@@ -228,16 +234,17 @@ def _compute_matched_update(
     projection = [row_id_name] + [c for c in needed_cols if c != row_id_name]
 
     target_ds = read_paimon(target_identifier, catalog_options, projection=projection)
+    update_schema = _build_update_schema(target_pa_schema, update_cols, row_id_name)
 
     if is_self_merge:
-        return _materialize_self_merge_update(
+        return _build_self_merge_update_ds(
             target_ds=target_ds,
             merge_condition=merge_condition,
             clauses=clauses,
             target_field_names=target_field_names,
-            target_pa_schema=target_pa_schema,
             update_cols=update_cols,
             row_id_name=row_id_name,
+            update_schema=update_schema,
         )
 
     target_renamed = target_ds.rename_columns(
@@ -261,6 +268,7 @@ def _compute_matched_update(
     captured_field_names = list(target_field_names)
     captured_row_id_name = row_id_name
     captured_on_pairs = list(zip(source_on, target_on))
+    captured_schema = update_schema
 
     def _transform(batch: pa.Table) -> pa.Table:
         rows = batch.to_pylist()
@@ -286,36 +294,29 @@ def _compute_matched_update(
                     out_cols[col].append(new_values.get(col, t_row.get(col)))
                 break
         return pa.Table.from_pydict(
-            {captured_row_id_name: out_row_ids, **out_cols}
+            {captured_row_id_name: out_row_ids, **out_cols},
+            schema=captured_schema,
         )
 
-    transformed = joined.map_batches(_transform, batch_format="pyarrow")
-    batches = [b for b in transformed.iter_batches(batch_format="pyarrow") if b.num_rows > 0]
-    if not batches:
-        return None
-    combined_table = pa.concat_tables(batches)
-
-    _check_cardinality(combined_table, row_id_name)
-    return _cast_update_arrow(
-        combined_table, target_pa_schema, update_cols, row_id_name
-    )
+    return joined.map_batches(_transform, batch_format="pyarrow")
 
 
-def _materialize_self_merge_update(
+def _build_self_merge_update_ds(
     *,
     target_ds,
     merge_condition: Optional[Condition],
     clauses: List[_NormalizedClause],
     target_field_names: Sequence[str],
-    target_pa_schema: pa.Schema,
     update_cols: Sequence[str],
     row_id_name: str,
-) -> Optional[pa.Table]:
+    update_schema: pa.Schema,
+):
     captured_clauses = clauses
     captured_merge_cond = merge_condition
     captured_update_cols = list(update_cols)
     captured_field_names = list(target_field_names)
     captured_row_id_name = row_id_name
+    captured_schema = update_schema
 
     def _transform(batch: pa.Table) -> pa.Table:
         rows = batch.to_pylist()
@@ -338,18 +339,109 @@ def _materialize_self_merge_update(
                     out_cols[col].append(new_values.get(col, t_row.get(col)))
                 break
         return pa.Table.from_pydict(
-            {captured_row_id_name: out_row_ids, **out_cols}
+            {captured_row_id_name: out_row_ids, **out_cols},
+            schema=captured_schema,
         )
 
-    transformed = target_ds.map_batches(_transform, batch_format="pyarrow")
-    batches = [b for b in transformed.iter_batches(batch_format="pyarrow") if b.num_rows > 0]
-    if not batches:
-        return None
-    combined_table = pa.concat_tables(batches)
-    _check_cardinality(combined_table, row_id_name)
-    return _cast_update_arrow(
-        combined_table, target_pa_schema, update_cols, row_id_name
+    return target_ds.map_batches(_transform, batch_format="pyarrow")
+
+
+def _build_update_schema(
+    target_pa_schema: pa.Schema,
+    update_cols: Sequence[str],
+    row_id_name: str,
+) -> pa.Schema:
+    return pa.schema(
+        [pa.field(row_id_name, pa.int64(), nullable=False)]
+        + [target_pa_schema.field(col) for col in update_cols]
     )
+
+
+def _distributed_update_apply(
+    update_ds,
+    table,
+    write_update_cols: Sequence[str],
+    *,
+    ray_remote_args: Optional[Dict[str, Any]] = None,
+) -> list:
+    import bisect
+    import pickle
+    import uuid
+
+    from pypaimon.snapshot.snapshot import BATCH_COMMIT_IDENTIFIER
+    from pypaimon.table.special_fields import SpecialFields
+    from pypaimon.write.table_update_by_row_id import TableUpdateByRowId
+
+    row_id_name = SpecialFields.ROW_ID.name
+    cols = list(write_update_cols)
+
+    for col in cols:
+        if col not in table.field_names:
+            raise ValueError(f"Column '{col}' is not in target table schema.")
+
+    planner = TableUpdateByRowId(
+        table,
+        "_merge_into_planner_" + uuid.uuid4().hex[:8],
+        BATCH_COMMIT_IDENTIFIER,
+    )
+    sorted_first_row_ids = list(planner.first_row_ids)
+    if not sorted_first_row_ids:
+        return []
+
+    frid_col = "_FIRST_ROW_ID"
+    captured_sorted = sorted_first_row_ids
+
+    def _assign_frid(batch: pa.Table) -> pa.Table:
+        if batch.num_rows == 0:
+            return batch.append_column(frid_col, pa.array([], type=pa.int64()))
+        row_ids = batch.column(row_id_name).to_pylist()
+        bisect_right = bisect.bisect_right
+        values = [
+            captured_sorted[bisect_right(captured_sorted, rid) - 1]
+            for rid in row_ids
+        ]
+        return batch.append_column(frid_col, pa.array(values, type=pa.int64()))
+
+    with_frid = update_ds.map_batches(_assign_frid, batch_format="pyarrow")
+
+    captured_table = table
+    captured_cols = cols
+
+    def _apply_group(group: pa.Table) -> pa.Table:
+        if group.num_rows == 0:
+            return pa.Table.from_pydict({"msgs_blob": pa.array([], type=pa.binary())})
+
+        group_row_ids = group.column(row_id_name).to_pylist()
+        if len(set(group_row_ids)) != len(group_row_ids):
+            seen: set = set()
+            dupes: set = set()
+            for rid in group_row_ids:
+                if rid in seen:
+                    dupes.add(rid)
+                seen.add(rid)
+            raise ValueError(
+                f"MERGE INTO matched the same target _ROW_IDs {sorted(dupes)[:5]} "
+                f"via multiple source rows; source must be unique on the join keys."
+            )
+
+        for_update = group.drop_columns([frid_col])
+        worker = TableUpdateByRowId(
+            captured_table,
+            "_merge_into_shard_" + uuid.uuid4().hex[:8],
+            BATCH_COMMIT_IDENTIFIER,
+        )
+        msgs = worker.update_columns(for_update, list(captured_cols))
+        return pa.Table.from_pydict({"msgs_blob": [pickle.dumps(msgs)]})
+
+    msgs_ds = with_frid.groupby(frid_col).map_groups(
+        _apply_group, batch_format="pyarrow"
+    )
+
+    all_msgs: list = []
+    for batch in msgs_ds.iter_batches(batch_format="pyarrow"):
+        for blob in batch.column("msgs_blob").to_pylist():
+            all_msgs.extend(pickle.loads(blob))
+    return all_msgs
 
 
 def _compute_matched_source_keys(
@@ -540,34 +632,6 @@ def _distributed_write_collect_msgs(
         write_kwargs["concurrency"] = concurrency
     insert_ds.write_datasink(sink, **write_kwargs)
     return sink.collected
-
-
-def _check_cardinality(update_table: pa.Table, row_id_name: str) -> None:
-    row_ids = update_table.column(row_id_name).to_pylist()
-    if len(set(row_ids)) == len(row_ids):
-        return
-    seen: set = set()
-    dupes: set = set()
-    for rid in row_ids:
-        if rid in seen:
-            dupes.add(rid)
-        seen.add(rid)
-    raise ValueError(
-        f"MERGE INTO matched the same target _ROW_IDs {sorted(dupes)[:5]} "
-        f"via multiple source rows; source must be unique on the join keys."
-    )
-
-
-def _cast_update_arrow(
-    update_table: pa.Table,
-    target_pa_schema: pa.Schema,
-    update_cols: Sequence[str],
-    row_id_name: str,
-) -> pa.Table:
-    schema_fields = [pa.field(row_id_name, pa.int64(), nullable=False)]
-    for col in update_cols:
-        schema_fields.append(target_pa_schema.field(col))
-    return update_table.cast(pa.schema(schema_fields))
 
 
 def _check_global_index_collision(
