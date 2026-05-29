@@ -436,7 +436,11 @@ def _distributed_update_apply(
         msgs = worker.update_columns(for_update, list(captured_cols))
         return pa.Table.from_pydict({"msgs_blob": [pickle.dumps(msgs)]})
 
-    msgs_ds = with_frid.groupby(frid_col).map_groups(
+    # One group per target data file (distinct _FIRST_ROW_ID). Size the shuffle
+    # to the real group count instead of ray's default 200, which otherwise
+    # spawns hundreds of empty reduce tasks on small/medium merges.
+    group_partitions = max(1, min(len(captured_sorted), _MAX_GROUP_PARTITIONS))
+    msgs_ds = with_frid.groupby(frid_col, num_partitions=group_partitions).map_groups(
         _apply_group, batch_format="pyarrow"
     )
 
@@ -452,6 +456,10 @@ MATCHED_SRC_IDX_MARKER = "_paimon_matched_src_idx"
 # Min rows per hash partition for the anti-join; keeps partitions non-empty
 # (ray's join crashes on empty hash partitions).
 _ANTI_JOIN_ROWS_PER_PARTITION = 8
+
+# Upper bound on the update groupby shuffle, matching ray's default hash-shuffle
+# parallelism so large tables keep today's behavior while small ones shrink.
+_MAX_GROUP_PARTITIONS = 200
 
 
 def _add_paimon_src_idx(source_ds):
