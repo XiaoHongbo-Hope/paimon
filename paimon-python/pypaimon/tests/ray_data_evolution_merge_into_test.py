@@ -606,7 +606,9 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', None])
         self.assertEqual(out['age'], [10, 99])
 
-    def test_cardinality_violation_raises(self):
+    def test_multi_source_match_silently_picks_first(self):
+        # Spark DE sets checkCardinality=false: silently dedupe target _ROW_IDs
+        # rather than raising when source has multiple rows for the same key.
         target = self._create_table()
         self._write(
             target,
@@ -629,15 +631,19 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             schema=self.pa_schema,
         )
 
-        with self.assertRaises(ValueError) as ctx:
-            merge_into(
-                target=target,
-                source=source,
-                catalog_options=self.catalog_options,
-                on=['id'],
-                when_matched=[WhenMatched(update='*')],
-            )
-        self.assertIn('source must be unique', str(ctx.exception))
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[WhenMatched(update='*')],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1])
+        # Exactly one of the source rows wins; we don't pin which.
+        self.assertIn(out['name'][0], ['x', 'y'])
+        self.assertIn(out['age'][0], [100, 200])
 
     def test_combined_writes_single_snapshot(self):
         target = self._create_table()
@@ -675,7 +681,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         after = self._snapshot_id(target)
         self.assertEqual(after, before + 1)
 
-    def test_self_merge_skips_join(self):
+    def test_self_merge_via_normal_join(self):
         target = self._create_table()
         self._write(
             target,

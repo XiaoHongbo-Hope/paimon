@@ -118,11 +118,10 @@ def merge_into(
         table = table.copy(
             {"commit.strict-mode.last-safe-snapshot": str(base_snapshot.id)}
         )
-    is_self_merge = isinstance(source, str) and source == target
 
     # Row-precise routing needs a stable per-source-row id when merge_condition
     # may differ between source rows sharing the same ON key.
-    if when_not_matched and merge_condition is not None and not is_self_merge:
+    if when_not_matched and merge_condition is not None:
         source_ds = _add_paimon_src_idx(source_ds)
 
     from pypaimon.schema.data_types import PyarrowFieldParser
@@ -151,12 +150,11 @@ def merge_into(
             target_pa_schema=target_pa_schema,
             update_cols=update_cols_union,
             catalog_options=catalog_options,
-            is_self_merge=is_self_merge,
             num_partitions=num_partitions,
         )
 
     insert_ds = None
-    if not_matched_specs and not is_self_merge:
+    if not_matched_specs:
         matched_keys_ds = None
         if merge_condition is not None:
             matched_keys_ds = _compute_matched_source_idx_ds(
@@ -228,7 +226,6 @@ def _build_matched_update_ds(
     target_pa_schema: pa.Schema,
     update_cols: Sequence[str],
     catalog_options: Dict[str, str],
-    is_self_merge: bool,
     num_partitions: int,
 ):
     from pypaimon.ray.ray_paimon import read_paimon
@@ -248,17 +245,6 @@ def _build_matched_update_ds(
 
     target_ds = read_paimon(target_identifier, catalog_options, projection=projection)
     update_schema = _build_update_schema(target_pa_schema, update_cols, row_id_name)
-
-    if is_self_merge:
-        return _build_self_merge_update_ds(
-            target_ds=target_ds,
-            merge_condition=merge_condition,
-            clauses=clauses,
-            target_field_names=target_field_names,
-            update_cols=update_cols,
-            row_id_name=row_id_name,
-            update_schema=update_schema,
-        )
 
     target_renamed = target_ds.rename_columns(
         {c: f"t.{c}" for c in target_ds.schema().names}
@@ -327,65 +313,6 @@ def _build_matched_update_ds(
         )
 
     return joined.map_batches(_transform, batch_format="pyarrow")
-
-
-def _build_self_merge_update_ds(
-    *,
-    target_ds,
-    merge_condition: Optional[Condition],
-    clauses: List[_NormalizedClause],
-    target_field_names: Sequence[str],
-    update_cols: Sequence[str],
-    row_id_name: str,
-    update_schema: pa.Schema,
-):
-    captured_clauses = clauses
-    captured_merge_cond = merge_condition
-    captured_update_cols = list(update_cols)
-    captured_field_names = list(target_field_names)
-    captured_row_id_name = row_id_name
-    captured_schema = update_schema
-
-    if _clauses_use_vector_fast_path(clauses, merge_condition):
-        first_spec = clauses[0].spec
-
-        def _fast(batch: pa.Table) -> pa.Table:
-            return _vectorized_self_merge_transform(
-                batch,
-                first_spec,
-                captured_update_cols,
-                captured_row_id_name,
-                captured_schema,
-            )
-
-        return target_ds.map_batches(_fast, batch_format="pyarrow")
-
-    def _transform(batch: pa.Table) -> pa.Table:
-        rows = batch.to_pylist()
-        out_row_ids: list = []
-        out_cols: Dict[str, list] = {c: [] for c in captured_update_cols}
-        for row in rows:
-            s_row = dict(row)
-            t_row = dict(row)
-            combined = _prefixed(s_row, t_row)
-            if captured_merge_cond is not None and not captured_merge_cond(combined):
-                continue
-            for clause in captured_clauses:
-                if clause.condition is not None and not clause.condition(combined):
-                    continue
-                new_values = _apply_set(
-                    clause.spec, s_row, t_row, captured_field_names
-                )
-                out_row_ids.append(t_row[captured_row_id_name])
-                for col in captured_update_cols:
-                    out_cols[col].append(new_values.get(col, t_row.get(col)))
-                break
-        return pa.Table.from_pydict(
-            {captured_row_id_name: out_row_ids, **out_cols},
-            schema=captured_schema,
-        )
-
-    return target_ds.map_batches(_transform, batch_format="pyarrow")
 
 
 def _build_update_schema(
@@ -471,18 +398,17 @@ def _distributed_update_apply(
         if group.num_rows == 0:
             return pa.Table.from_pydict({"msgs_blob": pa.array([], type=pa.binary())})
 
+        # Match Spark DE (checkCardinality=false): silently dedupe _ROW_ID,
+        # keep first occurrence per target row.
         group_row_ids = group.column(row_id_name).to_pylist()
         if len(set(group_row_ids)) != len(group_row_ids):
             seen: set = set()
-            dupes: set = set()
-            for rid in group_row_ids:
-                if rid in seen:
-                    dupes.add(rid)
-                seen.add(rid)
-            raise ValueError(
-                f"MERGE INTO matched the same target _ROW_IDs {sorted(dupes)[:5]} "
-                f"via multiple source rows; source must be unique on the join keys."
-            )
+            keep_indices: list = []
+            for i, rid in enumerate(group_row_ids):
+                if rid not in seen:
+                    seen.add(rid)
+                    keep_indices.append(i)
+            group = group.take(pa.array(keep_indices, type=pa.int64()))
 
         for_update = group.drop_columns([frid_col])
         worker = TableUpdateByRowId(
@@ -565,31 +491,6 @@ def _vectorized_matched_transform(
             arrays.append(_resolve_spec_array(spec[col], batch, available, on_pairs, out_type))
         else:
             arrays.append(batch.column(f"t.{col}"))
-    return pa.Table.from_arrays(arrays, schema=update_schema)
-
-
-def _vectorized_self_merge_transform(
-    batch: pa.Table,
-    spec: Dict[str, Any],
-    update_cols: Sequence[str],
-    row_id_name: str,
-    update_schema: pa.Schema,
-) -> pa.Table:
-    # In self-merge, s.X and t.X are the same row; the batch columns are
-    # unprefixed (it's the raw target read).
-    arrays: list = [batch.column(row_id_name)]
-    for col in update_cols:
-        out_type = update_schema.field(col).type
-        if col in spec:
-            val = spec[col]
-            if isinstance(val, str) and (val.startswith("s.") or val.startswith("t.")):
-                ref = val[2:]
-                arrays.append(batch.column(ref) if ref in batch.schema.names
-                              else pa.nulls(batch.num_rows, type=out_type))
-            else:
-                arrays.append(pa.array([val] * batch.num_rows, type=out_type))
-        else:
-            arrays.append(batch.column(col))
     return pa.Table.from_arrays(arrays, schema=update_schema)
 
 
