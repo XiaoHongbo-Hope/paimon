@@ -135,10 +135,10 @@ def merge_into(
 
     update_ds = None
     update_cols_union: List[str] = []
-    if matched_specs:
+    # Empty target → no rows can match; matched UPDATE is a no-op.
+    if matched_specs and base_snapshot is not None:
         update_cols_union = _union_update_cols(matched_specs)
-        if base_snapshot is not None:
-            _check_global_index_collision(table, base_snapshot, update_cols_union)
+        _check_global_index_collision(table, base_snapshot, update_cols_union)
         update_ds = _build_matched_update_ds(
             target_identifier=target,
             source_ds=source_ds,
@@ -412,16 +412,24 @@ def _distributed_update_apply(
     frid_col = "_FIRST_ROW_ID"
     captured_sorted = sorted_first_row_ids
     captured_precomputed = precomputed_info
+    total_row_count = planner.total_row_count
 
     def _assign_frid(batch: pa.Table) -> pa.Table:
         if batch.num_rows == 0:
             return batch.append_column(frid_col, pa.array([], type=pa.int64()))
         row_ids = batch.column(row_id_name).to_pylist()
         bisect_right = bisect.bisect_right
-        values = [
-            captured_sorted[bisect_right(captured_sorted, rid) - 1]
-            for rid in row_ids
-        ]
+        values: list = []
+        first = captured_sorted[0]
+        for rid in row_ids:
+            # Out-of-range _ROW_IDs would silently map via bisect wrap-around.
+            if rid is None or rid < first or rid >= total_row_count:
+                raise ValueError(
+                    f"_ROW_ID {rid} is out of valid range "
+                    f"[{first}, {total_row_count}); planner snapshot is stale "
+                    f"or matched rows come from a different table."
+                )
+            values.append(captured_sorted[bisect_right(captured_sorted, rid) - 1])
         return batch.append_column(frid_col, pa.array(values, type=pa.int64()))
 
     with_frid = update_ds.map_batches(_assign_frid, batch_format="pyarrow")
@@ -472,20 +480,13 @@ MATCHED_SRC_IDX_MARKER = "_paimon_matched_src_idx"
 
 
 def _add_paimon_src_idx(source_ds):
-    """Append a stable per-row hash to source so we can route INSERTs row-precisely
-    when merge_condition can differ between source rows sharing the same ON key."""
-    import hashlib
+    """Append a unique per-row index so INSERTs are routed by row identity,
+    not by content. Duplicate identical rows must remain distinguishable."""
+    import ray
 
-    def _add_idx(batch: pa.Table) -> pa.Table:
-        hashes = [
-            hashlib.md5(repr(sorted(r.items())).encode()).hexdigest()
-            for r in batch.to_pylist()
-        ]
-        return batch.append_column(
-            PAIMON_SRC_IDX_COL, pa.array(hashes, type=pa.string())
-        )
-
-    return source_ds.map_batches(_add_idx, batch_format="pyarrow")
+    n = source_ds.count()
+    idx_ds = ray.data.range(n).rename_columns({"id": PAIMON_SRC_IDX_COL})
+    return source_ds.zip(idx_ds)
 
 
 def _compute_matched_source_idx_ds(
@@ -518,7 +519,7 @@ def _compute_matched_source_idx_ds(
 
     captured_merge_cond = merge_condition
     captured_on_pairs = list(zip(source_on, target_on))
-    out_schema = pa.schema([pa.field(MATCHED_SRC_IDX_MARKER, pa.string())])
+    out_schema = pa.schema([pa.field(MATCHED_SRC_IDX_MARKER, pa.int64())])
 
     def _emit_matched_idx(batch: pa.Table) -> pa.Table:
         out_idx: list = []
@@ -687,11 +688,21 @@ def _check_global_index_collision(
 
 
 def _check_global_index_for_insert(table, snapshot) -> None:
-    if _scan_global_index_entries(table, snapshot):
-        raise NotImplementedError(
-            "MERGE INTO INSERT into a table with global index entries is not "
-            "supported (inserted rows would not appear in the index)."
-        )
+    entries = _scan_global_index_entries(table, snapshot)
+    if not entries:
+        return
+    field_by_id = {f.id: f.name for f in table.fields}
+    indexed = sorted(
+        {
+            field_by_id.get(e.index_file.global_index_meta.index_field_id)
+            for e in entries
+        }
+    )
+    raise NotImplementedError(
+        f"MERGE INTO INSERT is not supported on tables with global-index "
+        f"columns {indexed} (btree/lumina/tantivy). Inserted rows would not "
+        f"appear in the index. Drop the global index or omit when_not_matched."
+    )
 
 
 def _scan_global_index_entries(table, snapshot):

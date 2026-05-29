@@ -741,6 +741,105 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['y'])
         self.assertEqual(out['age'], [10])
 
+    def test_empty_target_matched_update_is_noop(self):
+        target = self._create_table()
+        before = self._snapshot_id(target)
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 2], type=pa.int32()),
+                'name': ['a', 'b'],
+                'age': pa.array([10, 20], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[WhenMatched(update='*')],
+        )
+
+        self.assertEqual(self._snapshot_id(target), before)
+
+    def test_duplicate_identical_source_rows_route_separately(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['t1'],
+                    'age': pa.array([100], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([2, 2], type=pa.int32()),
+                'name': ['dup', 'dup'],
+                'age': pa.array([5, 5], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            merge_condition=lambda r: r['s.age'] > r['t.age'],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        rows = sorted(zip(out['id'], out['name'], out['age']))
+        self.assertEqual(
+            rows,
+            [(1, 't1', 100), (2, 'dup', 5), (2, 'dup', 5)],
+        )
+
+    def test_strict_mode_rejects_when_snapshot_advances(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['x'],
+                    'age': pa.array([1], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+        current_id = self._snapshot_id(target)
+
+        table = self.catalog.get_table(target).copy(
+            {"commit.strict-mode.last-safe-snapshot": str(current_id - 1)}
+        )
+        wb = table.new_batch_write_builder()
+        tw = wb.new_write()
+        tw.write_arrow(
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([2], type=pa.int32()),
+                    'name': ['y'],
+                    'age': pa.array([2], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            )
+        )
+        msgs = tw.prepare_commit()
+        tw.close()
+
+        with self.assertRaises(RuntimeError) as ctx:
+            wb.new_commit().commit(msgs)
+        self.assertIn("strict-mode", str(ctx.exception).lower())
+
     def test_merge_condition_routes_per_source_row(self):
         target = self._create_table()
         self._write(
