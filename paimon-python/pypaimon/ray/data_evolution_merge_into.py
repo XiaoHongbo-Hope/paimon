@@ -142,7 +142,7 @@ def merge_into(
                 num_partitions=num_partitions,
             )
 
-    insert_arrow: Optional[pa.Table] = None
+    insert_ds = None
     if not_matched_specs and not is_self_merge:
         matched_keys_override: Optional[set] = None
         if merge_condition is not None:
@@ -155,7 +155,7 @@ def merge_into(
                 catalog_options=catalog_options,
                 num_partitions=num_partitions,
             )
-        insert_arrow = _compute_not_matched_insert(
+        insert_ds = _build_not_matched_insert_ds(
             target_identifier=target,
             source_ds=source_ds,
             target_on=target_on_cols,
@@ -173,11 +173,12 @@ def merge_into(
     if update_arrow is not None and update_arrow.num_rows > 0:
         tu = wb.new_update().with_update_type(write_update_cols)
         all_msgs.extend(tu.update_by_arrow_with_row_id(update_arrow))
-    if insert_arrow is not None and insert_arrow.num_rows > 0:
-        tw = wb.new_write()
-        tw.write_arrow(insert_arrow)
-        all_msgs.extend(tw.prepare_commit())
-        tw.close()
+    if insert_ds is not None:
+        all_msgs.extend(
+            _distributed_write_collect_msgs(
+                insert_ds, table, ray_remote_args=ray_remote_args, concurrency=concurrency
+            )
+        )
     if all_msgs:
         tc = wb.new_commit()
         tc.commit(all_msgs)
@@ -401,7 +402,7 @@ def _compute_matched_source_keys(
     return matched_keys
 
 
-def _compute_not_matched_insert(
+def _build_not_matched_insert_ds(
     *,
     target_identifier: str,
     source_ds,
@@ -413,7 +414,7 @@ def _compute_not_matched_insert(
     catalog_options: Dict[str, str],
     num_partitions: int,
     matched_keys_override: Optional[set] = None,
-) -> Optional[pa.Table]:
+):
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.ray.shuffle import _coerce_large_string_types
 
@@ -447,13 +448,9 @@ def _compute_not_matched_insert(
                     )
                     break
             aligned = [{name: r.get(name) for name in captured_field_names} for r in out]
-            return pa.Table.from_pylist(aligned, schema=out_schema)
+            return _coerce_large_string_types(pa.Table.from_pylist(aligned, schema=out_schema))
 
-        transformed = source_ds.map_batches(_filter_and_apply, batch_format="pyarrow")
-        batches = [b for b in transformed.iter_batches(batch_format="pyarrow") if b.num_rows > 0]
-        if not batches:
-            return None
-        return _coerce_large_string_types(pa.concat_tables(batches))
+        return source_ds.map_batches(_filter_and_apply, batch_format="pyarrow")
 
     target_ds = read_paimon(
         target_identifier, catalog_options, projection=list(target_on)
@@ -493,13 +490,49 @@ def _compute_not_matched_insert(
                 )
                 break
         aligned = [{name: r.get(name) for name in captured_field_names} for r in out]
-        return pa.Table.from_pylist(aligned, schema=out_schema)
+        return _coerce_large_string_types(pa.Table.from_pylist(aligned, schema=out_schema))
 
-    transformed = unmatched.map_batches(_transform, batch_format="pyarrow")
-    batches = [b for b in transformed.iter_batches(batch_format="pyarrow") if b.num_rows > 0]
-    if not batches:
-        return None
-    return _coerce_large_string_types(pa.concat_tables(batches))
+    return unmatched.map_batches(_transform, batch_format="pyarrow")
+
+
+def _distributed_write_collect_msgs(
+    insert_ds,
+    table,
+    *,
+    ray_remote_args: Optional[Dict[str, Any]],
+    concurrency: Optional[int],
+) -> list:
+    from pypaimon.write.ray_datasink import PaimonDatasink
+
+    class _CollectingDatasink(PaimonDatasink):
+        def __init__(self, t):
+            super().__init__(t, overwrite=False)
+            self.collected: list = []
+
+        def on_write_complete(self, write_result):
+            if hasattr(write_result, "write_returns"):
+                write_returns = write_result.write_returns
+            elif isinstance(write_result, list):
+                write_returns = write_result
+            else:
+                raise TypeError(
+                    f"Unexpected write_result type {type(write_result).__name__}"
+                )
+            self.collected = [
+                m
+                for batch in write_returns
+                for m in batch
+                if not m.is_empty()
+            ]
+
+    sink = _CollectingDatasink(table)
+    write_kwargs: Dict[str, Any] = {}
+    if ray_remote_args is not None:
+        write_kwargs["ray_remote_args"] = ray_remote_args
+    if concurrency is not None:
+        write_kwargs["concurrency"] = concurrency
+    insert_ds.write_datasink(sink, **write_kwargs)
+    return sink.collected
 
 
 def _check_cardinality(update_table: pa.Table, row_id_name: str) -> None:
