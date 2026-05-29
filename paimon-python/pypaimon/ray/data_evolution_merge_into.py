@@ -315,11 +315,13 @@ def _materialize_self_merge_update(
     captured_merge_cond = merge_condition
     captured_update_cols = list(update_cols)
     captured_field_names = list(target_field_names)
+    captured_row_id_name = row_id_name
 
-    out_row_ids: list = []
-    out_cols: Dict[str, list] = {c: [] for c in captured_update_cols}
-    for batch in target_ds.iter_batches(batch_format="pyarrow"):
-        for row in batch.to_pylist():
+    def _transform(batch: pa.Table) -> pa.Table:
+        rows = batch.to_pylist()
+        out_row_ids: list = []
+        out_cols: Dict[str, list] = {c: [] for c in captured_update_cols}
+        for row in rows:
             s_row = dict(row)
             t_row = dict(row)
             combined = _prefixed(s_row, t_row)
@@ -331,14 +333,19 @@ def _materialize_self_merge_update(
                 new_values = _apply_set(
                     clause.spec, s_row, t_row, captured_field_names
                 )
-                out_row_ids.append(t_row[row_id_name])
+                out_row_ids.append(t_row[captured_row_id_name])
                 for col in captured_update_cols:
                     out_cols[col].append(new_values.get(col, t_row.get(col)))
                 break
+        return pa.Table.from_pydict(
+            {captured_row_id_name: out_row_ids, **out_cols}
+        )
 
-    if not out_row_ids:
+    transformed = target_ds.map_batches(_transform, batch_format="pyarrow")
+    batches = [b for b in transformed.iter_batches(batch_format="pyarrow") if b.num_rows > 0]
+    if not batches:
         return None
-    combined_table = pa.Table.from_pydict({row_id_name: out_row_ids, **out_cols})
+    combined_table = pa.concat_tables(batches)
     _check_cardinality(combined_table, row_id_name)
     return _cast_update_arrow(
         combined_table, target_pa_schema, update_cols, row_id_name
