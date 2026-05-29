@@ -530,6 +530,89 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b2', 'c'])
         self.assertEqual(out['age'], [10, 22, 30])
 
+    def test_combined_update_and_insert_with_merge_condition(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1, 2], type=pa.int32()),
+                    'name': ['a', 'b'],
+                    'age': pa.array([10, 20], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 2, 3], type=pa.int32()),
+                'name': ['n1', 'n2', 'n3'],
+                'age': pa.array([100, 5, 30], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            merge_condition=lambda r: r['s.age'] > r['t.age'],
+            when_matched=[WhenMatched(update='*')],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(sorted(out['id']), [1, 2, 2, 3])
+        rows = sorted(zip(out['id'], out['name'], out['age']))
+        self.assertEqual(
+            rows,
+            [(1, 'n1', 100), (2, 'b', 20), (2, 'n2', 5), (3, 'n3', 30)],
+        )
+
+    def test_combined_matched_clause_condition_no_merge_condition(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1, 2], type=pa.int32()),
+                    'name': ['a', 'b'],
+                    'age': pa.array([10, 20], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 2, 3], type=pa.int32()),
+                'name': ['n1', 'n2', 'n3'],
+                'age': pa.array([100, 5, 30], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[
+                WhenMatched(
+                    update={'name': 's.name'},
+                    condition=lambda r: r['s.age'] > 50,
+                )
+            ],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2, 3])
+        rows = sorted(zip(out['id'], out['name'], out['age']))
+        self.assertEqual(rows, [(1, 'n1', 10), (2, 'b', 20), (3, 'n3', 30)])
+
     def test_on_with_renamed_columns(self):
         target = self._create_table()
         self._write(
