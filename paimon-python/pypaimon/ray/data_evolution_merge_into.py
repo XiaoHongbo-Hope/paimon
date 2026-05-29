@@ -433,6 +433,9 @@ def _distributed_update_apply(
 
 PAIMON_SRC_IDX_COL = "_paimon_src_idx"
 MATCHED_SRC_IDX_MARKER = "_paimon_matched_src_idx"
+# Min rows per hash partition for the anti-join; keeps partitions non-empty
+# (ray's join crashes on empty hash partitions).
+_ANTI_JOIN_ROWS_PER_PARTITION = 8
 
 
 def _add_paimon_src_idx(source_ds):
@@ -611,26 +614,25 @@ def _build_not_matched_insert_ds(
     source_renamed = source_ds.rename_columns({c: f"s.{c}" for c in source_cols})
 
     if matched_idx_ds is not None:
-        # Ray join hits a pyarrow projection bug when the right side is
-        # empty; collect matched-idx to a driver set instead. The set is
-        # bounded by # of matched source rows × ~32B per row-hash.
-        matched_idx_set: set = set()
-        for batch in matched_idx_ds.iter_batches(batch_format="pyarrow"):
-            if batch.num_rows == 0:
-                continue
-            matched_idx_set.update(
-                batch.column(MATCHED_SRC_IDX_MARKER).to_pylist()
+        # ray's join is equi-only, so anti-join source against the matched
+        # per-row ids (Spark folds this into one LeftAnti predicate). Size
+        # partitions to the matched count: ray's join crashes on empty hash
+        # partitions, so keep them dense.
+        matched_idx_ds = matched_idx_ds.materialize()
+        matched_count = matched_idx_ds.count()
+        if matched_count == 0:
+            unmatched = source_renamed
+        else:
+            anti_np = max(
+                1, min(num_partitions, matched_count // _ANTI_JOIN_ROWS_PER_PARTITION)
             )
-        captured_idx_set = matched_idx_set
-
-        def _filter_unmatched(batch: pa.Table) -> pa.Table:
-            idx_arr = batch.column(f"s.{PAIMON_SRC_IDX_COL}").to_pylist()
-            mask = [v not in captured_idx_set for v in idx_arr]
-            return batch.filter(pa.array(mask))
-
-        unmatched = source_renamed.map_batches(
-            _filter_unmatched, batch_format="pyarrow"
-        )
+            unmatched = source_renamed.join(
+                matched_idx_ds,
+                join_type="left_anti",
+                num_partitions=anti_np,
+                on=(f"s.{PAIMON_SRC_IDX_COL}",),
+                right_on=(MATCHED_SRC_IDX_MARKER,),
+            )
     else:
         target_ds = read_paimon(
             target_identifier, catalog_options, projection=list(target_on)
