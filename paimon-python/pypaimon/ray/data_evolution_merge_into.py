@@ -110,10 +110,10 @@ def merge_into(
         for c in when_not_matched
     ]
 
-    written_cols: set = set()
-    for clause in matched_specs + not_matched_specs:
-        written_cols.update(clause.spec.keys())
-    _reject_blob_writes(table, written_cols)
+    update_cols: set = set()
+    for clause in matched_specs:
+        update_cols.update(clause.spec.keys())
+    _reject_blob_updates(table, update_cols)
 
     source_ds = _normalize_source(source, catalog_options)
     _validate_source_on_cols(source_ds, source_on_cols)
@@ -804,18 +804,16 @@ def _require_ray_join() -> None:
         )
 
 
-def _reject_blob_writes(table, written_cols: set) -> None:
-    """Blob columns live in a separate .blob format we cannot produce here;
-    refuse loudly instead of emitting wrong-format files."""
+def _reject_blob_updates(table, update_cols: set) -> None:
     blob_cols = [
         f.name
         for f in table.table_schema.fields
-        if f.name in written_cols and getattr(f.type, "type", None) == "BLOB"
+        if f.name in update_cols and getattr(f.type, "type", None) == "BLOB"
     ]
     if blob_cols:
         raise NotImplementedError(
-            f"merge_into cannot write blob columns {blob_cols}; "
-            f"updating or inserting blob columns is not supported."
+            f"merge_into cannot update blob columns {blob_cols}; "
+            f"the row-id rewrite path skips .blob files."
         )
 
 

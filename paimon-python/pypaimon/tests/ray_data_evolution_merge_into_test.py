@@ -680,12 +680,10 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertIn(out['name'][0], ['x', 'y'])
         self.assertIn(out['age'][0], [100, 200])
 
-    def test_blob_write_is_rejected(self):
-        # Updating/inserting a blob column is unsupported and must fail loudly
-        # rather than emit wrong-format files.
+    def test_blob_update_is_rejected(self):
         import types
 
-        from pypaimon.ray.data_evolution_merge_into import _reject_blob_writes
+        from pypaimon.ray.data_evolution_merge_into import _reject_blob_updates
         from pypaimon.schema.data_types import AtomicType, DataField
 
         fake_table = types.SimpleNamespace(
@@ -697,9 +695,8 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             )
         )
         with self.assertRaises(NotImplementedError):
-            _reject_blob_writes(fake_table, {'payload'})
-        # Writing only non-blob columns is allowed even when blob fields exist.
-        _reject_blob_writes(fake_table, {'id'})
+            _reject_blob_updates(fake_table, {'payload'})
+        _reject_blob_updates(fake_table, {'id'})
 
     def test_combined_writes_single_snapshot(self):
         target = self._create_table()
