@@ -42,19 +42,30 @@ class TableUpdateByRowId:
 
     FIRST_ROW_ID_COLUMN = '_FIRST_ROW_ID'
 
-    def __init__(self, table, commit_user: str, commit_identifier: int):
+    def __init__(
+            self, table, commit_user: str, commit_identifier: int,
+            precomputed_files_info: Optional[Tuple[
+                int, List[int],
+                Dict[int, Tuple[DataSplit, List[DataFileMeta]]],
+                int,
+            ]] = None,
+    ):
         from pypaimon.table.file_store_table import FileStoreTable
 
         self.table: FileStoreTable = table
         self.commit_user = commit_user
         self.commit_identifier = commit_identifier
 
-        # Snapshot the current state once: a single ``first_row_id -> (split, files)``
-        # map is enough to drive every downstream lookup (partition, row-count, read).
-        (self.snapshot_id,
-         self.first_row_ids,
-         self._first_row_id_index,
-         self.total_row_count) = self._load_existing_files_info()
+        if precomputed_files_info is not None:
+            (self.snapshot_id,
+             self.first_row_ids,
+             self._first_row_id_index,
+             self.total_row_count) = precomputed_files_info
+        else:
+            (self.snapshot_id,
+             self.first_row_ids,
+             self._first_row_id_index,
+             self.total_row_count) = self._load_existing_files_info()
 
         self.commit_messages: List[CommitMessage] = []
 

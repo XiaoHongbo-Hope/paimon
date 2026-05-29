@@ -110,43 +110,55 @@ def merge_into(
     source_ds = _normalize_source(source, catalog_options)
     _validate_source_on_cols(source_ds, source_on_cols)
 
+    base_snapshot = table.snapshot_manager().get_latest_snapshot()
+    if base_snapshot is not None:
+        # Pin the snapshot so the final commit aborts if another writer
+        # commits between our read and our commit.
+        table = table.copy(
+            {"commit.strict-mode.last-safe-snapshot": str(base_snapshot.id)}
+        )
+    is_self_merge = isinstance(source, str) and source == target
+
+    # Row-precise routing needs a stable per-source-row id when merge_condition
+    # may differ between source rows sharing the same ON key.
+    if when_not_matched and merge_condition is not None and not is_self_merge:
+        source_ds = _add_paimon_src_idx(source_ds)
+
     from pypaimon.schema.data_types import PyarrowFieldParser
 
     target_pa_schema = PyarrowFieldParser.from_paimon_schema(
         table.table_schema.fields
     )
-    base_snapshot = table.snapshot_manager().get_latest_snapshot()
-    is_self_merge = isinstance(source, str) and source == target
+
+    if not_matched_specs and base_snapshot is not None:
+        _check_global_index_for_insert(table, base_snapshot)
 
     update_ds = None
     update_cols_union: List[str] = []
-    write_update_cols: List[str] = []
     if matched_specs:
         update_cols_union = _union_update_cols(matched_specs)
         if base_snapshot is not None:
             _check_global_index_collision(table, base_snapshot, update_cols_union)
-        write_update_cols = [c for c in update_cols_union if c not in target_on_cols]
-        if write_update_cols:
-            update_ds = _build_matched_update_ds(
-                target_identifier=target,
-                source_ds=source_ds,
-                target_on=target_on_cols,
-                source_on=source_on_cols,
-                merge_condition=merge_condition,
-                clauses=matched_specs,
-                target_field_names=target_field_names,
-                target_pa_schema=target_pa_schema,
-                update_cols=write_update_cols,
-                catalog_options=catalog_options,
-                is_self_merge=is_self_merge,
-                num_partitions=num_partitions,
-            )
+        update_ds = _build_matched_update_ds(
+            target_identifier=target,
+            source_ds=source_ds,
+            target_on=target_on_cols,
+            source_on=source_on_cols,
+            merge_condition=merge_condition,
+            clauses=matched_specs,
+            target_field_names=target_field_names,
+            target_pa_schema=target_pa_schema,
+            update_cols=update_cols_union,
+            catalog_options=catalog_options,
+            is_self_merge=is_self_merge,
+            num_partitions=num_partitions,
+        )
 
     insert_ds = None
     if not_matched_specs and not is_self_merge:
-        matched_keys_override: Optional[set] = None
+        matched_keys_ds = None
         if merge_condition is not None:
-            matched_keys_override = _compute_matched_source_keys(
+            matched_keys_ds = _compute_matched_source_idx_ds(
                 target_identifier=target,
                 source_ds=source_ds,
                 target_on=target_on_cols,
@@ -165,7 +177,7 @@ def merge_into(
             target_pa_schema=target_pa_schema,
             catalog_options=catalog_options,
             num_partitions=num_partitions,
-            matched_keys_override=matched_keys_override,
+            matched_idx_ds=matched_keys_ds,
         )
 
     all_msgs: list = []
@@ -174,7 +186,7 @@ def merge_into(
             _distributed_update_apply(
                 update_ds,
                 table,
-                write_update_cols,
+                update_cols_union,
                 ray_remote_args=ray_remote_args,
             )
         )
@@ -388,8 +400,18 @@ def _distributed_update_apply(
     if not sorted_first_row_ids:
         return []
 
+    # Broadcast the file-info snapshot to every worker so they skip the
+    # per-task manifest scan and observe a single consistent target view.
+    precomputed_info = (
+        planner.snapshot_id,
+        planner.first_row_ids,
+        planner._first_row_id_index,
+        planner.total_row_count,
+    )
+
     frid_col = "_FIRST_ROW_ID"
     captured_sorted = sorted_first_row_ids
+    captured_precomputed = precomputed_info
 
     def _assign_frid(batch: pa.Table) -> pa.Table:
         if batch.num_rows == 0:
@@ -429,6 +451,7 @@ def _distributed_update_apply(
             captured_table,
             "_merge_into_shard_" + uuid.uuid4().hex[:8],
             BATCH_COMMIT_IDENTIFIER,
+            precomputed_files_info=captured_precomputed,
         )
         msgs = worker.update_columns(for_update, list(captured_cols))
         return pa.Table.from_pydict({"msgs_blob": [pickle.dumps(msgs)]})
@@ -444,7 +467,28 @@ def _distributed_update_apply(
     return all_msgs
 
 
-def _compute_matched_source_keys(
+PAIMON_SRC_IDX_COL = "_paimon_src_idx"
+MATCHED_SRC_IDX_MARKER = "_paimon_matched_src_idx"
+
+
+def _add_paimon_src_idx(source_ds):
+    """Append a stable per-row hash to source so we can route INSERTs row-precisely
+    when merge_condition can differ between source rows sharing the same ON key."""
+    import hashlib
+
+    def _add_idx(batch: pa.Table) -> pa.Table:
+        hashes = [
+            hashlib.md5(repr(sorted(r.items())).encode()).hexdigest()
+            for r in batch.to_pylist()
+        ]
+        return batch.append_column(
+            PAIMON_SRC_IDX_COL, pa.array(hashes, type=pa.string())
+        )
+
+    return source_ds.map_batches(_add_idx, batch_format="pyarrow")
+
+
+def _compute_matched_source_idx_ds(
     *,
     target_identifier: str,
     source_ds,
@@ -453,7 +497,7 @@ def _compute_matched_source_keys(
     merge_condition: Condition,
     catalog_options: Dict[str, str],
     num_partitions: int,
-) -> set:
+):
     from pypaimon.ray.ray_paimon import read_paimon
 
     target_ds = read_paimon(target_identifier, catalog_options)
@@ -472,33 +516,26 @@ def _compute_matched_source_keys(
         right_on=tuple(f"s.{c}" for c in source_on),
     )
 
-    on_pairs = list(zip(source_on, target_on))
     captured_merge_cond = merge_condition
-    captured_source_on = list(source_on)
+    captured_on_pairs = list(zip(source_on, target_on))
+    out_schema = pa.schema([pa.field(MATCHED_SRC_IDX_MARKER, pa.string())])
 
-    def _emit_matched_keys(batch: pa.Table) -> pa.Table:
-        out_cols: Dict[str, list] = {c: [] for c in captured_source_on}
+    def _emit_matched_idx(batch: pa.Table) -> pa.Table:
+        out_idx: list = []
         for row in batch.to_pylist():
             s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
             t_row = {k[2:]: v for k, v in row.items() if k.startswith("t.")}
-            for sk, tk in on_pairs:
+            for sk, tk in captured_on_pairs:
                 if sk not in s_row and tk in t_row:
                     s_row[sk] = t_row[tk]
             combined = _prefixed(s_row, t_row)
             if captured_merge_cond(combined):
-                for c in captured_source_on:
-                    out_cols[c].append(s_row.get(c))
-        return pa.Table.from_pydict(out_cols)
+                out_idx.append(s_row.get(PAIMON_SRC_IDX_COL))
+        return pa.Table.from_pydict(
+            {MATCHED_SRC_IDX_MARKER: out_idx}, schema=out_schema
+        )
 
-    matched_ds = joined.map_batches(_emit_matched_keys, batch_format="pyarrow")
-    matched_keys: set = set()
-    for batch in matched_ds.iter_batches(batch_format="pyarrow"):
-        if batch.num_rows == 0:
-            continue
-        cols = [batch.column(c).to_pylist() for c in source_on]
-        for tup in zip(*cols):
-            matched_keys.add(tup)
-    return matched_keys
+    return joined.map_batches(_emit_matched_idx, batch_format="pyarrow")
 
 
 def _build_not_matched_insert_ds(
@@ -512,7 +549,7 @@ def _build_not_matched_insert_ds(
     target_pa_schema: pa.Schema,
     catalog_options: Dict[str, str],
     num_partitions: int,
-    matched_keys_override: Optional[set] = None,
+    matched_idx_ds=None,
 ):
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.ray.shuffle import _coerce_large_string_types
@@ -521,59 +558,52 @@ def _build_not_matched_insert_ds(
     captured_field_names = list(target_field_names)
     out_schema = target_pa_schema
 
-    if matched_keys_override is not None:
-        captured_keys = matched_keys_override
-        captured_source_on = list(source_on)
-
-        def _filter_and_apply(batch: pa.Table) -> pa.Table:
-            rows = batch.to_pylist()
-            out = []
-            for s_row in rows:
-                key = tuple(s_row.get(c) for c in captured_source_on)
-                if key in captured_keys:
-                    continue
-                combined = _prefixed(s_row, None)
-                for clause in captured_clauses:
-                    if clause.condition is not None and not clause.condition(combined):
-                        continue
-                    out.append(
-                        _apply_set(
-                            clause.spec,
-                            s_row,
-                            None,
-                            captured_field_names,
-                            null_unspecified=True,
-                        )
-                    )
-                    break
-            aligned = [{name: r.get(name) for name in captured_field_names} for r in out]
-            return _coerce_large_string_types(pa.Table.from_pylist(aligned, schema=out_schema))
-
-        return source_ds.map_batches(_filter_and_apply, batch_format="pyarrow")
-
-    target_ds = read_paimon(
-        target_identifier, catalog_options, projection=list(target_on)
-    )
-    target_renamed = target_ds.rename_columns(
-        {c: f"t.{c}" for c in target_on}
-    )
     source_schema = source_ds.schema()
     source_cols = list(source_schema.names) if source_schema is not None else list(source_on)
     source_renamed = source_ds.rename_columns({c: f"s.{c}" for c in source_cols})
 
-    unmatched = source_renamed.join(
-        target_renamed,
-        join_type="left_anti",
-        num_partitions=num_partitions,
-        on=tuple(f"s.{c}" for c in source_on),
-        right_on=tuple(f"t.{c}" for c in target_on),
-    )
+    if matched_idx_ds is not None:
+        # Ray join hits a pyarrow projection bug when the right side is
+        # empty; collect matched-idx to a driver set instead. The set is
+        # bounded by # of matched source rows × ~32B per row-hash.
+        matched_idx_set: set = set()
+        for batch in matched_idx_ds.iter_batches(batch_format="pyarrow"):
+            if batch.num_rows == 0:
+                continue
+            matched_idx_set.update(
+                batch.column(MATCHED_SRC_IDX_MARKER).to_pylist()
+            )
+        captured_idx_set = matched_idx_set
+
+        def _filter_unmatched(batch: pa.Table) -> pa.Table:
+            idx_arr = batch.column(f"s.{PAIMON_SRC_IDX_COL}").to_pylist()
+            mask = [v not in captured_idx_set for v in idx_arr]
+            return batch.filter(pa.array(mask))
+
+        unmatched = source_renamed.map_batches(
+            _filter_unmatched, batch_format="pyarrow"
+        )
+    else:
+        target_ds = read_paimon(
+            target_identifier, catalog_options, projection=list(target_on)
+        )
+        target_renamed = target_ds.rename_columns(
+            {c: f"t.{c}" for c in target_on}
+        )
+        unmatched = source_renamed.join(
+            target_renamed,
+            join_type="left_anti",
+            num_partitions=num_partitions,
+            on=tuple(f"s.{c}" for c in source_on),
+            right_on=tuple(f"t.{c}" for c in target_on),
+        )
 
     def _transform(batch: pa.Table) -> pa.Table:
         rows = batch.to_pylist()
         out = []
         for row in rows:
             s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
+            s_row.pop(PAIMON_SRC_IDX_COL, None)
             combined = _prefixed(s_row, None)
             for clause in captured_clauses:
                 if clause.condition is not None and not clause.condition(combined):
@@ -637,12 +667,7 @@ def _distributed_write_collect_msgs(
 def _check_global_index_collision(
     table, snapshot, update_cols: Sequence[str]
 ) -> None:
-    from pypaimon.index.index_file_handler import IndexFileHandler
-
-    handler = IndexFileHandler(table=table)
-    entries = handler.scan(
-        snapshot, lambda e: e.index_file.global_index_meta is not None
-    )
+    entries = _scan_global_index_entries(table, snapshot)
     if not entries:
         return
     field_by_id = {f.id: f.name for f in table.fields}
@@ -659,6 +684,23 @@ def _check_global_index_collision(
             f"MERGE INTO would update columns {conflicted} that have a global "
             f"index; not supported (refusing to leave the index stale)."
         )
+
+
+def _check_global_index_for_insert(table, snapshot) -> None:
+    if _scan_global_index_entries(table, snapshot):
+        raise NotImplementedError(
+            "MERGE INTO INSERT into a table with global index entries is not "
+            "supported (inserted rows would not appear in the index)."
+        )
+
+
+def _scan_global_index_entries(table, snapshot):
+    from pypaimon.index.index_file_handler import IndexFileHandler
+
+    handler = IndexFileHandler(table=table)
+    return handler.scan(
+        snapshot, lambda e: e.index_file.global_index_meta is not None
+    )
 
 
 def _union_update_cols(clauses: List[_NormalizedClause]) -> List[str]:

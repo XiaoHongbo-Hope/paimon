@@ -705,6 +705,81 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['id'], [1, 2, 3])
         self.assertEqual(out['age'], [11, 21, 31])
 
+    def test_matched_update_can_change_on_column(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['x'],
+                    'age': pa.array([10], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1], type=pa.int32()),
+                'name': ['y'],
+                'age': pa.array([20], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[WhenMatched(update={'id': 999, 'name': 'y'})],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [999])
+        self.assertEqual(out['name'], ['y'])
+        self.assertEqual(out['age'], [10])
+
+    def test_merge_condition_routes_per_source_row(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['original'],
+                    'age': pa.array([100], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 1], type=pa.int32()),
+                'name': ['high', 'low'],
+                'age': pa.array([200, 5], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            merge_condition=lambda r: r['s.age'] > r['t.age'],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        rows = sorted(zip(out['id'], out['name'], out['age']))
+        self.assertEqual(
+            rows,
+            [(1, 'low', 5), (1, 'original', 100)],
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

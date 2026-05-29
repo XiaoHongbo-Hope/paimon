@@ -109,8 +109,6 @@ class TableUpdate:
         for col in update_cols:
             if col not in self.table.field_names:
                 raise ValueError(f"Column {col} is not in table schema.")
-        if len(update_cols) == len(self.table.field_names):
-            update_cols = None
         self.update_cols = update_cols
         return self
 
