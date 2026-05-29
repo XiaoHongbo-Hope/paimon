@@ -65,10 +65,11 @@ def merge_into(
     merge_condition: Optional[Condition] = None,
     when_matched: Sequence[WhenMatched] = (),
     when_not_matched: Sequence[WhenNotMatched] = (),
-    num_partitions: int = 16,
+    num_partitions: Optional[int] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     concurrency: Optional[int] = None,
 ) -> None:
+    num_partitions = _resolve_num_partitions(num_partitions)
     when_matched = list(when_matched)
     when_not_matched = list(when_not_matched)
     if not when_matched and not when_not_matched:
@@ -282,6 +283,21 @@ def _build_matched_update_ds(
     captured_on_pairs = list(zip(source_on, target_on))
     captured_schema = update_schema
 
+    if _clauses_use_vector_fast_path(clauses, merge_condition):
+        first_spec = clauses[0].spec
+
+        def _fast(batch: pa.Table) -> pa.Table:
+            return _vectorized_matched_transform(
+                batch,
+                first_spec,
+                captured_on_pairs,
+                captured_update_cols,
+                captured_row_id_name,
+                captured_schema,
+            )
+
+        return joined.map_batches(_fast, batch_format="pyarrow")
+
     def _transform(batch: pa.Table) -> pa.Table:
         rows = batch.to_pylist()
         out_row_ids: list = []
@@ -329,6 +345,20 @@ def _build_self_merge_update_ds(
     captured_field_names = list(target_field_names)
     captured_row_id_name = row_id_name
     captured_schema = update_schema
+
+    if _clauses_use_vector_fast_path(clauses, merge_condition):
+        first_spec = clauses[0].spec
+
+        def _fast(batch: pa.Table) -> pa.Table:
+            return _vectorized_self_merge_transform(
+                batch,
+                first_spec,
+                captured_update_cols,
+                captured_row_id_name,
+                captured_schema,
+            )
+
+        return target_ds.map_batches(_fast, batch_format="pyarrow")
 
     def _transform(batch: pa.Table) -> pa.Table:
         rows = batch.to_pylist()
@@ -481,12 +511,128 @@ MATCHED_SRC_IDX_MARKER = "_paimon_matched_src_idx"
 
 def _add_paimon_src_idx(source_ds):
     """Append a unique per-row index so INSERTs are routed by row identity,
-    not by content. Duplicate identical rows must remain distinguishable."""
+    not by content. Materialize once so count() + zip don't re-run source."""
     import ray
 
-    n = source_ds.count()
+    materialized = source_ds.materialize()
+    n = materialized.count()
     idx_ds = ray.data.range(n).rename_columns({"id": PAIMON_SRC_IDX_COL})
-    return source_ds.zip(idx_ds)
+    return materialized.zip(idx_ds)
+
+
+def _resolve_num_partitions(num_partitions: Optional[int]) -> int:
+    if num_partitions is not None:
+        return num_partitions
+    try:
+        import ray
+
+        cpus = ray.cluster_resources().get("CPU", 16)
+        return max(16, int(cpus) * 2)
+    except Exception:
+        return 16
+
+
+def _clauses_use_vector_fast_path(
+    clauses: List[_NormalizedClause],
+    merge_condition: Optional[Condition],
+) -> bool:
+    if not clauses:
+        return False
+    if merge_condition is not None:
+        return False
+    for c in clauses:
+        if c.condition is not None:
+            return False
+        for v in c.spec.values():
+            if callable(v):
+                return False
+    return True
+
+
+def _vectorized_matched_transform(
+    batch: pa.Table,
+    spec: Dict[str, Any],
+    on_pairs: Sequence[Tuple[str, str]],
+    update_cols: Sequence[str],
+    row_id_name: str,
+    update_schema: pa.Schema,
+) -> pa.Table:
+    available = set(batch.schema.names)
+    arrays: list = [batch.column(f"t.{row_id_name}")]
+    for col in update_cols:
+        out_type = update_schema.field(col).type
+        if col in spec:
+            arrays.append(_resolve_spec_array(spec[col], batch, available, on_pairs, out_type))
+        else:
+            arrays.append(batch.column(f"t.{col}"))
+    return pa.Table.from_arrays(arrays, schema=update_schema)
+
+
+def _vectorized_self_merge_transform(
+    batch: pa.Table,
+    spec: Dict[str, Any],
+    update_cols: Sequence[str],
+    row_id_name: str,
+    update_schema: pa.Schema,
+) -> pa.Table:
+    # In self-merge, s.X and t.X are the same row; the batch columns are
+    # unprefixed (it's the raw target read).
+    arrays: list = [batch.column(row_id_name)]
+    for col in update_cols:
+        out_type = update_schema.field(col).type
+        if col in spec:
+            val = spec[col]
+            if isinstance(val, str) and (val.startswith("s.") or val.startswith("t.")):
+                ref = val[2:]
+                arrays.append(batch.column(ref) if ref in batch.schema.names
+                              else pa.nulls(batch.num_rows, type=out_type))
+            else:
+                arrays.append(pa.array([val] * batch.num_rows, type=out_type))
+        else:
+            arrays.append(batch.column(col))
+    return pa.Table.from_arrays(arrays, schema=update_schema)
+
+
+def _vectorized_insert_transform(
+    batch: pa.Table,
+    spec: Dict[str, Any],
+    target_field_names: Sequence[str],
+    target_pa_schema: pa.Schema,
+) -> pa.Table:
+    available = set(batch.schema.names)
+    arrays: list = []
+    for col in target_field_names:
+        out_type = target_pa_schema.field(col).type
+        if col in spec:
+            arrays.append(_resolve_spec_array(spec[col], batch, available, (), out_type))
+        else:
+            arrays.append(pa.nulls(batch.num_rows, type=out_type))
+    return pa.Table.from_arrays(arrays, schema=target_pa_schema)
+
+
+def _resolve_spec_array(
+    val: Any,
+    batch: pa.Table,
+    available: set,
+    on_pairs: Sequence[Tuple[str, str]],
+    out_type: pa.DataType,
+):
+    if isinstance(val, str) and val.startswith("s."):
+        ref = val[2:]
+        if f"s.{ref}" in available:
+            return batch.column(f"s.{ref}")
+        # Equi-join drops the right-side join key; fall back to target's value.
+        for sk, tk in on_pairs:
+            if sk == ref and f"t.{tk}" in available:
+                return batch.column(f"t.{tk}")
+        return pa.nulls(batch.num_rows, type=out_type)
+    if isinstance(val, str) and val.startswith("t."):
+        ref = val[2:]
+        col_name = f"t.{ref}"
+        return batch.column(col_name) if col_name in available else pa.nulls(
+            batch.num_rows, type=out_type
+        )
+    return pa.array([val] * batch.num_rows, type=out_type)
 
 
 def _compute_matched_source_idx_ds(
@@ -598,6 +744,18 @@ def _build_not_matched_insert_ds(
             on=tuple(f"s.{c}" for c in source_on),
             right_on=tuple(f"t.{c}" for c in target_on),
         )
+
+    if _clauses_use_vector_fast_path(clauses, None):
+        first_spec = clauses[0].spec
+
+        def _fast(batch: pa.Table) -> pa.Table:
+            return _coerce_large_string_types(
+                _vectorized_insert_transform(
+                    batch, first_spec, captured_field_names, out_schema
+                )
+            )
+
+        return unmatched.map_batches(_fast, batch_format="pyarrow")
 
     def _transform(batch: pa.Table) -> pa.Table:
         rows = batch.to_pylist()
