@@ -68,7 +68,9 @@ def merge_into(
     num_partitions: Optional[int] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     concurrency: Optional[int] = None,
+    allow_multiple_matches: bool = False,
 ) -> None:
+    _require_ray_join()
     num_partitions = _resolve_num_partitions(num_partitions)
     when_matched = list(when_matched)
     when_not_matched = list(when_not_matched)
@@ -107,6 +109,11 @@ def merge_into(
         )
         for c in when_not_matched
     ]
+
+    written_cols: set = set()
+    for clause in matched_specs + not_matched_specs:
+        written_cols.update(clause.spec.keys())
+    _reject_blob_writes(table, written_cols)
 
     source_ds = _normalize_source(source, catalog_options)
     _validate_source_on_cols(source_ds, source_on_cols)
@@ -187,6 +194,7 @@ def merge_into(
                 table,
                 update_cols_union,
                 ray_remote_args=ray_remote_args,
+                allow_multiple_matches=allow_multiple_matches,
             )
         )
     if insert_ds is not None:
@@ -332,6 +340,7 @@ def _distributed_update_apply(
     write_update_cols: Sequence[str],
     *,
     ray_remote_args: Optional[Dict[str, Any]] = None,
+    allow_multiple_matches: bool = False,
 ) -> list:
     import bisect
     import pickle
@@ -398,10 +407,17 @@ def _distributed_update_apply(
         if group.num_rows == 0:
             return pa.Table.from_pydict({"msgs_blob": pa.array([], type=pa.binary())})
 
-        # Match Spark DE (checkCardinality=false): silently dedupe _ROW_ID,
-        # keep first occurrence per target row.
+        # One target _ROW_ID matched by several source rows. Default: refuse
+        # (the winning value is otherwise undefined, as in Spark DE's
+        # checkCardinality=false). Opt-in keeps the first match deterministically.
         group_row_ids = group.column(row_id_name).to_pylist()
         if len(set(group_row_ids)) != len(group_row_ids):
+            if not allow_multiple_matches:
+                raise ValueError(
+                    "MERGE matched multiple source rows to the same target "
+                    "_ROW_ID. Deduplicate the source, or pass "
+                    "allow_multiple_matches=True to keep the first match."
+                )
             seen: set = set()
             keep_indices: list = []
             for i, rid in enumerate(group_row_ids):
@@ -773,6 +789,34 @@ def _scan_global_index_entries(table, snapshot):
     return handler.scan(
         snapshot, lambda e: e.index_file.global_index_meta is not None
     )
+
+
+def _require_ray_join() -> None:
+    """merge_into relies on ``Dataset.join`` (ray>=2.50). Read/sink users on
+    older ray are unaffected unless they call this, so check only here."""
+    import ray
+    from ray.data import Dataset
+
+    if not hasattr(Dataset, "join"):
+        raise RuntimeError(
+            f"merge_into requires ray>=2.50 (Dataset.join); "
+            f"installed ray is {ray.__version__}."
+        )
+
+
+def _reject_blob_writes(table, written_cols: set) -> None:
+    """Blob columns live in a separate .blob format we cannot produce here;
+    refuse loudly instead of emitting wrong-format files."""
+    blob_cols = [
+        f.name
+        for f in table.table_schema.fields
+        if f.name in written_cols and getattr(f.type, "type", None) == "BLOB"
+    ]
+    if blob_cols:
+        raise NotImplementedError(
+            f"merge_into cannot write blob columns {blob_cols}; "
+            f"updating or inserting blob columns is not supported."
+        )
 
 
 def _union_update_cols(clauses: List[_NormalizedClause]) -> List[str]:

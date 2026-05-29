@@ -606,9 +606,43 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', None])
         self.assertEqual(out['age'], [10, 99])
 
-    def test_multi_source_match_silently_picks_first(self):
-        # Spark DE sets checkCardinality=false: silently dedupe target _ROW_IDs
-        # rather than raising when source has multiple rows for the same key.
+    def test_multi_source_match_raises_by_default(self):
+        # One target row matched by several source rows: the winning value is
+        # undefined (Spark DE's checkCardinality=false), so we refuse by default.
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['a'],
+                    'age': pa.array([10], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 1], type=pa.int32()),
+                'name': ['x', 'y'],
+                'age': pa.array([100, 200], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        with self.assertRaises(Exception) as ctx:
+            merge_into(
+                target=target,
+                source=source,
+                catalog_options=self.catalog_options,
+                on=['id'],
+                when_matched=[WhenMatched(update='*')],
+            )
+        self.assertIn("multiple source rows", str(ctx.exception))
+
+    def test_multi_source_match_allow_keeps_first(self):
+        # Opt-in: allow_multiple_matches keeps the first match deterministically.
         target = self._create_table()
         self._write(
             target,
@@ -637,13 +671,35 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             catalog_options=self.catalog_options,
             on=['id'],
             when_matched=[WhenMatched(update='*')],
+            allow_multiple_matches=True,
         )
 
         out = self._read_sorted(target)
         self.assertEqual(out['id'], [1])
-        # Exactly one of the source rows wins; we don't pin which.
+        # One source row wins; we don't pin which.
         self.assertIn(out['name'][0], ['x', 'y'])
         self.assertIn(out['age'][0], [100, 200])
+
+    def test_blob_write_is_rejected(self):
+        # Updating/inserting a blob column is unsupported and must fail loudly
+        # rather than emit wrong-format files.
+        import types
+
+        from pypaimon.ray.data_evolution_merge_into import _reject_blob_writes
+        from pypaimon.schema.data_types import AtomicType, DataField
+
+        fake_table = types.SimpleNamespace(
+            table_schema=types.SimpleNamespace(
+                fields=[
+                    DataField(0, 'id', AtomicType('INT')),
+                    DataField(1, 'payload', AtomicType('BLOB')),
+                ]
+            )
+        )
+        with self.assertRaises(NotImplementedError):
+            _reject_blob_writes(fake_table, {'payload'})
+        # Writing only non-blob columns is allowed even when blob fields exist.
+        _reject_blob_writes(fake_table, {'id'})
 
     def test_combined_writes_single_snapshot(self):
         target = self._create_table()
