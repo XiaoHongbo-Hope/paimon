@@ -95,16 +95,17 @@ def merge_into(
         )
 
     target_field_names = list(table.field_names)
+    on_map = dict(zip(target_on_cols, source_on_cols))
     matched_specs = [
         _NormalizedClause(
-            spec=_normalize_set_spec(c.update, target_field_names),
+            spec=_normalize_set_spec(c.update, target_field_names, on_map),
             condition=c.condition,
         )
         for c in when_matched
     ]
     not_matched_specs = [
         _NormalizedClause(
-            spec=_normalize_set_spec(c.insert, target_field_names),
+            spec=_normalize_set_spec(c.insert, target_field_names, on_map),
             condition=c.condition,
         )
         for c in when_not_matched
@@ -184,8 +185,10 @@ def merge_into(
             )
 
         if not_matched_specs:
+            # Empty target: nothing can match, so every source row inserts.
+            # Skip all joins (ray's hash join crashes on empty partitions).
             matched_keys_ds = None
-            if merge_condition is not None:
+            if base_snapshot is not None and merge_condition is not None:
                 matched_keys_ds = _compute_matched_source_idx_ds(
                     target_identifier=target,
                     source_ds=source_ds,
@@ -206,6 +209,7 @@ def merge_into(
                 catalog_options=catalog_options,
                 num_partitions=num_partitions,
                 matched_idx_ds=matched_keys_ds,
+                target_empty=base_snapshot is None,
             )
 
     all_msgs: list = []
@@ -511,15 +515,34 @@ _ANTI_JOIN_ROWS_PER_PARTITION = 8
 _MAX_GROUP_PARTITIONS = 200
 
 
+def _assign_src_idx_block(block, start):
+    import numpy as np
+    import pyarrow as pa
+
+    if not isinstance(block, pa.Table):
+        block = pa.Table.from_pandas(block, preserve_index=False)
+    idx = pa.array(np.arange(start, start + block.num_rows, dtype=np.int64))
+    return block.append_column(PAIMON_SRC_IDX_COL, idx)
+
+
 def _add_paimon_src_idx(source_ds):
     """Append a unique per-row index so INSERTs are routed by row identity,
-    not by content. Materialize once so count() + zip don't re-run source."""
+    not by content. Mint ids per block from a running offset (offset derived
+    from block metadata, so it is deterministic under re-execution). Avoids
+    zip's realignment shuffle and the extra full copy it forces."""
     import ray
 
     materialized = source_ds.materialize()
-    n = materialized.count()
-    idx_ds = ray.data.range(n).rename_columns({"id": PAIMON_SRC_IDX_COL})
-    return materialized.zip(idx_ds)
+    assign = ray.remote(_assign_src_idx_block)
+    offset = 0
+    refs = []
+    for bundle in materialized.iter_internal_ref_bundles():
+        for block_ref, meta in bundle.blocks:
+            refs.append(assign.remote(block_ref, offset))
+            offset += meta.num_rows
+    if not refs:
+        return materialized
+    return ray.data.from_arrow_refs(refs)
 
 
 def _resolve_num_partitions(num_partitions: Optional[int]) -> int:
@@ -674,6 +697,7 @@ def _build_not_matched_insert_ds(
     catalog_options: Dict[str, str],
     num_partitions: int,
     matched_idx_ds=None,
+    target_empty: bool = False,
 ):
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.ray.shuffle import _coerce_large_string_types
@@ -686,7 +710,9 @@ def _build_not_matched_insert_ds(
     source_cols = list(source_schema.names) if source_schema is not None else list(source_on)
     source_renamed = source_ds.rename_columns({c: f"s.{c}" for c in source_cols})
 
-    if matched_idx_ds is not None:
+    if target_empty:
+        unmatched = source_renamed
+    elif matched_idx_ds is not None:
         # ray's join is equi-only, so anti-join source against the matched
         # per-row ids (Spark folds this into one LeftAnti predicate). Size
         # partitions to the matched count: ray's join crashes on empty hash
@@ -1043,13 +1069,16 @@ def _needed_target_cols(
 def _normalize_set_spec(
     spec: SetSpec,
     target_field_names: Sequence[str],
+    on_map: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
+    on_map = on_map or {}
     if isinstance(spec, str):
         if spec != "*":
             raise ValueError(
                 f"SET spec strings other than '*' are not supported; got {spec!r}."
             )
-        return {col: f"s.{col}" for col in target_field_names}
+        # A renamed ON key resolves via the source's ON column, not its own name.
+        return {col: f"s.{on_map.get(col, col)}" for col in target_field_names}
     if not isinstance(spec, dict):
         raise ValueError(
             f"SET spec must be '*' or a dict, got {type(spec).__name__}."

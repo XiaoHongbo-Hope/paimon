@@ -653,6 +653,100 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['id'], [1, 2])
         self.assertEqual(out['age'], [10, 22])
 
+    def test_on_with_renamed_columns_star(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1, 2], type=pa.int32()),
+                    'name': ['a', 'b'],
+                    'age': pa.array([10, 20], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source_schema = pa.schema([
+            ('uid', pa.int32()),
+            ('name', pa.string()),
+            ('age', pa.int32()),
+        ])
+        source = pa.Table.from_pydict(
+            {
+                'uid': pa.array([2, 3], type=pa.int32()),
+                'name': ['b2', 'c'],
+                'age': pa.array([22, 30], type=pa.int32()),
+            },
+            schema=source_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on={'id': 'uid'},
+            when_matched=[WhenMatched(update='*')],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2, 3])
+        self.assertEqual(out['name'], ['a', 'b2', 'c'])
+        self.assertEqual(out['age'], [10, 22, 30])
+
+    def test_insert_into_empty_target(self):
+        target = self._create_table()
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 2, 3], type=pa.int32()),
+                'name': ['a', 'b', 'c'],
+                'age': pa.array([10, 20, 30], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2, 3])
+        self.assertEqual(out['name'], ['a', 'b', 'c'])
+        self.assertEqual(out['age'], [10, 20, 30])
+
+    def test_insert_into_empty_target_with_merge_condition(self):
+        target = self._create_table()
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 2], type=pa.int32()),
+                'name': ['a', 'b'],
+                'age': pa.array([10, 20], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            merge_condition=lambda r: r['s.age'] > 0,
+            when_matched=[WhenMatched(update='*')],
+            when_not_matched=[WhenNotMatched(insert='*')],
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2])
+        self.assertEqual(out['name'], ['a', 'b'])
+        self.assertEqual(out['age'], [10, 20])
+
     def test_insert_dict_fills_unspecified_with_null(self):
         target = self._create_table()
         self._write(
@@ -780,6 +874,27 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             _reject_blob_updates(fake_table, {'payload'})
         _reject_blob_updates(fake_table, {'id'})
+
+    def test_add_paimon_src_idx_pandas_blocks(self):
+        import pandas as pd
+
+        from pypaimon.ray.data_evolution_merge_into import (
+            PAIMON_SRC_IDX_COL,
+            _add_paimon_src_idx,
+        )
+
+        pdf = pd.DataFrame(
+            {
+                'id': pd.array(list(range(20)), dtype='int32'),
+                'name': ['x'] * 20,
+                'age': pd.array(list(range(20)), dtype='int64'),
+            }
+        )
+        ds = ray.data.from_pandas(pdf).repartition(4)
+        out = _add_paimon_src_idx(ds).to_pandas()
+        ids = sorted(out[PAIMON_SRC_IDX_COL].tolist())
+        self.assertEqual(len(out), 20)
+        self.assertEqual(ids, list(range(20)))
 
     def test_combined_writes_single_snapshot(self):
         target = self._create_table()
