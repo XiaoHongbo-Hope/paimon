@@ -141,50 +141,72 @@ def merge_into(
         _check_global_index_for_insert(table, base_snapshot)
 
     update_ds = None
+    insert_ds = None
     update_cols_union: List[str] = []
-    # Empty target → no rows can match; matched UPDATE is a no-op.
-    if matched_specs and base_snapshot is not None:
+
+    # With both clauses on a non-empty target, matched and not-matched routing
+    # share the same source/target equi-join. Build them from one materialized
+    # LEFT_OUTER join instead of reading and shuffling the target table twice.
+    if matched_specs and not_matched_specs and base_snapshot is not None:
         update_cols_union = _union_update_cols(matched_specs)
         _check_global_index_collision(table, base_snapshot, update_cols_union)
-        update_ds = _build_matched_update_ds(
+        update_ds, insert_ds = _build_unified_both(
             target_identifier=target,
             source_ds=source_ds,
             target_on=target_on_cols,
             source_on=source_on_cols,
             merge_condition=merge_condition,
-            clauses=matched_specs,
+            matched_clauses=matched_specs,
+            not_matched_clauses=not_matched_specs,
             target_field_names=target_field_names,
             target_pa_schema=target_pa_schema,
             update_cols=update_cols_union,
             catalog_options=catalog_options,
             num_partitions=num_partitions,
         )
-
-    insert_ds = None
-    if not_matched_specs:
-        matched_keys_ds = None
-        if merge_condition is not None:
-            matched_keys_ds = _compute_matched_source_idx_ds(
+    else:
+        # Empty target → no rows can match; matched UPDATE is a no-op.
+        if matched_specs and base_snapshot is not None:
+            update_cols_union = _union_update_cols(matched_specs)
+            _check_global_index_collision(table, base_snapshot, update_cols_union)
+            update_ds = _build_matched_update_ds(
                 target_identifier=target,
                 source_ds=source_ds,
                 target_on=target_on_cols,
                 source_on=source_on_cols,
                 merge_condition=merge_condition,
+                clauses=matched_specs,
+                target_field_names=target_field_names,
+                target_pa_schema=target_pa_schema,
+                update_cols=update_cols_union,
                 catalog_options=catalog_options,
                 num_partitions=num_partitions,
             )
-        insert_ds = _build_not_matched_insert_ds(
-            target_identifier=target,
-            source_ds=source_ds,
-            target_on=target_on_cols,
-            source_on=source_on_cols,
-            clauses=not_matched_specs,
-            target_field_names=target_field_names,
-            target_pa_schema=target_pa_schema,
-            catalog_options=catalog_options,
-            num_partitions=num_partitions,
-            matched_idx_ds=matched_keys_ds,
-        )
+
+        if not_matched_specs:
+            matched_keys_ds = None
+            if merge_condition is not None:
+                matched_keys_ds = _compute_matched_source_idx_ds(
+                    target_identifier=target,
+                    source_ds=source_ds,
+                    target_on=target_on_cols,
+                    source_on=source_on_cols,
+                    merge_condition=merge_condition,
+                    catalog_options=catalog_options,
+                    num_partitions=num_partitions,
+                )
+            insert_ds = _build_not_matched_insert_ds(
+                target_identifier=target,
+                source_ds=source_ds,
+                target_on=target_on_cols,
+                source_on=source_on_cols,
+                clauses=not_matched_specs,
+                target_field_names=target_field_names,
+                target_pa_schema=target_pa_schema,
+                catalog_options=catalog_options,
+                num_partitions=num_partitions,
+                matched_idx_ds=matched_keys_ds,
+            )
 
     all_msgs: list = []
     if update_ds is not None:
@@ -293,34 +315,54 @@ def _build_matched_update_ds(
         return joined.map_batches(_fast, batch_format="pyarrow")
 
     def _transform(batch: pa.Table) -> pa.Table:
-        rows = batch.to_pylist()
-        out_row_ids: list = []
-        out_cols: Dict[str, list] = {c: [] for c in captured_update_cols}
-        for row in rows:
-            s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
-            t_row = {k[2:]: v for k, v in row.items() if k.startswith("t.")}
-            for s_key, t_key in captured_on_pairs:
-                if s_key not in s_row and t_key in t_row:
-                    s_row[s_key] = t_row[t_key]
-            combined = _prefixed(s_row, t_row)
-            if captured_merge_cond is not None and not captured_merge_cond(combined):
-                continue
-            for clause in captured_clauses:
-                if clause.condition is not None and not clause.condition(combined):
-                    continue
-                new_values = _apply_set(
-                    clause.spec, s_row, t_row, captured_field_names
-                )
-                out_row_ids.append(t_row[captured_row_id_name])
-                for col in captured_update_cols:
-                    out_cols[col].append(new_values.get(col, t_row.get(col)))
-                break
-        return pa.Table.from_pydict(
-            {captured_row_id_name: out_row_ids, **out_cols},
-            schema=captured_schema,
+        return _apply_matched_transform(
+            batch,
+            captured_clauses,
+            captured_merge_cond,
+            captured_on_pairs,
+            captured_update_cols,
+            captured_field_names,
+            captured_row_id_name,
+            captured_schema,
         )
 
     return joined.map_batches(_transform, batch_format="pyarrow")
+
+
+def _apply_matched_transform(
+    batch: pa.Table,
+    clauses: List[_NormalizedClause],
+    merge_condition: Optional[Condition],
+    on_pairs: Sequence[Tuple[str, str]],
+    update_cols: Sequence[str],
+    field_names: Sequence[str],
+    row_id_name: str,
+    update_schema: pa.Schema,
+) -> pa.Table:
+    rows = batch.to_pylist()
+    out_row_ids: list = []
+    out_cols: Dict[str, list] = {c: [] for c in update_cols}
+    for row in rows:
+        s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
+        t_row = {k[2:]: v for k, v in row.items() if k.startswith("t.")}
+        for s_key, t_key in on_pairs:
+            if s_key not in s_row and t_key in t_row:
+                s_row[s_key] = t_row[t_key]
+        combined = _prefixed(s_row, t_row)
+        if merge_condition is not None and not merge_condition(combined):
+            continue
+        for clause in clauses:
+            if clause.condition is not None and not clause.condition(combined):
+                continue
+            new_values = _apply_set(clause.spec, s_row, t_row, field_names)
+            out_row_ids.append(t_row[row_id_name])
+            for col in update_cols:
+                out_cols[col].append(new_values.get(col, t_row.get(col)))
+            break
+    return pa.Table.from_pydict(
+        {row_id_name: out_row_ids, **out_cols},
+        schema=update_schema,
+    )
 
 
 def _build_update_schema(
@@ -692,29 +734,168 @@ def _build_not_matched_insert_ds(
         return unmatched.map_batches(_fast, batch_format="pyarrow")
 
     def _transform(batch: pa.Table) -> pa.Table:
-        rows = batch.to_pylist()
-        out = []
-        for row in rows:
-            s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
-            s_row.pop(PAIMON_SRC_IDX_COL, None)
-            combined = _prefixed(s_row, None)
-            for clause in captured_clauses:
-                if clause.condition is not None and not clause.condition(combined):
-                    continue
-                out.append(
-                    _apply_set(
-                        clause.spec,
-                        s_row,
-                        None,
-                        captured_field_names,
-                        null_unspecified=True,
-                    )
-                )
-                break
-        aligned = [{name: r.get(name) for name in captured_field_names} for r in out]
-        return _coerce_large_string_types(pa.Table.from_pylist(aligned, schema=out_schema))
+        return _apply_insert_transform(
+            batch, captured_clauses, captured_field_names, out_schema
+        )
 
     return unmatched.map_batches(_transform, batch_format="pyarrow")
+
+
+def _apply_insert_transform(
+    batch: pa.Table,
+    clauses: List[_NormalizedClause],
+    field_names: Sequence[str],
+    out_schema: pa.Schema,
+) -> pa.Table:
+    from pypaimon.ray.shuffle import _coerce_large_string_types
+
+    rows = batch.to_pylist()
+    out = []
+    for row in rows:
+        s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
+        s_row.pop(PAIMON_SRC_IDX_COL, None)
+        combined = _prefixed(s_row, None)
+        for clause in clauses:
+            if clause.condition is not None and not clause.condition(combined):
+                continue
+            out.append(
+                _apply_set(
+                    clause.spec, s_row, None, field_names, null_unspecified=True
+                )
+            )
+            break
+    aligned = [{name: r.get(name) for name in field_names} for r in out]
+    return _coerce_large_string_types(pa.Table.from_pylist(aligned, schema=out_schema))
+
+
+def _build_unified_both(
+    *,
+    target_identifier: str,
+    source_ds,
+    target_on: Sequence[str],
+    source_on: Sequence[str],
+    merge_condition: Optional[Condition],
+    matched_clauses: List[_NormalizedClause],
+    not_matched_clauses: List[_NormalizedClause],
+    target_field_names: Sequence[str],
+    target_pa_schema: pa.Schema,
+    update_cols: Sequence[str],
+    catalog_options: Dict[str, str],
+    num_partitions: int,
+):
+    import pyarrow.compute as pc
+
+    from pypaimon.ray.ray_paimon import read_paimon
+    from pypaimon.ray.shuffle import _coerce_large_string_types
+    from pypaimon.table.special_fields import SpecialFields
+
+    row_id_name = SpecialFields.ROW_ID.name
+
+    needs_full = merge_condition is not None or any(
+        c.condition is not None for c in matched_clauses
+    )
+    if needs_full:
+        needed_cols = list(target_field_names)
+    else:
+        needed_cols = _needed_target_cols(
+            matched_clauses, target_on, update_cols, target_field_names
+        )
+    projection = [row_id_name] + [c for c in needed_cols if c != row_id_name]
+    target_ds = read_paimon(target_identifier, catalog_options, projection=projection)
+    target_renamed = target_ds.rename_columns(
+        {c: f"t.{c}" for c in target_ds.schema().names}
+    )
+    source_schema = source_ds.schema()
+    source_cols = list(source_schema.names) if source_schema is not None else list(source_on)
+    source_renamed = source_ds.rename_columns({c: f"s.{c}" for c in source_cols})
+
+    # One LEFT_OUTER join feeds both branches: rows with a non-null target side
+    # are matched (UPDATE), null target side means no key match (INSERT). The
+    # join shuffle is the dominant cost, so materialize once and route both ways
+    # instead of reading and shuffling the target table twice.
+    joined = source_renamed.join(
+        target_renamed,
+        join_type="left_outer",
+        num_partitions=num_partitions,
+        on=tuple(f"s.{c}" for c in source_on),
+        right_on=tuple(f"t.{c}" for c in target_on),
+    ).materialize()
+
+    t_row_id_col = f"t.{row_id_name}"
+    on_pairs = list(zip(source_on, target_on))
+    update_schema = _build_update_schema(target_pa_schema, update_cols, row_id_name)
+
+    use_fast_matched = _clauses_use_vector_fast_path(matched_clauses, merge_condition)
+    first_matched_spec = matched_clauses[0].spec if use_fast_matched else None
+    m_update_cols = list(update_cols)
+    m_field_names = list(target_field_names)
+
+    def _matched_batch(batch: pa.Table) -> pa.Table:
+        sub = batch.filter(pc.is_valid(batch.column(t_row_id_col)))
+        if use_fast_matched:
+            return _vectorized_matched_transform(
+                sub, first_matched_spec, on_pairs, m_update_cols,
+                row_id_name, update_schema,
+            )
+        return _apply_matched_transform(
+            sub, matched_clauses, merge_condition, on_pairs, m_update_cols,
+            m_field_names, row_id_name, update_schema,
+        )
+
+    update_ds = joined.map_batches(_matched_batch, batch_format="pyarrow")
+
+    i_field_names = list(target_field_names)
+    if merge_condition is None:
+        use_fast_insert = _clauses_use_vector_fast_path(not_matched_clauses, None)
+        first_insert_spec = not_matched_clauses[0].spec if use_fast_insert else None
+
+        def _insert_batch(batch: pa.Table) -> pa.Table:
+            sub = batch.filter(pc.is_null(batch.column(t_row_id_col)))
+            if use_fast_insert:
+                return _coerce_large_string_types(
+                    _vectorized_insert_transform(
+                        sub, first_insert_spec, i_field_names, target_pa_schema
+                    )
+                )
+            return _apply_insert_transform(
+                sub, not_matched_clauses, i_field_names, target_pa_schema
+            )
+
+        insert_ds = joined.map_batches(_insert_batch, batch_format="pyarrow")
+    else:
+        idx_schema = pa.schema([pa.field(MATCHED_SRC_IDX_MARKER, pa.int64())])
+
+        def _emit_matched_idx(batch: pa.Table) -> pa.Table:
+            sub = batch.filter(pc.is_valid(batch.column(t_row_id_col)))
+            out_idx: list = []
+            for row in sub.to_pylist():
+                s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
+                t_row = {k[2:]: v for k, v in row.items() if k.startswith("t.")}
+                for sk, tk in on_pairs:
+                    if sk not in s_row and tk in t_row:
+                        s_row[sk] = t_row[tk]
+                combined = _prefixed(s_row, t_row)
+                if merge_condition(combined):
+                    out_idx.append(s_row.get(PAIMON_SRC_IDX_COL))
+            return pa.Table.from_pydict(
+                {MATCHED_SRC_IDX_MARKER: out_idx}, schema=idx_schema
+            )
+
+        matched_idx_ds = joined.map_batches(_emit_matched_idx, batch_format="pyarrow")
+        insert_ds = _build_not_matched_insert_ds(
+            target_identifier=target_identifier,
+            source_ds=source_ds,
+            target_on=target_on,
+            source_on=source_on,
+            clauses=not_matched_clauses,
+            target_field_names=target_field_names,
+            target_pa_schema=target_pa_schema,
+            catalog_options=catalog_options,
+            num_partitions=num_partitions,
+            matched_idx_ds=matched_idx_ds,
+        )
+
+    return update_ds, insert_ds
 
 
 def _distributed_write_collect_msgs(
