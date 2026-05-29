@@ -342,7 +342,7 @@ def _distributed_update_apply(
     ray_remote_args: Optional[Dict[str, Any]] = None,
     allow_multiple_matches: bool = False,
 ) -> list:
-    import bisect
+    import numpy as np
     import pickle
     import uuid
 
@@ -377,26 +377,33 @@ def _distributed_update_apply(
 
     frid_col = "_FIRST_ROW_ID"
     captured_sorted = sorted_first_row_ids
+    captured_sorted_arr = np.asarray(captured_sorted, dtype=np.int64)
+    first = captured_sorted_arr[0]
     captured_precomputed = precomputed_info
     total_row_count = planner.total_row_count
 
     def _assign_frid(batch: pa.Table) -> pa.Table:
         if batch.num_rows == 0:
             return batch.append_column(frid_col, pa.array([], type=pa.int64()))
-        row_ids = batch.column(row_id_name).to_pylist()
-        bisect_right = bisect.bisect_right
-        values: list = []
-        first = captured_sorted[0]
-        for rid in row_ids:
-            # Out-of-range _ROW_IDs would silently map via bisect wrap-around.
-            if rid is None or rid < first or rid >= total_row_count:
-                raise ValueError(
-                    f"_ROW_ID {rid} is out of valid range "
-                    f"[{first}, {total_row_count}); planner snapshot is stale "
-                    f"or matched rows come from a different table."
-                )
-            values.append(captured_sorted[bisect_right(captured_sorted, rid) - 1])
-        return batch.append_column(frid_col, pa.array(values, type=pa.int64()))
+        rid_col = batch.column(row_id_name)
+        if rid_col.null_count:
+            raise ValueError(
+                "_ROW_ID is null; planner snapshot is stale "
+                "or matched rows come from a different table."
+            )
+        rids = rid_col.to_numpy(zero_copy_only=False)
+        # Out-of-range _ROW_IDs would silently map via searchsorted wrap-around.
+        out_of_range = (rids < first) | (rids >= total_row_count)
+        if out_of_range.any():
+            bad = rids[out_of_range][0]
+            raise ValueError(
+                f"_ROW_ID {bad} is out of valid range "
+                f"[{first}, {total_row_count}); planner snapshot is stale "
+                f"or matched rows come from a different table."
+            )
+        idx = np.searchsorted(captured_sorted_arr, rids, side="right") - 1
+        frids = captured_sorted_arr[idx]
+        return batch.append_column(frid_col, pa.array(frids, type=pa.int64()))
 
     with_frid = update_ds.map_batches(_assign_frid, batch_format="pyarrow")
 
