@@ -120,12 +120,6 @@ def merge_into(
     _validate_source_on_cols(source_ds, source_on_cols)
 
     base_snapshot = table.snapshot_manager().get_latest_snapshot()
-    if base_snapshot is not None:
-        # Pin the snapshot so the final commit aborts if another writer
-        # commits between our read and our commit.
-        table = table.copy(
-            {"commit.strict-mode.last-safe-snapshot": str(base_snapshot.id)}
-        )
 
     global_index_action = (
         table.options.global_index_column_update_action()

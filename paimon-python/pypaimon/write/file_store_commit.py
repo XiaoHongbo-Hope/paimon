@@ -117,8 +117,6 @@ class FileStoreCommit:
         if not commit_messages:
             return
 
-        self._enforce_strict_mode_last_safe_snapshot()
-
         # Extract the minimum check_from_snapshot from commit messages
         valid_snapshots = [msg.check_from_snapshot for msg in commit_messages
                            if msg.check_from_snapshot != -1]
@@ -168,7 +166,6 @@ class FileStoreCommit:
 
     def overwrite(self, overwrite_partition, commit_messages: List[CommitMessage], commit_identifier: int):
         """Commit the given commit messages in overwrite mode."""
-        self._enforce_strict_mode_last_safe_snapshot()
         logger.info(
             "Ready to overwrite to table %s, number of commit messages: %d",
             self.table.identifier,
@@ -241,7 +238,6 @@ class FileStoreCommit:
 
     def truncate_table(self, commit_identifier: int) -> None:
         """Truncate the entire table, deleting all data."""
-        self._enforce_strict_mode_last_safe_snapshot()
         self._try_commit(
             commit_kind="OVERWRITE",
             commit_identifier=commit_identifier,
@@ -250,22 +246,6 @@ class FileStoreCommit:
             detect_conflicts=True,
             allow_rollback=False,
         )
-
-    def _enforce_strict_mode_last_safe_snapshot(self) -> None:
-        raw = self.table.options.options.data.get(
-            "commit.strict-mode.last-safe-snapshot"
-        )
-        if raw is None or raw == "":
-            return
-        safe_id = int(raw)
-        current = self.snapshot_manager.get_latest_snapshot()
-        current_id = current.id if current is not None else -1
-        if current_id > safe_id:
-            raise RuntimeError(
-                f"Strict-mode commit aborted: latest snapshot {current_id} is "
-                f"newer than the recorded last-safe-snapshot {safe_id}; "
-                f"another writer has committed since this write was planned."
-            )
 
     def _try_commit(self, commit_kind, commit_identifier, commit_entries_plan,
                     detect_conflicts=False, allow_rollback=False, index_deletes=None):

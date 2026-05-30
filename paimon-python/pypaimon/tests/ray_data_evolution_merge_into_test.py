@@ -1060,43 +1060,6 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             [(1, 't1', 100), (2, 'dup', 5), (2, 'dup', 5)],
         )
 
-    def test_strict_mode_rejects_when_snapshot_advances(self):
-        target = self._create_table()
-        self._write(
-            target,
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([1], type=pa.int32()),
-                    'name': ['x'],
-                    'age': pa.array([1], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            ),
-        )
-        current_id = self._snapshot_id(target)
-
-        table = self.catalog.get_table(target).copy(
-            {"commit.strict-mode.last-safe-snapshot": str(current_id - 1)}
-        )
-        wb = table.new_batch_write_builder()
-        tw = wb.new_write()
-        tw.write_arrow(
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([2], type=pa.int32()),
-                    'name': ['y'],
-                    'age': pa.array([2], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            )
-        )
-        msgs = tw.prepare_commit()
-        tw.close()
-
-        with self.assertRaises(RuntimeError) as ctx:
-            wb.new_commit().commit(msgs)
-        self.assertIn("strict-mode", str(ctx.exception).lower())
-
     def test_merge_condition_routes_per_source_row(self):
         target = self._create_table()
         self._write(
