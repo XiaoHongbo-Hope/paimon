@@ -21,7 +21,6 @@
 from dataclasses import dataclass
 from typing import (
     Any,
-    Callable,
     Dict,
     List,
     Mapping,
@@ -33,8 +32,11 @@ from typing import (
 
 import pyarrow as pa
 
+from pypaimon.ray.condition_expr import ConditionExpr
+from pypaimon.ray.condition_expr import parse as parse_condition
+
 SetSpec = Union[str, Dict[str, Any]]
-Condition = Callable[[Mapping[str, Any]], bool]
+Condition = str
 OnSpec = Union[Sequence[str], Mapping[str, str]]
 
 
@@ -53,7 +55,7 @@ class WhenNotMatched:
 @dataclass
 class _NormalizedClause:
     spec: Dict[str, Any]
-    condition: Optional[Condition]
+    condition: Optional[ConditionExpr]
 
 
 def merge_into(
@@ -62,15 +64,13 @@ def merge_into(
     catalog_options: Dict[str, str],
     *,
     on: OnSpec,
-    merge_condition: Optional[Condition] = None,
     when_matched: Sequence[WhenMatched] = (),
     when_not_matched: Sequence[WhenNotMatched] = (),
     num_partitions: Optional[int] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     concurrency: Optional[int] = None,
     allow_multiple_matches: bool = False,
-    condition_cols: Optional[List[str]] = None,
-) -> None:
+) -> Dict[str, int]:
     _require_ray_join()
     num_partitions = _resolve_num_partitions(num_partitions)
     when_matched = list(when_matched)
@@ -96,19 +96,18 @@ def merge_into(
         )
 
     target_field_names = list(table.field_names)
-    blob_cols = _blob_cols(table)
     on_map = dict(zip(target_on_cols, source_on_cols))
     matched_specs = [
         _NormalizedClause(
             spec=_normalize_set_spec(c.update, target_field_names, on_map),
-            condition=c.condition,
+            condition=parse_condition(c.condition) if c.condition else None,
         )
         for c in when_matched
     ]
     not_matched_specs = [
         _NormalizedClause(
             spec=_normalize_set_spec(c.insert, target_field_names, on_map),
-            condition=c.condition,
+            condition=parse_condition(c.condition) if c.condition else None,
         )
         for c in when_not_matched
     ]
@@ -127,11 +126,6 @@ def merge_into(
         table.options.global_index_column_update_action()
         or GLOBAL_INDEX_ACTION_THROW_ERROR
     )
-
-    # Row-precise routing needs a stable per-source-row id when merge_condition
-    # may differ between source rows sharing the same ON key.
-    if when_not_matched and merge_condition is not None:
-        source_ds = _add_paimon_src_idx(source_ds)
 
     from pypaimon.schema.data_types import PyarrowFieldParser
 
@@ -153,7 +147,6 @@ def merge_into(
             source_ds=source_ds,
             target_on=target_on_cols,
             source_on=source_on_cols,
-            merge_condition=merge_condition,
             matched_clauses=matched_specs,
             not_matched_clauses=not_matched_specs,
             target_field_names=target_field_names,
@@ -161,8 +154,6 @@ def merge_into(
             update_cols=update_cols_union,
             catalog_options=catalog_options,
             num_partitions=num_partitions,
-            condition_cols=condition_cols,
-            blob_cols=blob_cols,
         )
     else:
         # Empty target → no rows can match; matched UPDATE is a no-op.
@@ -173,31 +164,17 @@ def merge_into(
                 source_ds=source_ds,
                 target_on=target_on_cols,
                 source_on=source_on_cols,
-                merge_condition=merge_condition,
                 clauses=matched_specs,
                 target_field_names=target_field_names,
                 target_pa_schema=target_pa_schema,
                 update_cols=update_cols_union,
                 catalog_options=catalog_options,
                 num_partitions=num_partitions,
-                condition_cols=condition_cols,
-                blob_cols=blob_cols,
             )
 
         if not_matched_specs:
             # Empty target: nothing can match, so every source row inserts.
             # Skip all joins (ray's hash join crashes on empty partitions).
-            matched_keys_ds = None
-            if base_snapshot is not None and merge_condition is not None:
-                matched_keys_ds = _compute_matched_source_idx_ds(
-                    target_identifier=target,
-                    source_ds=source_ds,
-                    target_on=target_on_cols,
-                    source_on=source_on_cols,
-                    merge_condition=merge_condition,
-                    catalog_options=catalog_options,
-                    num_partitions=num_partitions,
-                )
             insert_ds = _build_not_matched_insert_ds(
                 target_identifier=target,
                 source_ds=source_ds,
@@ -208,13 +185,13 @@ def merge_into(
                 target_pa_schema=target_pa_schema,
                 catalog_options=catalog_options,
                 num_partitions=num_partitions,
-                matched_idx_ds=matched_keys_ds,
                 target_empty=base_snapshot is None,
             )
 
     update_msgs: list = []
+    num_updated = 0
     if update_ds is not None:
-        update_msgs = _distributed_update_apply(
+        update_msgs, num_updated = _distributed_update_apply(
             update_ds,
             table,
             update_cols_union,
@@ -224,12 +201,13 @@ def merge_into(
         )
 
     all_msgs: list = list(update_msgs)
+    num_inserted = 0
     if insert_ds is not None:
-        all_msgs.extend(
-            _distributed_write_collect_msgs(
-                insert_ds, table, ray_remote_args=ray_remote_args, concurrency=concurrency
-            )
+        insert_msgs = _distributed_write_collect_msgs(
+            insert_ds, table, ray_remote_args=ray_remote_args, concurrency=concurrency
         )
+        num_inserted = sum(f.row_count for m in insert_msgs for f in m.new_files)
+        all_msgs.extend(insert_msgs)
     # Mirror Spark's checkUpdateResult: scope the global-index action to the
     # partitions the update actually wrote and the updated indexed columns.
     all_msgs.extend(
@@ -242,6 +220,8 @@ def merge_into(
         tc = wb.new_commit()
         tc.commit(all_msgs)
         tc.close()
+
+    return {"num_updated": num_updated, "num_inserted": num_inserted}
 
 
 def _normalize_on(on: OnSpec) -> Tuple[List[str], List[str]]:
@@ -262,23 +242,19 @@ def _build_matched_update_ds(
     source_ds,
     target_on: Sequence[str],
     source_on: Sequence[str],
-    merge_condition: Optional[Condition],
     clauses: List[_NormalizedClause],
     target_field_names: Sequence[str],
     target_pa_schema: pa.Schema,
     update_cols: Sequence[str],
     catalog_options: Dict[str, str],
     num_partitions: int,
-    condition_cols: Optional[Sequence[str]],
-    blob_cols: set,
 ):
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.table.special_fields import SpecialFields
 
     row_id_name = SpecialFields.ROW_ID.name
     needed_cols = _resolve_target_projection(
-        clauses, merge_condition, target_on, update_cols,
-        target_field_names, condition_cols, blob_cols,
+        clauses, target_on, update_cols, target_field_names,
     )
     projection = [row_id_name] + [c for c in needed_cols if c != row_id_name]
 
@@ -301,14 +277,13 @@ def _build_matched_update_ds(
     )
 
     captured_clauses = clauses
-    captured_merge_cond = merge_condition
     captured_update_cols = list(update_cols)
     captured_field_names = list(target_field_names)
     captured_row_id_name = row_id_name
     captured_on_pairs = list(zip(source_on, target_on))
     captured_schema = update_schema
 
-    if _clauses_use_vector_fast_path(clauses, merge_condition):
+    if _clauses_use_vector_fast_path(clauses):
         first_spec = clauses[0].spec
 
         def _fast(batch: pa.Table) -> pa.Table:
@@ -327,7 +302,6 @@ def _build_matched_update_ds(
         return _apply_matched_transform(
             batch,
             captured_clauses,
-            captured_merge_cond,
             captured_on_pairs,
             captured_update_cols,
             captured_field_names,
@@ -338,20 +312,9 @@ def _build_matched_update_ds(
     return joined.map_batches(_transform, batch_format="pyarrow")
 
 
-def _eval_cond(cond, combined):
-    try:
-        return cond(combined)
-    except KeyError as e:
-        raise ValueError(
-            f"merge condition referenced column {e} that was not read; "
-            f"add it to condition_cols."
-        ) from e
-
-
 def _apply_matched_transform(
     batch: pa.Table,
     clauses: List[_NormalizedClause],
-    merge_condition: Optional[Condition],
     on_pairs: Sequence[Tuple[str, str]],
     update_cols: Sequence[str],
     field_names: Sequence[str],
@@ -368,10 +331,8 @@ def _apply_matched_transform(
             if s_key not in s_row and t_key in t_row:
                 s_row[s_key] = t_row[t_key]
         combined = _prefixed(s_row, t_row)
-        if merge_condition is not None and not _eval_cond(merge_condition, combined):
-            continue
         for clause in clauses:
-            if clause.condition is not None and not _eval_cond(clause.condition, combined):
+            if clause.condition is not None and not clause.condition.eval(combined):
                 continue
             new_values = _apply_set(clause.spec, s_row, t_row, field_names)
             out_row_ids.append(t_row[row_id_name])
@@ -403,7 +364,7 @@ def _distributed_update_apply(
     num_partitions: int,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     allow_multiple_matches: bool = False,
-) -> list:
+) -> Tuple[list, int]:
     import numpy as np
     import pickle
     import uuid
@@ -426,7 +387,7 @@ def _distributed_update_apply(
     )
     sorted_first_row_ids = list(planner.first_row_ids)
     if not sorted_first_row_ids:
-        return []
+        return [], 0
 
     # Broadcast the file-info snapshot to every worker so they skip the
     # per-task manifest scan and observe a single consistent target view.
@@ -474,7 +435,10 @@ def _distributed_update_apply(
 
     def _apply_group(group: pa.Table) -> pa.Table:
         if group.num_rows == 0:
-            return pa.Table.from_pydict({"msgs_blob": pa.array([], type=pa.binary())})
+            return pa.Table.from_pydict({
+                "msgs_blob": pa.array([], type=pa.binary()),
+                "n_updated": pa.array([], type=pa.int64()),
+            })
 
         # One target _ROW_ID matched by several source rows. Default: refuse
         # (the winning value is otherwise undefined, as in Spark DE's
@@ -503,7 +467,10 @@ def _distributed_update_apply(
             precomputed_files_info=captured_precomputed,
         )
         msgs = worker.update_columns(for_update, list(captured_cols))
-        return pa.Table.from_pydict({"msgs_blob": [pickle.dumps(msgs)]})
+        return pa.Table.from_pydict({
+            "msgs_blob": [pickle.dumps(msgs)],
+            "n_updated": pa.array([for_update.num_rows], type=pa.int64()),
+        })
 
     # One group per target data file (distinct _FIRST_ROW_ID). Drive the write
     # shuffle with the same num_partitions knob as the join (Spark's single
@@ -515,49 +482,17 @@ def _distributed_update_apply(
     )
 
     all_msgs: list = []
+    num_updated = 0
     for batch in msgs_ds.iter_batches(batch_format="pyarrow"):
         for blob in batch.column("msgs_blob").to_pylist():
             all_msgs.extend(pickle.loads(blob))
-    return all_msgs
+        for n in batch.column("n_updated").to_pylist():
+            num_updated += n
+    return all_msgs, num_updated
 
 
-PAIMON_SRC_IDX_COL = "_paimon_src_idx"
-MATCHED_SRC_IDX_MARKER = "_paimon_matched_src_idx"
 GLOBAL_INDEX_ACTION_THROW_ERROR = "THROW_ERROR"
 GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX = "DROP_PARTITION_INDEX"
-# Min rows per hash partition for the anti-join; keeps partitions non-empty
-# (ray's join crashes on empty hash partitions).
-_ANTI_JOIN_ROWS_PER_PARTITION = 8
-
-
-def _assign_src_idx_block(block, start):
-    import numpy as np
-    import pyarrow as pa
-
-    if not isinstance(block, pa.Table):
-        block = pa.Table.from_pandas(block, preserve_index=False)
-    idx = pa.array(np.arange(start, start + block.num_rows, dtype=np.int64))
-    return block.append_column(PAIMON_SRC_IDX_COL, idx)
-
-
-def _add_paimon_src_idx(source_ds):
-    """Append a unique per-row index so INSERTs are routed by row identity,
-    not by content. Mint ids per block from a running offset (offset derived
-    from block metadata, so it is deterministic under re-execution). Avoids
-    zip's realignment shuffle and the extra full copy it forces."""
-    import ray
-
-    materialized = source_ds.materialize()
-    assign = ray.remote(_assign_src_idx_block)
-    offset = 0
-    refs = []
-    for bundle in materialized.iter_internal_ref_bundles():
-        for block_ref, meta in bundle.blocks:
-            refs.append(assign.remote(block_ref, offset))
-            offset += meta.num_rows
-    if not refs:
-        return materialized
-    return ray.data.from_arrow_refs(refs)
 
 
 def _resolve_num_partitions(num_partitions: Optional[int]) -> int:
@@ -574,11 +509,8 @@ def _resolve_num_partitions(num_partitions: Optional[int]) -> int:
 
 def _clauses_use_vector_fast_path(
     clauses: List[_NormalizedClause],
-    merge_condition: Optional[Condition],
 ) -> bool:
     if not clauses:
-        return False
-    if merge_condition is not None:
         return False
     for c in clauses:
         if c.condition is not None:
@@ -650,56 +582,6 @@ def _resolve_spec_array(
     return pa.array([val] * batch.num_rows, type=out_type)
 
 
-def _compute_matched_source_idx_ds(
-    *,
-    target_identifier: str,
-    source_ds,
-    target_on: Sequence[str],
-    source_on: Sequence[str],
-    merge_condition: Condition,
-    catalog_options: Dict[str, str],
-    num_partitions: int,
-):
-    from pypaimon.ray.ray_paimon import read_paimon
-
-    target_ds = read_paimon(target_identifier, catalog_options)
-    target_renamed = target_ds.rename_columns(
-        {c: f"t.{c}" for c in target_ds.schema().names}
-    )
-    source_schema = source_ds.schema()
-    source_cols = list(source_schema.names) if source_schema is not None else list(source_on)
-    source_renamed = source_ds.rename_columns({c: f"s.{c}" for c in source_cols})
-
-    joined = target_renamed.join(
-        source_renamed,
-        join_type="inner",
-        num_partitions=num_partitions,
-        on=tuple(f"t.{c}" for c in target_on),
-        right_on=tuple(f"s.{c}" for c in source_on),
-    )
-
-    captured_merge_cond = merge_condition
-    captured_on_pairs = list(zip(source_on, target_on))
-    out_schema = pa.schema([pa.field(MATCHED_SRC_IDX_MARKER, pa.int64())])
-
-    def _emit_matched_idx(batch: pa.Table) -> pa.Table:
-        out_idx: list = []
-        for row in batch.to_pylist():
-            s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
-            t_row = {k[2:]: v for k, v in row.items() if k.startswith("t.")}
-            for sk, tk in captured_on_pairs:
-                if sk not in s_row and tk in t_row:
-                    s_row[sk] = t_row[tk]
-            combined = _prefixed(s_row, t_row)
-            if captured_merge_cond(combined):
-                out_idx.append(s_row.get(PAIMON_SRC_IDX_COL))
-        return pa.Table.from_pydict(
-            {MATCHED_SRC_IDX_MARKER: out_idx}, schema=out_schema
-        )
-
-    return joined.map_batches(_emit_matched_idx, batch_format="pyarrow")
-
-
 def _build_not_matched_insert_ds(
     *,
     target_identifier: str,
@@ -711,7 +593,6 @@ def _build_not_matched_insert_ds(
     target_pa_schema: pa.Schema,
     catalog_options: Dict[str, str],
     num_partitions: int,
-    matched_idx_ds=None,
     target_empty: bool = False,
 ):
     from pypaimon.ray.ray_paimon import read_paimon
@@ -727,26 +608,6 @@ def _build_not_matched_insert_ds(
 
     if target_empty:
         unmatched = source_renamed
-    elif matched_idx_ds is not None:
-        # ray's join is equi-only, so anti-join source against the matched
-        # per-row ids (Spark folds this into one LeftAnti predicate). Size
-        # partitions to the matched count: ray's join crashes on empty hash
-        # partitions, so keep them dense.
-        matched_idx_ds = matched_idx_ds.materialize()
-        matched_count = matched_idx_ds.count()
-        if matched_count == 0:
-            unmatched = source_renamed
-        else:
-            anti_np = max(
-                1, min(num_partitions, matched_count // _ANTI_JOIN_ROWS_PER_PARTITION)
-            )
-            unmatched = source_renamed.join(
-                matched_idx_ds,
-                join_type="left_anti",
-                num_partitions=anti_np,
-                on=(f"s.{PAIMON_SRC_IDX_COL}",),
-                right_on=(MATCHED_SRC_IDX_MARKER,),
-            )
     else:
         target_ds = read_paimon(
             target_identifier, catalog_options, projection=list(target_on)
@@ -762,7 +623,7 @@ def _build_not_matched_insert_ds(
             right_on=tuple(f"t.{c}" for c in target_on),
         )
 
-    if _clauses_use_vector_fast_path(clauses, None):
+    if _clauses_use_vector_fast_path(clauses):
         first_spec = clauses[0].spec
 
         def _fast(batch: pa.Table) -> pa.Table:
@@ -794,10 +655,9 @@ def _apply_insert_transform(
     out = []
     for row in rows:
         s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
-        s_row.pop(PAIMON_SRC_IDX_COL, None)
         combined = _prefixed(s_row, None)
         for clause in clauses:
-            if clause.condition is not None and not clause.condition(combined):
+            if clause.condition is not None and not clause.condition.eval(combined):
                 continue
             out.append(
                 _apply_set(
@@ -815,7 +675,6 @@ def _build_unified_both(
     source_ds,
     target_on: Sequence[str],
     source_on: Sequence[str],
-    merge_condition: Optional[Condition],
     matched_clauses: List[_NormalizedClause],
     not_matched_clauses: List[_NormalizedClause],
     target_field_names: Sequence[str],
@@ -823,8 +682,6 @@ def _build_unified_both(
     update_cols: Sequence[str],
     catalog_options: Dict[str, str],
     num_partitions: int,
-    condition_cols: Optional[Sequence[str]],
-    blob_cols: set,
 ):
     import pyarrow.compute as pc
 
@@ -835,8 +692,7 @@ def _build_unified_both(
     row_id_name = SpecialFields.ROW_ID.name
 
     needed_cols = _resolve_target_projection(
-        matched_clauses, merge_condition, target_on, update_cols,
-        target_field_names, condition_cols, blob_cols,
+        matched_clauses, target_on, update_cols, target_field_names,
     )
     projection = [row_id_name] + [c for c in needed_cols if c != row_id_name]
     target_ds = read_paimon(target_identifier, catalog_options, projection=projection)
@@ -863,7 +719,7 @@ def _build_unified_both(
     on_pairs = list(zip(source_on, target_on))
     update_schema = _build_update_schema(target_pa_schema, update_cols, row_id_name)
 
-    use_fast_matched = _clauses_use_vector_fast_path(matched_clauses, merge_condition)
+    use_fast_matched = _clauses_use_vector_fast_path(matched_clauses)
     first_matched_spec = matched_clauses[0].spec if use_fast_matched else None
     m_update_cols = list(update_cols)
     m_field_names = list(target_field_names)
@@ -876,62 +732,29 @@ def _build_unified_both(
                 row_id_name, update_schema,
             )
         return _apply_matched_transform(
-            sub, matched_clauses, merge_condition, on_pairs, m_update_cols,
+            sub, matched_clauses, on_pairs, m_update_cols,
             m_field_names, row_id_name, update_schema,
         )
 
     update_ds = joined.map_batches(_matched_batch, batch_format="pyarrow")
 
     i_field_names = list(target_field_names)
-    if merge_condition is None:
-        use_fast_insert = _clauses_use_vector_fast_path(not_matched_clauses, None)
-        first_insert_spec = not_matched_clauses[0].spec if use_fast_insert else None
+    use_fast_insert = _clauses_use_vector_fast_path(not_matched_clauses)
+    first_insert_spec = not_matched_clauses[0].spec if use_fast_insert else None
 
-        def _insert_batch(batch: pa.Table) -> pa.Table:
-            sub = batch.filter(pc.is_null(batch.column(t_row_id_col)))
-            if use_fast_insert:
-                return _coerce_large_string_types(
-                    _vectorized_insert_transform(
-                        sub, first_insert_spec, i_field_names, target_pa_schema
-                    )
+    def _insert_batch(batch: pa.Table) -> pa.Table:
+        sub = batch.filter(pc.is_null(batch.column(t_row_id_col)))
+        if use_fast_insert:
+            return _coerce_large_string_types(
+                _vectorized_insert_transform(
+                    sub, first_insert_spec, i_field_names, target_pa_schema
                 )
-            return _apply_insert_transform(
-                sub, not_matched_clauses, i_field_names, target_pa_schema
             )
-
-        insert_ds = joined.map_batches(_insert_batch, batch_format="pyarrow")
-    else:
-        idx_schema = pa.schema([pa.field(MATCHED_SRC_IDX_MARKER, pa.int64())])
-
-        def _emit_matched_idx(batch: pa.Table) -> pa.Table:
-            sub = batch.filter(pc.is_valid(batch.column(t_row_id_col)))
-            out_idx: list = []
-            for row in sub.to_pylist():
-                s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
-                t_row = {k[2:]: v for k, v in row.items() if k.startswith("t.")}
-                for sk, tk in on_pairs:
-                    if sk not in s_row and tk in t_row:
-                        s_row[sk] = t_row[tk]
-                combined = _prefixed(s_row, t_row)
-                if merge_condition(combined):
-                    out_idx.append(s_row.get(PAIMON_SRC_IDX_COL))
-            return pa.Table.from_pydict(
-                {MATCHED_SRC_IDX_MARKER: out_idx}, schema=idx_schema
-            )
-
-        matched_idx_ds = joined.map_batches(_emit_matched_idx, batch_format="pyarrow")
-        insert_ds = _build_not_matched_insert_ds(
-            target_identifier=target_identifier,
-            source_ds=source_ds,
-            target_on=target_on,
-            source_on=source_on,
-            clauses=not_matched_clauses,
-            target_field_names=target_field_names,
-            target_pa_schema=target_pa_schema,
-            catalog_options=catalog_options,
-            num_partitions=num_partitions,
-            matched_idx_ds=matched_idx_ds,
+        return _apply_insert_transform(
+            sub, not_matched_clauses, i_field_names, target_pa_schema
         )
+
+    insert_ds = joined.map_batches(_insert_batch, batch_format="pyarrow")
 
     return update_ds, insert_ds
 
@@ -1102,37 +925,20 @@ def _needed_target_cols(
     return [c for c in all_target_cols if c in needed]
 
 
-def _blob_cols(table) -> set:
-    return {
-        f.name
-        for f in table.table_schema.fields
-        if getattr(f.type, "type", None) == "BLOB"
-    }
-
-
 def _resolve_target_projection(
     clauses: List[_NormalizedClause],
-    merge_condition: Optional[Condition],
     target_on: Sequence[str],
     update_cols: Sequence[str],
     target_field_names: Sequence[str],
-    condition_cols: Optional[Sequence[str]],
-    blob_cols: set,
 ) -> list:
-    # When the caller declares condition_cols we read exactly what SET and the
-    # conditions need (Spark-like precision). Otherwise a condition forces the
-    # conservative all-columns read, but blob is never read: it can't be an
-    # update target nor a meaningful predicate input.
-    has_condition = merge_condition is not None or any(
-        c.condition is not None for c in clauses
-    )
-    if condition_cols is not None:
-        needed = set(_needed_target_cols(clauses, target_on, update_cols, target_field_names))
-        needed |= {c for c in condition_cols if c in target_field_names}
-        return [c for c in target_field_names if c in needed]
-    if has_condition:
-        return [c for c in target_field_names if c not in blob_cols]
-    return _needed_target_cols(clauses, target_on, update_cols, target_field_names)
+    # Precise: SET-side needs plus the target columns each parsed condition
+    # references. Anything not referenced (e.g. blob) is never read.
+    needed = set(_needed_target_cols(clauses, target_on, update_cols, target_field_names))
+    target_set = set(target_field_names)
+    for clause in clauses:
+        if clause.condition is not None:
+            needed |= clause.condition.target_columns() & target_set
+    return [c for c in target_field_names if c in needed]
 
 
 def _normalize_set_spec(
