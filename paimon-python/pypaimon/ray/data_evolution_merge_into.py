@@ -127,6 +127,11 @@ def merge_into(
             {"commit.strict-mode.last-safe-snapshot": str(base_snapshot.id)}
         )
 
+    global_index_action = (
+        table.options.global_index_column_update_action()
+        or GLOBAL_INDEX_ACTION_THROW_ERROR
+    )
+
     # Row-precise routing needs a stable per-source-row id when merge_condition
     # may differ between source rows sharing the same ON key.
     if when_not_matched and merge_condition is not None:
@@ -138,9 +143,6 @@ def merge_into(
         table.table_schema.fields
     )
 
-    if not_matched_specs and base_snapshot is not None:
-        _check_global_index_for_insert(table, base_snapshot)
-
     update_ds = None
     insert_ds = None
     update_cols_union: List[str] = []
@@ -150,7 +152,6 @@ def merge_into(
     # LEFT_OUTER join instead of reading and shuffling the target table twice.
     if matched_specs and not_matched_specs and base_snapshot is not None:
         update_cols_union = _union_update_cols(matched_specs)
-        _check_global_index_collision(table, base_snapshot, update_cols_union)
         update_ds, insert_ds = _build_unified_both(
             target_identifier=target,
             source_ds=source_ds,
@@ -169,7 +170,6 @@ def merge_into(
         # Empty target → no rows can match; matched UPDATE is a no-op.
         if matched_specs and base_snapshot is not None:
             update_cols_union = _union_update_cols(matched_specs)
-            _check_global_index_collision(table, base_snapshot, update_cols_union)
             update_ds = _build_matched_update_ds(
                 target_identifier=target,
                 source_ds=source_ds,
@@ -212,23 +212,30 @@ def merge_into(
                 target_empty=base_snapshot is None,
             )
 
-    all_msgs: list = []
+    update_msgs: list = []
     if update_ds is not None:
-        all_msgs.extend(
-            _distributed_update_apply(
-                update_ds,
-                table,
-                update_cols_union,
-                ray_remote_args=ray_remote_args,
-                allow_multiple_matches=allow_multiple_matches,
-            )
+        update_msgs = _distributed_update_apply(
+            update_ds,
+            table,
+            update_cols_union,
+            ray_remote_args=ray_remote_args,
+            allow_multiple_matches=allow_multiple_matches,
         )
+
+    all_msgs: list = list(update_msgs)
     if insert_ds is not None:
         all_msgs.extend(
             _distributed_write_collect_msgs(
                 insert_ds, table, ray_remote_args=ray_remote_args, concurrency=concurrency
             )
         )
+    # Mirror Spark's checkUpdateResult: scope the global-index action to the
+    # partitions the update actually wrote and the updated indexed columns.
+    all_msgs.extend(
+        _apply_global_index_update_action(
+            table, base_snapshot, update_cols_union, update_msgs, global_index_action
+        )
+    )
     if all_msgs:
         wb = table.new_batch_write_builder()
         tc = wb.new_commit()
@@ -506,6 +513,8 @@ def _distributed_update_apply(
 
 PAIMON_SRC_IDX_COL = "_paimon_src_idx"
 MATCHED_SRC_IDX_MARKER = "_paimon_matched_src_idx"
+GLOBAL_INDEX_ACTION_THROW_ERROR = "THROW_ERROR"
+GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX = "DROP_PARTITION_INDEX"
 # Min rows per hash partition for the anti-join; keeps partitions non-empty
 # (ray's join crashes on empty hash partitions).
 _ANTI_JOIN_ROWS_PER_PARTITION = 8
@@ -964,44 +973,63 @@ def _distributed_write_collect_msgs(
     return sink.collected
 
 
-def _check_global_index_collision(
-    table, snapshot, update_cols: Sequence[str]
-) -> None:
+def _apply_global_index_update_action(
+    table, snapshot, update_cols: Sequence[str], update_msgs, action: str
+) -> list:
+    """Handle updates touching globally-indexed columns, mirroring Spark's
+    ``checkUpdateResult``.
+
+    Scoped exactly like Spark: only index entries whose partition was written
+    by the update *and* whose indexed column is among the updated columns are
+    affected. THROW_ERROR (default) raises; DROP_PARTITION_INDEX drops those
+    entries (returned as index-delete commit messages, rebuild afterwards).
+    Like Spark, the INSERT path is left untouched.
+    """
+    if snapshot is None or not update_cols or not update_msgs:
+        return []
     entries = _scan_global_index_entries(table, snapshot)
     if not entries:
-        return
+        return []
     field_by_id = {f.id: f.name for f in table.fields}
     update_set = set(update_cols)
+    affected_partitions = {tuple(m.partition) for m in update_msgs}
+    affected = [
+        e for e in entries
+        if field_by_id.get(e.index_file.global_index_meta.index_field_id) in update_set
+        and tuple(e.partition.values) in affected_partitions
+    ]
+    if not affected:
+        return []
+    if action == GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX:
+        return _build_index_delete_msgs(affected)
     conflicted = sorted(
-        {
-            field_by_id.get(e.index_file.global_index_meta.index_field_id)
-            for e in entries
-        }
-        & update_set
-    )
-    if conflicted:
-        raise NotImplementedError(
-            f"MERGE INTO would update columns {conflicted} that have a global "
-            f"index; not supported (refusing to leave the index stale)."
-        )
-
-
-def _check_global_index_for_insert(table, snapshot) -> None:
-    entries = _scan_global_index_entries(table, snapshot)
-    if not entries:
-        return
-    field_by_id = {f.id: f.name for f in table.fields}
-    indexed = sorted(
-        {
-            field_by_id.get(e.index_file.global_index_meta.index_field_id)
-            for e in entries
-        }
+        {field_by_id.get(e.index_file.global_index_meta.index_field_id) for e in affected}
     )
     raise NotImplementedError(
-        f"MERGE INTO INSERT is not supported on tables with global-index "
-        f"columns {indexed} (btree/lumina/tantivy). Inserted rows would not "
-        f"appear in the index. Drop the global index or omit when_not_matched."
+        f"MERGE INTO would update columns {conflicted} that have a global "
+        f"index; not supported (refusing to leave the index stale). Set "
+        f"'global-index.column-update-action' = 'DROP_PARTITION_INDEX' to drop "
+        f"the affected index instead."
     )
+
+
+def _build_index_delete_msgs(entries) -> list:
+    """Group scanned index entries by partition into index-delete messages."""
+    from pypaimon.manifest.index_manifest_entry import IndexManifestEntry
+    from pypaimon.write.commit_message import CommitMessage
+
+    by_partition: Dict[tuple, list] = {}
+    for e in entries:
+        key = tuple(e.partition.values)
+        by_partition.setdefault(key, []).append(
+            IndexManifestEntry(
+                kind=1, partition=e.partition, bucket=e.bucket, index_file=e.index_file
+            )
+        )
+    return [
+        CommitMessage(partition=key, bucket=0, new_files=[], index_files=dels)
+        for key, dels in by_partition.items()
+    ]
 
 
 def _scan_global_index_entries(table, snapshot):

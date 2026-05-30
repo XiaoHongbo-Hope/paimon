@@ -1137,5 +1137,113 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         )
 
 
+class RayMergeIntoGlobalIndexGateTest(unittest.TestCase):
+
+    pa_schema = pa.schema([
+        ('id', pa.int32()),
+        ('name', pa.string()),
+        ('age', pa.int32()),
+    ])
+
+    de_options = {
+        'row-tracking.enabled': 'true',
+        'data-evolution.enabled': 'true',
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.mkdtemp()
+        cls.warehouse = os.path.join(cls.tempdir, 'warehouse')
+        cls.catalog = CatalogFactory.create({'warehouse': cls.warehouse})
+        cls.catalog.create_database('default', True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tempdir, ignore_errors=True)
+
+    def _table(self):
+        name = f'default.gidx_{uuid.uuid4().hex[:8]}'
+        s = Schema.from_pyarrow_schema(self.pa_schema, options=self.de_options)
+        self.catalog.create_table(name, s, False)
+        return self.catalog.get_table(name)
+
+    def _entry(self, table, column, partition_values=()):
+        from pypaimon.globalindex.global_index_meta import GlobalIndexMeta
+        from pypaimon.index.index_file_meta import IndexFileMeta
+        from pypaimon.manifest.index_manifest_entry import IndexManifestEntry
+        from pypaimon.table.row.generic_row import GenericRow
+
+        field_id = next(f.id for f in table.fields if f.name == column)
+        index_file = IndexFileMeta(
+            index_type='BTREE', file_name=f'idx-{column}', file_size=1, row_count=1,
+            global_index_meta=GlobalIndexMeta(
+                row_range_start=0, row_range_end=1, index_field_id=field_id,
+            ),
+        )
+        return IndexManifestEntry(
+            kind=0, partition=GenericRow(list(partition_values), []),
+            bucket=0, index_file=index_file,
+        )
+
+    def _update_msg(self, partition=()):
+        from pypaimon.write.commit_message import CommitMessage
+        return CommitMessage(partition=partition, bucket=0, new_files=[])
+
+    def test_update_throw_error_raises(self):
+        from unittest.mock import patch
+        from pypaimon.ray import data_evolution_merge_into as m
+
+        table = self._table()
+        with patch.object(m, '_scan_global_index_entries',
+                          return_value=[self._entry(table, 'age')]):
+            with self.assertRaises(NotImplementedError):
+                m._apply_global_index_update_action(
+                    table, object(), ['age'], [self._update_msg()],
+                    m.GLOBAL_INDEX_ACTION_THROW_ERROR,
+                )
+
+    def test_update_drop_returns_delete_msgs(self):
+        from unittest.mock import patch
+        from pypaimon.ray import data_evolution_merge_into as m
+
+        table = self._table()
+        with patch.object(m, '_scan_global_index_entries',
+                          return_value=[self._entry(table, 'age')]):
+            msgs = m._apply_global_index_update_action(
+                table, object(), ['age'], [self._update_msg()],
+                m.GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX,
+            )
+        self.assertEqual(1, len(msgs))
+        self.assertFalse(msgs[0].is_empty())
+        self.assertEqual('idx-age', msgs[0].index_files[0].index_file.file_name)
+        self.assertEqual(1, msgs[0].index_files[0].kind)
+
+    def test_update_unaffected_column_is_noop(self):
+        from unittest.mock import patch
+        from pypaimon.ray import data_evolution_merge_into as m
+
+        table = self._table()
+        with patch.object(m, '_scan_global_index_entries',
+                          return_value=[self._entry(table, 'age')]):
+            msgs = m._apply_global_index_update_action(
+                table, object(), ['name'], [self._update_msg()],
+                m.GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX,
+            )
+        self.assertEqual([], msgs)
+
+    def test_update_untouched_partition_is_noop(self):
+        from unittest.mock import patch
+        from pypaimon.ray import data_evolution_merge_into as m
+
+        table = self._table()
+        entry = self._entry(table, 'age', partition_values=('EU',))
+        with patch.object(m, '_scan_global_index_entries', return_value=[entry]):
+            msgs = m._apply_global_index_update_action(
+                table, object(), ['age'], [self._update_msg(partition=('US',))],
+                m.GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX,
+            )
+        self.assertEqual([], msgs)
+
+
 if __name__ == '__main__':
     unittest.main()
