@@ -212,6 +212,7 @@ def merge_into(
             update_ds,
             table,
             update_cols_union,
+            num_partitions=num_partitions,
             ray_remote_args=ray_remote_args,
             allow_multiple_matches=allow_multiple_matches,
         )
@@ -386,6 +387,7 @@ def _distributed_update_apply(
     table,
     write_update_cols: Sequence[str],
     *,
+    num_partitions: int,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     allow_multiple_matches: bool = False,
 ) -> list:
@@ -490,10 +492,11 @@ def _distributed_update_apply(
         msgs = worker.update_columns(for_update, list(captured_cols))
         return pa.Table.from_pydict({"msgs_blob": [pickle.dumps(msgs)]})
 
-    # One group per target data file (distinct _FIRST_ROW_ID). Size the shuffle
-    # to the real group count instead of ray's default 200, which otherwise
-    # spawns hundreds of empty reduce tasks on small/medium merges.
-    group_partitions = max(1, min(len(captured_sorted), _MAX_GROUP_PARTITIONS))
+    # One group per target data file (distinct _FIRST_ROW_ID). Drive the write
+    # shuffle with the same num_partitions knob as the join (Spark's single
+    # shuffle.partitions), bounded by the file count so small merges don't spawn
+    # empty reduce tasks and large ones scale past a fixed cap.
+    group_partitions = max(1, min(len(captured_sorted), num_partitions))
     msgs_ds = with_frid.groupby(frid_col, num_partitions=group_partitions).map_groups(
         _apply_group, batch_format="pyarrow"
     )
@@ -512,10 +515,6 @@ GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX = "DROP_PARTITION_INDEX"
 # Min rows per hash partition for the anti-join; keeps partitions non-empty
 # (ray's join crashes on empty hash partitions).
 _ANTI_JOIN_ROWS_PER_PARTITION = 8
-
-# Upper bound on the update groupby shuffle, matching ray's default hash-shuffle
-# parallelism so large tables keep today's behavior while small ones shrink.
-_MAX_GROUP_PARTITIONS = 200
 
 
 def _assign_src_idx_block(block, start):
