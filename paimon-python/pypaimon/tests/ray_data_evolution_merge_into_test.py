@@ -300,6 +300,41 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['id'], [1, 2, 3])
         self.assertEqual(out['age'], [1, 999, 999])
 
+    def test_matched_partial_clause_falls_back_to_target(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['old'],
+                    'age': pa.array([42], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1], type=pa.int32()),
+                'name': ['new'],
+                'age': pa.array([99], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[
+                WhenMatched(update={'name': 's.name'}),
+                WhenMatched(update={'age': 's.age'}),
+            ],
+        )
+        out = self._read_sorted(target)
+        self.assertEqual(out['name'], ['new'])
+        self.assertEqual(out['age'], [42])
+
     def test_not_matched_insert_appends_unmatched(self):
         target = self._create_table()
         self._write(

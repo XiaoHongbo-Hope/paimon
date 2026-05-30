@@ -1077,13 +1077,18 @@ def _needed_target_cols(
     update_cols: Sequence[str],
     all_target_cols: Sequence[str],
 ) -> list:
-    needed = set(on) | set(update_cols)
+    # Target needs only: join keys, t.col refs, and cols that may fall back
+    # (not set by every clause). Cols all clauses set from source aren't read.
+    needed = set(on)
+    set_by_all = set(update_cols)
     for clause in clauses:
         for value in clause.spec.values():
             if callable(value):
                 return list(all_target_cols)
             if isinstance(value, str) and value.startswith("t."):
                 needed.add(value[2:])
+        set_by_all &= set(clause.spec.keys())
+    needed |= set(update_cols) - set_by_all
     return [c for c in all_target_cols if c in needed]
 
 
