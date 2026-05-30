@@ -259,6 +259,81 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['id'], [1, 2, 3])
         self.assertEqual(out['age'], [10, 100, 50])
 
+    def test_condition_cols_declared_precise(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1, 2, 3], type=pa.int32()),
+                    'name': ['a', 'b', 'c'],
+                    'age': pa.array([10, 20, 30], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 2, 3], type=pa.int32()),
+                'name': ['a', 'b', 'c'],
+                'age': pa.array([5, 100, 50], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[
+                WhenMatched(
+                    update={'age': 's.age'},
+                    condition=lambda r: r['s.age'] > r['t.age'],
+                ),
+            ],
+            condition_cols=['age'],
+        )
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2, 3])
+        self.assertEqual(out['age'], [10, 100, 50])
+
+    def test_condition_cols_underdeclared_raises(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1], type=pa.int32()),
+                    'name': ['a'],
+                    'age': pa.array([10], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1], type=pa.int32()),
+                'name': ['a'],
+                'age': pa.array([99], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+        with self.assertRaises(Exception) as ctx:
+            merge_into(
+                target=target,
+                source=source,
+                catalog_options=self.catalog_options,
+                on=['id'],
+                when_matched=[
+                    WhenMatched(
+                        update={'name': 's.name'},
+                        condition=lambda r: r['s.age'] > r['t.age'],
+                    ),
+                ],
+                condition_cols=[],
+            )
+        self.assertIn('condition_cols', str(ctx.exception))
+
     def test_matched_multiple_clauses_first_match_wins(self):
         target = self._create_table()
         self._write(
@@ -1241,6 +1316,40 @@ class RayMergeIntoGlobalIndexGateTest(unittest.TestCase):
                 m.GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX,
             )
         self.assertEqual([], msgs)
+
+
+class TargetProjectionTest(unittest.TestCase):
+
+    def _clause(self, spec, condition=None):
+        from pypaimon.ray import data_evolution_merge_into as m
+        return m._NormalizedClause(spec=spec, condition=condition)
+
+    def test_unconditional_set_excludes_target_update_col(self):
+        from pypaimon.ray import data_evolution_merge_into as m
+        cols = m._resolve_target_projection(
+            [self._clause({'feature': 's.feature'})],
+            None, ['id'], ['feature'],
+            ['id', 'feature', 'image'], None, {'image'},
+        )
+        self.assertEqual(['id'], cols)
+
+    def test_condition_without_decl_excludes_blob_only(self):
+        from pypaimon.ray import data_evolution_merge_into as m
+        cols = m._resolve_target_projection(
+            [self._clause({'feature': 's.feature'})],
+            lambda r: True, ['id'], ['feature'],
+            ['id', 'age', 'feature', 'image'], None, {'image'},
+        )
+        self.assertEqual(['id', 'age', 'feature'], cols)
+
+    def test_condition_cols_declared_is_precise(self):
+        from pypaimon.ray import data_evolution_merge_into as m
+        cols = m._resolve_target_projection(
+            [self._clause({'feature': 's.feature'})],
+            lambda r: True, ['id'], ['feature'],
+            ['id', 'age', 'feature', 'image'], ['age'], {'image'},
+        )
+        self.assertEqual(['id', 'age'], cols)
 
 
 if __name__ == '__main__':

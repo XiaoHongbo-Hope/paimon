@@ -69,6 +69,7 @@ def merge_into(
     ray_remote_args: Optional[Dict[str, Any]] = None,
     concurrency: Optional[int] = None,
     allow_multiple_matches: bool = False,
+    condition_cols: Optional[List[str]] = None,
 ) -> None:
     _require_ray_join()
     num_partitions = _resolve_num_partitions(num_partitions)
@@ -95,6 +96,7 @@ def merge_into(
         )
 
     target_field_names = list(table.field_names)
+    blob_cols = _blob_cols(table)
     on_map = dict(zip(target_on_cols, source_on_cols))
     matched_specs = [
         _NormalizedClause(
@@ -159,6 +161,8 @@ def merge_into(
             update_cols=update_cols_union,
             catalog_options=catalog_options,
             num_partitions=num_partitions,
+            condition_cols=condition_cols,
+            blob_cols=blob_cols,
         )
     else:
         # Empty target → no rows can match; matched UPDATE is a no-op.
@@ -176,6 +180,8 @@ def merge_into(
                 update_cols=update_cols_union,
                 catalog_options=catalog_options,
                 num_partitions=num_partitions,
+                condition_cols=condition_cols,
+                blob_cols=blob_cols,
             )
 
         if not_matched_specs:
@@ -263,20 +269,17 @@ def _build_matched_update_ds(
     update_cols: Sequence[str],
     catalog_options: Dict[str, str],
     num_partitions: int,
+    condition_cols: Optional[Sequence[str]],
+    blob_cols: set,
 ):
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.table.special_fields import SpecialFields
 
     row_id_name = SpecialFields.ROW_ID.name
-    needs_full = merge_condition is not None or any(
-        c.condition is not None for c in clauses
+    needed_cols = _resolve_target_projection(
+        clauses, merge_condition, target_on, update_cols,
+        target_field_names, condition_cols, blob_cols,
     )
-    if needs_full:
-        needed_cols = list(target_field_names)
-    else:
-        needed_cols = _needed_target_cols(
-            clauses, target_on, update_cols, target_field_names
-        )
     projection = [row_id_name] + [c for c in needed_cols if c != row_id_name]
 
     target_ds = read_paimon(target_identifier, catalog_options, projection=projection)
@@ -335,6 +338,16 @@ def _build_matched_update_ds(
     return joined.map_batches(_transform, batch_format="pyarrow")
 
 
+def _eval_cond(cond, combined):
+    try:
+        return cond(combined)
+    except KeyError as e:
+        raise ValueError(
+            f"merge condition referenced column {e} that was not read; "
+            f"add it to condition_cols."
+        ) from e
+
+
 def _apply_matched_transform(
     batch: pa.Table,
     clauses: List[_NormalizedClause],
@@ -355,10 +368,10 @@ def _apply_matched_transform(
             if s_key not in s_row and t_key in t_row:
                 s_row[s_key] = t_row[t_key]
         combined = _prefixed(s_row, t_row)
-        if merge_condition is not None and not merge_condition(combined):
+        if merge_condition is not None and not _eval_cond(merge_condition, combined):
             continue
         for clause in clauses:
-            if clause.condition is not None and not clause.condition(combined):
+            if clause.condition is not None and not _eval_cond(clause.condition, combined):
                 continue
             new_values = _apply_set(clause.spec, s_row, t_row, field_names)
             out_row_ids.append(t_row[row_id_name])
@@ -810,6 +823,8 @@ def _build_unified_both(
     update_cols: Sequence[str],
     catalog_options: Dict[str, str],
     num_partitions: int,
+    condition_cols: Optional[Sequence[str]],
+    blob_cols: set,
 ):
     import pyarrow.compute as pc
 
@@ -819,15 +834,10 @@ def _build_unified_both(
 
     row_id_name = SpecialFields.ROW_ID.name
 
-    needs_full = merge_condition is not None or any(
-        c.condition is not None for c in matched_clauses
+    needed_cols = _resolve_target_projection(
+        matched_clauses, merge_condition, target_on, update_cols,
+        target_field_names, condition_cols, blob_cols,
     )
-    if needs_full:
-        needed_cols = list(target_field_names)
-    else:
-        needed_cols = _needed_target_cols(
-            matched_clauses, target_on, update_cols, target_field_names
-        )
     projection = [row_id_name] + [c for c in needed_cols if c != row_id_name]
     target_ds = read_paimon(target_identifier, catalog_options, projection=projection)
     target_renamed = target_ds.rename_columns(
@@ -1090,6 +1100,39 @@ def _needed_target_cols(
         set_by_all &= set(clause.spec.keys())
     needed |= set(update_cols) - set_by_all
     return [c for c in all_target_cols if c in needed]
+
+
+def _blob_cols(table) -> set:
+    return {
+        f.name
+        for f in table.table_schema.fields
+        if getattr(f.type, "type", None) == "BLOB"
+    }
+
+
+def _resolve_target_projection(
+    clauses: List[_NormalizedClause],
+    merge_condition: Optional[Condition],
+    target_on: Sequence[str],
+    update_cols: Sequence[str],
+    target_field_names: Sequence[str],
+    condition_cols: Optional[Sequence[str]],
+    blob_cols: set,
+) -> list:
+    # When the caller declares condition_cols we read exactly what SET and the
+    # conditions need (Spark-like precision). Otherwise a condition forces the
+    # conservative all-columns read, but blob is never read: it can't be an
+    # update target nor a meaningful predicate input.
+    has_condition = merge_condition is not None or any(
+        c.condition is not None for c in clauses
+    )
+    if condition_cols is not None:
+        needed = set(_needed_target_cols(clauses, target_on, update_cols, target_field_names))
+        needed |= {c for c in condition_cols if c in target_field_names}
+        return [c for c in target_field_names if c in needed]
+    if has_condition:
+        return [c for c in target_field_names if c not in blob_cols]
+    return _needed_target_cols(clauses, target_on, update_cols, target_field_names)
 
 
 def _normalize_set_spec(
