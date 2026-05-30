@@ -277,3 +277,48 @@ write_builder = table.new_batch_write_builder().overwrite()
 # overwrite partition 'dt=2024-01-01'
 write_builder = table.new_batch_write_builder().overwrite({'dt': '2024-01-01'})
 ```
+
+## Merge Into
+
+`merge_into` updates (and optionally inserts) rows of a **data-evolution** table
+from a source, like SQL `MERGE INTO`. Matched rows are updated in place by
+`_ROW_ID`; only the touched columns are rewritten. Requires `ray >= 2.50` and a
+target table with `'data-evolution.enabled'` and `'row-tracking.enabled'` set.
+
+```python
+from pypaimon.ray import merge_into, WhenMatched, WhenNotMatched
+
+metrics = merge_into(
+    target="database_name.table_name",
+    source=ray_dataset,          # ray.data.Dataset / pa.Table / pandas / table-name str
+    catalog_options={"warehouse": "/path/to/warehouse"},
+    on=["id"],                   # or {"target_col": "source_col"} for renamed keys
+    when_matched=[WhenMatched(update={"score": "s.score"})],   # or update="*"
+    when_not_matched=[WhenNotMatched(insert="*")],             # optional
+)
+print(metrics)   # {"num_updated": 3, "num_inserted": 2}
+```
+
+- `update` / `insert`: `"*"` (all columns from source), or a dict mapping target
+  columns to `"s.<col>"`, `"t.<col>"`, or a literal.
+- `condition` (optional): a string expression over `s.<col>` / `t.<col>` using
+  `> < >= <= == != and or not`; only referenced columns are read. Example:
+  `WhenMatched(update={"score": "s.score"}, condition="s.version > t.version")`.
+
+**Parameters:**
+- `on`: key columns, or `{target_col: source_col}` for renamed keys.
+- `num_partitions`: shuffle parallelism for the join and the write; defaults to
+  `max(16, cluster_cpus * 2)`, raise it for large merges.
+- `ray_remote_args`, `concurrency`: scheduling for the insert path.
+- `allow_multiple_matches`: if `False` (default), a target row matched by
+  multiple source rows raises; `True` keeps the first match.
+
+**Returns:** `{"num_updated", "num_inserted"}`.
+
+**Notes:**
+- Blob columns cannot be updated and are never read into the join.
+- Updating a globally-indexed column raises by default; set
+  `'global-index.column-update-action' = 'DROP_PARTITION_INDEX'` to drop the
+  affected index instead (rebuild afterwards).
+- Cost scales with how many data files the updated rows touch; scattered updates
+  over a large table rewrite the updated column of many files.
