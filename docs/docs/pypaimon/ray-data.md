@@ -301,9 +301,6 @@ print(metrics)   # {"num_matched": 5, "num_inserted": 2, "num_unchanged": 2}
 
 - `update` / `insert`: `"*"` (all columns from source), or a dict mapping target
   columns to `"s.<col>"`, `"t.<col>"`, or a literal.
-- `condition` (optional): a string expression over `s.<col>` / `t.<col>` using
-  `> < >= <= == != and or not`; only referenced columns are read. Example:
-  `WhenMatched(update={"score": "s.score"}, condition="s.version > t.version")`.
 
 **Parameters:**
 - `on`: key columns, or `{target_col: source_col}` for renamed keys.

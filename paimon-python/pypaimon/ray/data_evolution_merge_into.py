@@ -32,30 +32,23 @@ from typing import (
 
 import pyarrow as pa
 
-from pypaimon.ray.condition_expr import ConditionExpr
-from pypaimon.ray.condition_expr import parse as parse_condition
-
 SetSpec = Union[str, Dict[str, Any]]
-Condition = str
 OnSpec = Union[Sequence[str], Mapping[str, str]]
 
 
 @dataclass
 class WhenMatched:
     update: SetSpec
-    condition: Optional[Condition] = None
 
 
 @dataclass
 class WhenNotMatched:
     insert: SetSpec
-    condition: Optional[Condition] = None
 
 
 @dataclass
 class _NormalizedClause:
     spec: Dict[str, Any]
-    condition: Optional[ConditionExpr]
 
 
 def merge_into(
@@ -100,14 +93,12 @@ def merge_into(
     matched_specs = [
         _NormalizedClause(
             spec=_normalize_set_spec(c.update, target_field_names, on_map),
-            condition=parse_condition(c.condition) if c.condition else None,
         )
         for c in when_matched
     ]
     not_matched_specs = [
         _NormalizedClause(
             spec=_normalize_set_spec(c.insert, target_field_names, on_map),
-            condition=parse_condition(c.condition) if c.condition else None,
         )
         for c in when_not_matched
     ]
@@ -324,10 +315,7 @@ def _apply_matched_transform(
         for s_key, t_key in on_pairs:
             if s_key not in s_row and t_key in t_row:
                 s_row[s_key] = t_row[t_key]
-        combined = _prefixed(s_row, t_row)
         for clause in clauses:
-            if clause.condition is not None and not clause.condition.eval(combined):
-                continue
             new_values = _apply_set(clause.spec, s_row, t_row, field_names)
             out_row_ids.append(t_row[row_id_name])
             for col in update_cols:
@@ -503,8 +491,6 @@ def _clauses_use_vector_fast_path(
     if not clauses:
         return False
     for c in clauses:
-        if c.condition is not None:
-            return False
         for v in c.spec.values():
             if callable(v):
                 return False
@@ -645,10 +631,7 @@ def _apply_insert_transform(
     out = []
     for row in rows:
         s_row = {k[2:]: v for k, v in row.items() if k.startswith("s.")}
-        combined = _prefixed(s_row, None)
         for clause in clauses:
-            if clause.condition is not None and not clause.condition.eval(combined):
-                continue
             out.append(
                 _apply_set(
                     clause.spec, s_row, None, field_names, null_unspecified=True
@@ -863,13 +846,9 @@ def _resolve_target_projection(
     update_cols: Sequence[str],
     target_field_names: Sequence[str],
 ) -> list:
-    # Precise: SET-side needs plus the target columns each parsed condition
-    # references. Anything not referenced (e.g. blob) is never read.
-    needed = set(_needed_target_cols(clauses, target_on, update_cols, target_field_names))
-    target_set = set(target_field_names)
-    for clause in clauses:
-        if clause.condition is not None:
-            needed |= clause.condition.target_columns() & target_set
+    needed = set(_needed_target_cols(
+        clauses, target_on, update_cols, target_field_names,
+    ))
     return [c for c in target_field_names if c in needed]
 
 
