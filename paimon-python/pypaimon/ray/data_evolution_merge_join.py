@@ -87,6 +87,12 @@ def build_matched_update_ds(
         right_on=tuple(f"s.{c}" for c in source_on),
     )
 
+    # MVP supports a single matched clause; future fan-out (conditions, multi-
+    # clause fall-through) must thread every clause's spec through the
+    # transform — guard so silent first-only behaviour can't sneak in.
+    assert len(clauses) == 1, (
+        f"build_matched_update_ds expected 1 clause, got {len(clauses)}"
+    )
     spec = clauses[0].spec
     captured_update_cols = list(update_cols)
     captured_row_id_name = row_id_name
@@ -150,13 +156,15 @@ def distributed_update_apply(
 
     # Put file metadata into Ray's object store and pass a single ref to
     # workers. Avoids per-task manifest re-scans (Jingsong review #6) and
-    # avoids serializing the metadata into every task's closure.
-    precomputed_info_ref = ray.put((
-        check_from_snapshot,
-        planner.first_row_ids,
-        planner._first_row_id_index,
-        planner.total_row_count,
-    ))
+    # avoids serializing the metadata into every task's closure. Override
+    # snapshot_id with the join's base snapshot so commit-time conflict
+    # detection covers the read→planner window.
+    from dataclasses import replace
+    files_info = replace(
+        planner.snapshot_files_info(),
+        snapshot_id=check_from_snapshot,
+    )
+    precomputed_info_ref = ray.put(files_info)
 
     frid_col = "_FIRST_ROW_ID"
     captured_sorted = sorted_first_row_ids
@@ -294,6 +302,11 @@ def build_not_matched_insert_ds(
             right_on=tuple(f"t.{c}" for c in target_on),
         )
 
+    # MVP supports a single not-matched clause; see build_matched_update_ds
+    # for why we assert instead of silently dropping the rest.
+    assert len(clauses) == 1, (
+        f"build_not_matched_insert_ds expected 1 clause, got {len(clauses)}"
+    )
     spec = clauses[0].spec
 
     def _transform(batch: pa.Table) -> pa.Table:
@@ -323,18 +336,9 @@ def distributed_write_collect_msgs(
             self.collected: list = []
 
         def on_write_complete(self, write_result):
-            if hasattr(write_result, "write_returns"):
-                write_returns = write_result.write_returns
-            elif isinstance(write_result, list):
-                write_returns = write_result
-            else:
-                raise TypeError(
-                    f"Unexpected write_result type "
-                    f"{type(write_result).__name__}"
-                )
             self.collected = [
                 m
-                for batch in write_returns
+                for batch in self._extract_write_returns(write_result)
                 for m in batch
                 if not m.is_empty()
             ]

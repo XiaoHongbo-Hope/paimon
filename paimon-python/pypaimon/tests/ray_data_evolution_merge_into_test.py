@@ -34,7 +34,6 @@ _SKIP_UPDATE_STAR = (
 )
 
 
-@unittest.skip(_SKIP_UPDATE_STAR)
 class RayDataEvolutionMergeIntoTest(unittest.TestCase):
 
     pa_schema = pa.schema([
@@ -153,6 +152,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             )
         self.assertIn("'id'", str(ctx.exception))
 
+    @unittest.skip(_SKIP_UPDATE_STAR)
     def test_matched_update_star(self):
         target = self._create_table()
         self._write(
@@ -189,6 +189,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b2', 'c2'])
         self.assertEqual(out['age'], [10, 22, 33])
 
+    @unittest.skip(_SKIP_UPDATE_STAR)
     def test_not_matched_insert_appends_unmatched(self):
         target = self._create_table()
         self._write(
@@ -225,6 +226,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b', 'c', 'd'])
         self.assertEqual(out['age'], [10, 20, 30, 40])
 
+    @unittest.skip(_SKIP_UPDATE_STAR)
     def test_combined_update_and_insert(self):
         target = self._create_table()
         self._write(
@@ -265,6 +267,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             'num_matched': 1, 'num_inserted': 1, 'num_unchanged': 0,
         })
 
+    @unittest.skip(_SKIP_UPDATE_STAR)
     def test_on_with_renamed_columns_star(self):
         target = self._create_table()
         self._write(
@@ -307,6 +310,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b2', 'c'])
         self.assertEqual(out['age'], [10, 22, 30])
 
+    @unittest.skip(_SKIP_UPDATE_STAR)
     def test_insert_into_empty_target(self):
         target = self._create_table()
 
@@ -332,6 +336,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b', 'c'])
         self.assertEqual(out['age'], [10, 20, 30])
 
+    @unittest.skip(_SKIP_UPDATE_STAR)
     def test_multi_source_match_raises_by_default(self):
         # One target row matched by several source rows: the winning value is
         # undefined (Spark DE's checkCardinality=false), so we refuse by default.
@@ -383,6 +388,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         )
         self.assertEqual({'payload'}, _blob_col_names(fake_table))
 
+    @unittest.skip(_SKIP_UPDATE_STAR)
     def test_combined_writes_single_snapshot(self):
         target = self._create_table()
         self._write(
@@ -419,6 +425,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         after = self._snapshot_id(target)
         self.assertEqual(after, before + 1)
 
+    @unittest.skip(_SKIP_UPDATE_STAR)
     def test_empty_target_matched_update_is_noop(self):
         target = self._create_table()
         before = self._snapshot_id(target)

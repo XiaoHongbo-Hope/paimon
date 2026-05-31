@@ -16,6 +16,7 @@
 # under the License.
 
 import bisect
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import pyarrow as pa
@@ -32,6 +33,21 @@ from pypaimon.write.commit_message import CommitMessage
 from pypaimon.write.file_store_write import FileStoreWrite
 
 
+@dataclass(frozen=True)
+class FilesInfo:
+    """Snapshot view of target data files keyed by first_row_id.
+
+    Built once per merge by the driver and broadcast to workers so each task
+    avoids re-scanning the manifest.
+    """
+    snapshot_id: int
+    first_row_ids: List[int]
+    first_row_id_index: Dict[int, Tuple[DataSplit, List[DataFileMeta]]] = (
+        field(default_factory=dict)
+    )
+    total_row_count: int = 0
+
+
 class TableUpdateByRowId:
     """
     Table update for partial column updates (data evolution).
@@ -44,11 +60,7 @@ class TableUpdateByRowId:
 
     def __init__(
             self, table, commit_user: str, commit_identifier: int,
-            precomputed_files_info: Optional[Tuple[
-                int, List[int],
-                Dict[int, Tuple[DataSplit, List[DataFileMeta]]],
-                int,
-            ]] = None,
+            precomputed_files_info: Optional[FilesInfo] = None,
     ):
         from pypaimon.table.file_store_table import FileStoreTable
 
@@ -56,29 +68,34 @@ class TableUpdateByRowId:
         self.commit_user = commit_user
         self.commit_identifier = commit_identifier
 
-        if precomputed_files_info is not None:
-            (self.snapshot_id,
-             self.first_row_ids,
-             self._first_row_id_index,
-             self.total_row_count) = precomputed_files_info
-        else:
-            (self.snapshot_id,
-             self.first_row_ids,
-             self._first_row_id_index,
-             self.total_row_count) = self._load_existing_files_info()
+        info = precomputed_files_info or self._load_existing_files_info()
+        self.snapshot_id = info.snapshot_id
+        self.first_row_ids = info.first_row_ids
+        self._first_row_id_index = info.first_row_id_index
+        self.total_row_count = info.total_row_count
 
         self.commit_messages: List[CommitMessage] = []
 
-    def _load_existing_files_info(
-            self,
-    ) -> Tuple[int, List[int], Dict[int, Tuple[DataSplit, List[DataFileMeta]]], int]:
+    def snapshot_files_info(self) -> FilesInfo:
+        """Public accessor returning the current snapshot's file index.
+
+        Allows callers (e.g. distributed merge_into) to broadcast the view to
+        workers without reaching into private attributes.
+        """
+        return FilesInfo(
+            snapshot_id=self.snapshot_id,
+            first_row_ids=self.first_row_ids,
+            first_row_id_index=self._first_row_id_index,
+            total_row_count=self.total_row_count,
+        )
+
+    def _load_existing_files_info(self) -> FilesInfo:
         """Scan the latest snapshot once and index files by ``first_row_id``.
 
-        Returns:
-            A 4-tuple of ``(snapshot_id, sorted_unique_first_row_ids, index, total_row_count)``
-            where ``index`` maps each ``first_row_id`` to the owning split and
-            the list of files with that id (a single id may belong to multiple
-            files when data evolution has split a logical row range).
+        Returns a :class:`FilesInfo` whose ``first_row_id_index`` maps each
+        ``first_row_id`` to the owning split and the list of files with that
+        id (a single id may belong to multiple files when data evolution has
+        split a logical row range).
         """
         plan = self.table.new_read_builder().new_scan().plan()
         splits = plan.splits()
@@ -106,7 +123,12 @@ class TableUpdateByRowId:
             total_row_count = 0
 
         snapshot_id = plan.snapshot_id if plan.snapshot_id is not None else -1
-        return snapshot_id, sorted(index.keys()), index, total_row_count
+        return FilesInfo(
+            snapshot_id=snapshot_id,
+            first_row_ids=sorted(index.keys()),
+            first_row_id_index=index,
+            total_row_count=total_row_count,
+        )
 
     def update_columns(self, data: pa.Table, column_names: List[str]) -> List[CommitMessage]:
         """

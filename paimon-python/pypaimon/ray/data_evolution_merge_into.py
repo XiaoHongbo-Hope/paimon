@@ -90,6 +90,12 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
         raise ValueError(
             "At least one of when_matched or when_not_matched must be non-empty."
         )
+    if len(when_matched) > 1 or len(when_not_matched) > 1:
+        raise NotImplementedError(
+            "merge_into currently supports a single WhenMatched and a single "
+            "WhenNotMatched clause; multi-clause fall-through will be added "
+            "in a follow-up PR."
+        )
     target_on_cols, source_on_cols = _normalize_on(on)
 
     from pypaimon.catalog.catalog_factory import CatalogFactory
@@ -238,10 +244,13 @@ def _execute_and_commit(
     all_msgs: list = list(update_msgs)
     num_inserted = 0
     if insert_ds is not None:
-        insert_msgs = distributed_write_collect_msgs(
-            insert_ds, table,
-            ray_remote_args=ray_remote_args, concurrency=concurrency,
-        )
+        try:
+            insert_msgs = distributed_write_collect_msgs(
+                insert_ds, table,
+                ray_remote_args=ray_remote_args, concurrency=concurrency,
+            )
+        except Exception as e:
+            _reraise_inner(e)
         num_inserted = sum(
             f.row_count for m in insert_msgs for f in m.new_files
         )
