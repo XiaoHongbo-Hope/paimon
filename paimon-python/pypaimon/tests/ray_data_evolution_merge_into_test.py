@@ -189,77 +189,6 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b2', 'c2'])
         self.assertEqual(out['age'], [10, 22, 33])
 
-    def test_matched_update_dict(self):
-        target = self._create_table()
-        self._write(
-            target,
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([1, 2], type=pa.int32()),
-                    'name': ['a', 'b'],
-                    'age': pa.array([10, 20], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            ),
-        )
-
-        source = pa.Table.from_pydict(
-            {
-                'id': pa.array([2], type=pa.int32()),
-                'name': ['ignored'],
-                'age': pa.array([99], type=pa.int32()),
-            },
-            schema=self.pa_schema,
-        )
-
-        merge_into(
-            target=target,
-            source=source,
-            catalog_options=self.catalog_options,
-            on=['id'],
-            when_matched=[WhenMatched(update={'age': 's.age'})],
-        )
-
-        out = self._read_sorted(target)
-        self.assertEqual(out['id'], [1, 2])
-        self.assertEqual(out['name'], ['a', 'b'])
-        self.assertEqual(out['age'], [10, 99])
-
-    def test_matched_partial_clause_falls_back_to_target(self):
-        target = self._create_table()
-        self._write(
-            target,
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([1], type=pa.int32()),
-                    'name': ['old'],
-                    'age': pa.array([42], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            ),
-        )
-        source = pa.Table.from_pydict(
-            {
-                'id': pa.array([1], type=pa.int32()),
-                'name': ['new'],
-                'age': pa.array([99], type=pa.int32()),
-            },
-            schema=self.pa_schema,
-        )
-        merge_into(
-            target=target,
-            source=source,
-            catalog_options=self.catalog_options,
-            on=['id'],
-            when_matched=[
-                WhenMatched(update={'name': 's.name'}),
-                WhenMatched(update={'age': 's.age'}),
-            ],
-        )
-        out = self._read_sorted(target)
-        self.assertEqual(out['name'], ['new'])
-        self.assertEqual(out['age'], [42])
-
     def test_not_matched_insert_appends_unmatched(self):
         target = self._create_table()
         self._write(
@@ -336,46 +265,6 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             'num_matched': 1, 'num_inserted': 1, 'num_unchanged': 0,
         })
 
-    def test_on_with_renamed_columns(self):
-        target = self._create_table()
-        self._write(
-            target,
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([1, 2], type=pa.int32()),
-                    'name': ['a', 'b'],
-                    'age': pa.array([10, 20], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            ),
-        )
-
-        source_schema = pa.schema([
-            ('uid', pa.int32()),
-            ('name', pa.string()),
-            ('age', pa.int32()),
-        ])
-        source = pa.Table.from_pydict(
-            {
-                'uid': pa.array([2, 3], type=pa.int32()),
-                'name': ['b2', 'c'],
-                'age': pa.array([22, 30], type=pa.int32()),
-            },
-            schema=source_schema,
-        )
-
-        merge_into(
-            target=target,
-            source=source,
-            catalog_options=self.catalog_options,
-            on={'id': 'uid'},
-            when_matched=[WhenMatched(update={'age': 's.age'})],
-        )
-
-        out = self._read_sorted(target)
-        self.assertEqual(out['id'], [1, 2])
-        self.assertEqual(out['age'], [10, 22])
-
     def test_on_with_renamed_columns_star(self):
         target = self._create_table()
         self._write(
@@ -443,42 +332,6 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b', 'c'])
         self.assertEqual(out['age'], [10, 20, 30])
 
-    def test_insert_dict_fills_unspecified_with_null(self):
-        target = self._create_table()
-        self._write(
-            target,
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([1], type=pa.int32()),
-                    'name': ['a'],
-                    'age': pa.array([10], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            ),
-        )
-
-        source = pa.Table.from_pydict(
-            {
-                'id': pa.array([2], type=pa.int32()),
-                'name': ['source-name'],
-                'age': pa.array([99], type=pa.int32()),
-            },
-            schema=self.pa_schema,
-        )
-
-        merge_into(
-            target=target,
-            source=source,
-            catalog_options=self.catalog_options,
-            on=['id'],
-            when_not_matched=[WhenNotMatched(insert={'id': 's.id', 'age': 99})],
-        )
-
-        out = self._read_sorted(target)
-        self.assertEqual(out['id'], [1, 2])
-        self.assertEqual(out['name'], ['a', None])
-        self.assertEqual(out['age'], [10, 99])
-
     def test_multi_source_match_raises_by_default(self):
         # One target row matched by several source rows: the winning value is
         # undefined (Spark DE's checkCardinality=false), so we refuse by default.
@@ -514,49 +367,10 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             )
         self.assertIn("multiple source rows", str(ctx.exception))
 
-    def test_multi_source_match_allow_keeps_first(self):
-        # Opt-in: allow_multiple_matches keeps the first match deterministically.
-        target = self._create_table()
-        self._write(
-            target,
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([1], type=pa.int32()),
-                    'name': ['a'],
-                    'age': pa.array([10], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            ),
-        )
-
-        source = pa.Table.from_pydict(
-            {
-                'id': pa.array([1, 1], type=pa.int32()),
-                'name': ['x', 'y'],
-                'age': pa.array([100, 200], type=pa.int32()),
-            },
-            schema=self.pa_schema,
-        )
-
-        merge_into(
-            target=target,
-            source=source,
-            catalog_options=self.catalog_options,
-            on=['id'],
-            when_matched=[WhenMatched(update='*')],
-            allow_multiple_matches=True,
-        )
-
-        out = self._read_sorted(target)
-        self.assertEqual(out['id'], [1])
-        # One source row wins; we don't pin which.
-        self.assertIn(out['name'][0], ['x', 'y'])
-        self.assertIn(out['age'][0], [100, 200])
-
     def test_blob_columns_excluded(self):
         import types
 
-        from pypaimon.ray.data_evolution_merge_into import _exclude_blob_cols
+        from pypaimon.ray.data_evolution_merge_into import _blob_col_names
         from pypaimon.schema.data_types import AtomicType, DataField
 
         fake_table = types.SimpleNamespace(
@@ -567,8 +381,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
                 ]
             )
         )
-        self.assertEqual({'id'}, _exclude_blob_cols(fake_table, {'id', 'payload'}))
-        self.assertEqual(set(), _exclude_blob_cols(fake_table, {'payload'}))
+        self.assertEqual({'payload'}, _blob_col_names(fake_table))
 
     def test_combined_writes_single_snapshot(self):
         target = self._create_table()
@@ -605,72 +418,6 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
 
         after = self._snapshot_id(target)
         self.assertEqual(after, before + 1)
-
-    def test_self_merge_via_normal_join(self):
-        target = self._create_table()
-        self._write(
-            target,
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([1, 2, 3], type=pa.int32()),
-                    'name': ['a', 'b', 'c'],
-                    'age': pa.array([10, 20, 30], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            ),
-        )
-
-        merge_into(
-            target=target,
-            source=target,
-            catalog_options=self.catalog_options,
-            on=['id'],
-            when_matched=[
-                WhenMatched(
-                    update={'age': lambda r: r['t.age'] + 1},
-                ),
-            ],
-        )
-
-        out = self._read_sorted(target)
-        self.assertEqual(out['id'], [1, 2, 3])
-        self.assertEqual(out['age'], [11, 21, 31])
-
-    def test_matched_update_can_change_on_column(self):
-        target = self._create_table()
-        self._write(
-            target,
-            pa.Table.from_pydict(
-                {
-                    'id': pa.array([1], type=pa.int32()),
-                    'name': ['x'],
-                    'age': pa.array([10], type=pa.int32()),
-                },
-                schema=self.pa_schema,
-            ),
-        )
-
-        source = pa.Table.from_pydict(
-            {
-                'id': pa.array([1], type=pa.int32()),
-                'name': ['y'],
-                'age': pa.array([20], type=pa.int32()),
-            },
-            schema=self.pa_schema,
-        )
-
-        merge_into(
-            target=target,
-            source=source,
-            catalog_options=self.catalog_options,
-            on=['id'],
-            when_matched=[WhenMatched(update={'id': 999, 'name': 'y'})],
-        )
-
-        out = self._read_sorted(target)
-        self.assertEqual(out['id'], [999])
-        self.assertEqual(out['name'], ['y'])
-        self.assertEqual(out['age'], [10])
 
     def test_empty_target_matched_update_is_noop(self):
         target = self._create_table()

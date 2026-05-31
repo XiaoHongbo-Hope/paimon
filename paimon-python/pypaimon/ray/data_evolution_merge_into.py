@@ -23,7 +23,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from pypaimon.ray.data_evolution_merge_join import (
     build_matched_update_ds,
     build_not_matched_insert_ds,
-    build_unified_both,
     distributed_update_apply,
     distributed_write_collect_msgs,
 )
@@ -59,14 +58,14 @@ def merge_into(
     )
     base_snapshot = table.snapshot_manager().get_latest_snapshot()
 
-    update_ds, insert_ds, update_cols_union, num_matched = _build_datasets(
+    update_ds, insert_ds, update_cols_union = _build_datasets(
         target, source_ds, matched_specs, not_matched_specs,
         ctx, base_snapshot, num_partitions,
     )
 
     return _execute_and_commit(
         table, update_ds, insert_ds, update_cols_union,
-        num_matched, base_snapshot, num_partitions,
+        base_snapshot, num_partitions,
         ray_remote_args, concurrency,
     )
 
@@ -91,7 +90,10 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
             f"merge_into requires 'row-tracking.enabled' = 'true' on '{target}'."
         )
 
-    target_field_names = list(table.field_names)
+    blob_cols = _blob_col_names(table)
+    target_field_names = [
+        c for c in table.field_names if c not in blob_cols
+    ]
     on_map = dict(zip(target_on_cols, source_on_cols))
     matched_specs = [
         _NormalizedClause(
@@ -106,17 +108,19 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
         for c in when_not_matched
     ]
 
-    update_cols: set = set()
-    for clause in matched_specs:
-        update_cols.update(clause.spec.keys())
-    update_cols = _exclude_blob_cols(table, update_cols)
-
     source_ds = _normalize_source(source, catalog_options)
     _validate_source_on_cols(source_ds, source_on_cols)
+    _validate_source_has_target_cols(
+        source_ds, target_field_names, on_map,
+    )
 
+    import pyarrow as pa
     from pypaimon.schema.data_types import PyarrowFieldParser
-    target_pa_schema = PyarrowFieldParser.from_paimon_schema(
+    full_pa_schema = PyarrowFieldParser.from_paimon_schema(
         table.table_schema.fields
+    )
+    target_pa_schema = pa.schema(
+        [full_pa_schema.field(c) for c in target_field_names]
     )
     ctx = (target_on_cols, source_on_cols, target_field_names,
            target_pa_schema, catalog_options)
@@ -130,75 +134,73 @@ def _build_datasets(
     target_on_cols, source_on_cols, target_field_names, \
         target_pa_schema, catalog_options = ctx
 
+    # Pin every target read to base_snapshot so all branches see the same
+    # snapshot the caller observed; otherwise concurrent commits in between
+    # would mix data from different snapshots.
+    base_snapshot_id = base_snapshot.id if base_snapshot is not None else None
+
     update_ds = None
     insert_ds = None
     update_cols_union: List[str] = []
-    num_matched = 0
 
-    # Both clauses → one LEFT_OUTER join feeds matched and not-matched.
-    if matched_specs and not_matched_specs and base_snapshot is not None:
+    # Mirror Spark: matched/not-matched run as two independent joins
+    # (inner / left_anti). One unified left_outer join would force
+    # joined.materialize() to feed both branches, which can OOM on large merges.
+    if matched_specs and base_snapshot is not None:
         update_cols_union = _union_update_cols(matched_specs)
-        update_ds, insert_ds, num_matched = build_unified_both(
+        update_ds = build_matched_update_ds(
             target_identifier=target,
             source_ds=source_ds,
             target_on=target_on_cols,
             source_on=source_on_cols,
-            matched_clauses=matched_specs,
-            not_matched_clauses=not_matched_specs,
+            clauses=matched_specs,
             target_field_names=target_field_names,
             target_pa_schema=target_pa_schema,
             update_cols=update_cols_union,
             catalog_options=catalog_options,
             num_partitions=num_partitions,
             resolve_target_projection=_resolve_target_projection,
+            snapshot_id=base_snapshot_id,
         )
-    else:
-        if matched_specs and base_snapshot is not None:
-            update_cols_union = _union_update_cols(matched_specs)
-            update_ds, num_matched = build_matched_update_ds(
-                target_identifier=target,
-                source_ds=source_ds,
-                target_on=target_on_cols,
-                source_on=source_on_cols,
-                clauses=matched_specs,
-                target_field_names=target_field_names,
-                target_pa_schema=target_pa_schema,
-                update_cols=update_cols_union,
-                catalog_options=catalog_options,
-                num_partitions=num_partitions,
-                resolve_target_projection=_resolve_target_projection,
-            )
 
-        if not_matched_specs:
-            insert_ds = build_not_matched_insert_ds(
-                target_identifier=target,
-                source_ds=source_ds,
-                target_on=target_on_cols,
-                source_on=source_on_cols,
-                clauses=not_matched_specs,
-                target_field_names=target_field_names,
-                target_pa_schema=target_pa_schema,
-                catalog_options=catalog_options,
-                num_partitions=num_partitions,
-                target_empty=base_snapshot is None,
-            )
+    if not_matched_specs:
+        insert_ds = build_not_matched_insert_ds(
+            target_identifier=target,
+            source_ds=source_ds,
+            target_on=target_on_cols,
+            source_on=source_on_cols,
+            clauses=not_matched_specs,
+            target_field_names=target_field_names,
+            target_pa_schema=target_pa_schema,
+            catalog_options=catalog_options,
+            num_partitions=num_partitions,
+            snapshot_id=base_snapshot_id,
+            target_empty=base_snapshot is None,
+        )
 
-    return update_ds, insert_ds, update_cols_union, num_matched
+    return update_ds, insert_ds, update_cols_union
 
 
 def _execute_and_commit(
     table, update_ds, insert_ds, update_cols_union,
-    num_matched, base_snapshot, num_partitions,
+    base_snapshot, num_partitions,
     ray_remote_args, concurrency,
 ):
     update_msgs: list = []
     num_updated = 0
     if update_ds is not None:
-        update_msgs, num_updated = distributed_update_apply(
-            update_ds, table, update_cols_union,
-            num_partitions=num_partitions,
-            ray_remote_args=ray_remote_args,
-        )
+        try:
+            update_msgs, num_updated = distributed_update_apply(
+                update_ds, table, update_cols_union,
+                num_partitions=num_partitions,
+                ray_remote_args=ray_remote_args,
+                base_snapshot_id=(
+                    base_snapshot.id
+                    if base_snapshot is not None else None
+                ),
+            )
+        except Exception as e:
+            _reraise_inner(e)
 
     all_msgs: list = list(update_msgs)
     num_inserted = 0
@@ -218,10 +220,12 @@ def _execute_and_commit(
         tc.commit(all_msgs)
         tc.close()
 
+    # MVP has no condition, so every matched row is updated; num_unchanged
+    # is always 0. Kept in the dict for API stability when condition lands.
     return {
-        "num_matched": num_matched,
+        "num_matched": num_updated,
         "num_inserted": num_inserted,
-        "num_unchanged": num_matched - num_updated,
+        "num_unchanged": 0,
     }
 
 
@@ -260,13 +264,24 @@ def _require_ray_join() -> None:
         )
 
 
-def _exclude_blob_cols(table, update_cols: set) -> set:
-    blob_cols = {
+def _blob_col_names(table) -> set:
+    return {
         f.name
         for f in table.table_schema.fields
         if getattr(f.type, "type", None) == "BLOB"
     }
-    return update_cols - blob_cols
+
+
+def _reraise_inner(err: BaseException) -> None:
+    """Unwrap Ray's RayTaskError so callers see the worker-side exception."""
+    inner = err
+    cause = getattr(err, "cause", None) or getattr(err, "__cause__", None)
+    while cause is not None:
+        inner = cause
+        cause = getattr(inner, "cause", None) or getattr(inner, "__cause__", None)
+    if inner is err:
+        raise err
+    raise inner from err
 
 
 def _union_update_cols(clauses: List[_NormalizedClause]) -> List[str]:
@@ -329,6 +344,7 @@ def _normalize_set_spec(
 
 
 def _normalize_source(source: Any, catalog_options: Dict[str, str]):
+    import pyarrow as pa
     import ray.data
 
     if isinstance(source, ray.data.Dataset):
@@ -359,4 +375,25 @@ def _validate_source_on_cols(source_ds, on: Sequence[str]) -> None:
     if missing:
         raise ValueError(
             f"'on' columns {missing} missing from source schema {list(names)}."
+        )
+
+
+def _validate_source_has_target_cols(
+    source_ds,
+    target_field_names: Sequence[str],
+    on_map: Mapping[str, str],
+) -> None:
+    """For update='*'/insert='*', source must carry every (non-blob) target
+    column; otherwise the SET spec resolves to null and silently overwrites."""
+    schema = source_ds.schema()
+    if schema is None:
+        return
+    names = set(schema.names)
+    expected = {on_map.get(c, c) for c in target_field_names}
+    missing = sorted(expected - names)
+    if missing:
+        raise ValueError(
+            f"source is missing target columns {missing}; "
+            f"update='*'/insert='*' requires the source to carry every "
+            f"(non-blob) target column."
         )

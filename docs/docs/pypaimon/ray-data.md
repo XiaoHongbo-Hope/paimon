@@ -296,7 +296,7 @@ metrics = merge_into(
     when_matched=[WhenMatched(update="*")],
     when_not_matched=[WhenNotMatched(insert="*")],             # optional
 )
-print(metrics)   # {"num_matched": 5, "num_inserted": 2, "num_unchanged": 2}
+print(metrics)   # {"num_matched": 3, "num_inserted": 2, "num_unchanged": 0}
 ```
 
 - `update` / `insert`: only `"*"` is supported in this PR; partial SET will be
@@ -308,7 +308,10 @@ print(metrics)   # {"num_matched": 5, "num_inserted": 2, "num_unchanged": 2}
   `max(16, cluster_cpus * 2)`, raise it for large merges.
 - `ray_remote_args`, `concurrency`: scheduling for the insert path.
 
-**Returns:** `{"num_matched", "num_inserted", "num_unchanged"}`.
+**Returns:** `{"num_matched", "num_inserted", "num_unchanged"}`. In this PR
+every matched row is updated, so `num_matched` always equals `num_updated`
+and `num_unchanged` is always `0`; conditional clauses (added later) can
+make `num_unchanged > 0`.
 
 **Notes:**
 - Blob columns are silently skipped during update (same as Spark).
