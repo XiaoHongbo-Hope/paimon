@@ -18,7 +18,10 @@
 
 """MERGE INTO ... USING ... for Paimon data-evolution tables via Ray Datasets."""
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+import pyarrow as pa
 
 from pypaimon.ray.data_evolution_merge_join import (
     build_matched_update_ds,
@@ -35,6 +38,18 @@ from pypaimon.ray.data_evolution_merge_transform import (
 )
 
 __all__ = ["merge_into", "WhenMatched", "WhenNotMatched"]
+
+
+@dataclass(frozen=True)
+class _PrepareCtx:
+    """Bag of values _prepare hands to _build_datasets."""
+    target_on_cols: List[str]
+    source_on_cols: List[str]
+    settable_field_names: List[str]
+    full_target_field_names: List[str]
+    update_pa_schema: pa.Schema
+    full_pa_schema: pa.Schema
+    catalog_options: Dict[str, str]
 
 
 def merge_into(
@@ -122,7 +137,6 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
         source_ds, settable_field_names, on_map,
     )
 
-    import pyarrow as pa
     from pypaimon.schema.data_types import PyarrowFieldParser
     full_pa_schema = PyarrowFieldParser.from_paimon_schema(
         table.table_schema.fields
@@ -133,20 +147,22 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
     update_pa_schema = pa.schema(
         [full_pa_schema.field(c) for c in settable_field_names]
     )
-    ctx = (target_on_cols, source_on_cols,
-           settable_field_names, full_target_field_names,
-           update_pa_schema, full_pa_schema, catalog_options)
+    ctx = _PrepareCtx(
+        target_on_cols=target_on_cols,
+        source_on_cols=source_on_cols,
+        settable_field_names=settable_field_names,
+        full_target_field_names=full_target_field_names,
+        update_pa_schema=update_pa_schema,
+        full_pa_schema=full_pa_schema,
+        catalog_options=catalog_options,
+    )
     return table, source_ds, matched_specs, not_matched_specs, ctx
 
 
 def _build_datasets(
     target, source_ds, matched_specs, not_matched_specs,
-    ctx, base_snapshot, num_partitions, ray_remote_args,
+    ctx: "_PrepareCtx", base_snapshot, num_partitions, ray_remote_args,
 ):
-    (target_on_cols, source_on_cols,
-     settable_field_names, full_target_field_names,
-     update_pa_schema, full_pa_schema, catalog_options) = ctx
-
     # Pin every target read to base_snapshot so all branches see the same
     # snapshot the caller observed; otherwise concurrent commits in between
     # would mix data from different snapshots.
@@ -164,13 +180,13 @@ def _build_datasets(
         update_ds = build_matched_update_ds(
             target_identifier=target,
             source_ds=source_ds,
-            target_on=target_on_cols,
-            source_on=source_on_cols,
+            target_on=ctx.target_on_cols,
+            source_on=ctx.source_on_cols,
             clauses=matched_specs,
-            target_field_names=settable_field_names,
-            target_pa_schema=update_pa_schema,
+            target_field_names=ctx.settable_field_names,
+            target_pa_schema=ctx.update_pa_schema,
             update_cols=update_cols_union,
-            catalog_options=catalog_options,
+            catalog_options=ctx.catalog_options,
             num_partitions=num_partitions,
             resolve_target_projection=_resolve_target_projection,
             snapshot_id=base_snapshot_id,
@@ -183,12 +199,12 @@ def _build_datasets(
         insert_ds = build_not_matched_insert_ds(
             target_identifier=target,
             source_ds=source_ds,
-            target_on=target_on_cols,
-            source_on=source_on_cols,
+            target_on=ctx.target_on_cols,
+            source_on=ctx.source_on_cols,
             clauses=not_matched_specs,
-            target_field_names=full_target_field_names,
-            target_pa_schema=full_pa_schema,
-            catalog_options=catalog_options,
+            target_field_names=ctx.full_target_field_names,
+            target_pa_schema=ctx.full_pa_schema,
+            catalog_options=ctx.catalog_options,
             num_partitions=num_partitions,
             snapshot_id=base_snapshot_id,
             target_empty=base_snapshot is None,
@@ -361,7 +377,6 @@ def _normalize_set_spec(
 
 
 def _normalize_source(source: Any, catalog_options: Dict[str, str]):
-    import pyarrow as pa
     import ray.data
 
     if isinstance(source, ray.data.Dataset):
@@ -383,11 +398,20 @@ def _normalize_source(source: Any, catalog_options: Dict[str, str]):
     )
 
 
-def _validate_source_on_cols(source_ds, on: Sequence[str]) -> None:
+def _source_schema_or_raise(source_ds):
+    """Get source schema; refuse to proceed if Ray can't tell us the columns."""
     schema = source_ds.schema()
     if schema is None:
-        return
-    names = set(schema.names)
+        raise ValueError(
+            "merge_into could not infer the source schema; pass a "
+            "ray.data.Dataset that has been materialized (e.g. via "
+            ".materialize()) or constructed from pyarrow/pandas."
+        )
+    return schema
+
+
+def _validate_source_on_cols(source_ds, on: Sequence[str]) -> None:
+    names = set(_source_schema_or_raise(source_ds).names)
     missing = [c for c in on if c not in names]
     if missing:
         raise ValueError(
@@ -402,10 +426,7 @@ def _validate_source_has_target_cols(
 ) -> None:
     """For update='*'/insert='*', source must carry every (non-blob) target
     column; otherwise the SET spec resolves to null and silently overwrites."""
-    schema = source_ds.schema()
-    if schema is None:
-        return
-    names = set(schema.names)
+    names = set(_source_schema_or_raise(source_ds).names)
     expected = {on_map.get(c, c) for c in target_field_names}
     missing = sorted(expected - names)
     if missing:

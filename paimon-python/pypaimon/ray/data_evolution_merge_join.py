@@ -28,6 +28,18 @@ from pypaimon.ray.data_evolution_merge_transform import (
 )
 
 
+def _map_kwargs(
+    ray_remote_args: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build kwargs for map_batches/map_groups; spread ray_remote_args because
+    those APIs take remote options as **kwargs, not under a 'ray_remote_args'
+    key."""
+    kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
+    if ray_remote_args:
+        kwargs.update(ray_remote_args)
+    return kwargs
+
+
 def build_matched_update_ds(
     *,
     target_identifier: str,
@@ -62,11 +74,7 @@ def build_matched_update_ds(
     target_renamed = target_ds.rename_columns(
         {c: f"t.{c}" for c in target_ds.schema().names}
     )
-    source_schema = source_ds.schema()
-    source_cols = (
-        list(source_schema.names) if source_schema is not None
-        else list(source_on)
-    )
+    source_cols = list(source_ds.schema().names)
     source_renamed = source_ds.rename_columns(
         {c: f"s.{c}" for c in source_cols}
     )
@@ -92,12 +100,7 @@ def build_matched_update_ds(
             captured_schema,
         )
 
-    # map_batches/map_groups take ray remote options as **kwargs, not as a
-    # nested ray_remote_args dict, so spread the user-supplied dict in.
-    map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
-    if ray_remote_args:
-        map_kwargs.update(ray_remote_args)
-    return joined.map_batches(_transform, **map_kwargs)
+    return joined.map_batches(_transform, **_map_kwargs(ray_remote_args))
 
 
 def distributed_update_apply(
@@ -113,6 +116,7 @@ def distributed_update_apply(
     import pickle
     import uuid
 
+    import pyarrow.compute as pc
     import ray
 
     from pypaimon.snapshot.snapshot import BATCH_COMMIT_IDENTIFIER
@@ -190,11 +194,7 @@ def distributed_update_apply(
             frid_col, pa.array(frids, type=pa.int64())
         )
 
-    # map_batches/map_groups take ray remote options as **kwargs, not as a
-    # nested ray_remote_args dict, so spread the user-supplied dict in.
-    map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
-    if ray_remote_args:
-        map_kwargs.update(ray_remote_args)
+    map_kwargs = _map_kwargs(ray_remote_args)
     with_frid = update_ds.map_batches(_assign_frid, **map_kwargs)
 
     captured_table = table
@@ -207,8 +207,10 @@ def distributed_update_apply(
                 "n_updated": pa.array([], type=pa.int64()),
             })
 
-        group_row_ids = group.column(row_id_name).to_pylist()
-        if len(set(group_row_ids)) != len(group_row_ids):
+        if (
+            pc.count_distinct(group.column(row_id_name)).as_py()
+            != group.num_rows
+        ):
             raise ValueError(
                 "MERGE matched multiple source rows to the same "
                 "target _ROW_ID. Deduplicate the source before "
@@ -269,11 +271,7 @@ def build_not_matched_insert_ds(
     captured_field_names = list(target_field_names)
     out_schema = target_pa_schema
 
-    source_schema = source_ds.schema()
-    source_cols = (
-        list(source_schema.names) if source_schema is not None
-        else list(source_on)
-    )
+    source_cols = list(source_ds.schema().names)
     source_renamed = source_ds.rename_columns(
         {c: f"s.{c}" for c in source_cols}
     )
@@ -305,12 +303,9 @@ def build_not_matched_insert_ds(
             )
         )
 
-    # map_batches/map_groups take ray remote options as **kwargs, not as a
-    # nested ray_remote_args dict, so spread the user-supplied dict in.
-    map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
-    if ray_remote_args:
-        map_kwargs.update(ray_remote_args)
-    return unmatched.map_batches(_transform, **map_kwargs)
+    return unmatched.map_batches(
+        _transform, **_map_kwargs(ray_remote_args)
+    )
 
 
 def distributed_write_collect_msgs(
