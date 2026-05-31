@@ -314,4 +314,6 @@ and `num_unchanged` is always `0`; conditional clauses (added later) can
 make `num_unchanged > 0`.
 
 **Notes:**
-- Blob columns are silently skipped during update (same as Spark).
+- Blob columns are not written by `merge_into`: update leaves the existing
+  `.blob` files untouched, and insert fills blob columns with `NULL`. The
+  source data does not need to (and should not) carry blob columns.

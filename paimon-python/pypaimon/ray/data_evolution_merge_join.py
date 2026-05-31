@@ -42,6 +42,7 @@ def build_matched_update_ds(
     num_partitions: int,
     resolve_target_projection,
     snapshot_id: Optional[int] = None,
+    ray_remote_args: Optional[Dict[str, Any]] = None,
 ) -> Tuple:
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.table.special_fields import SpecialFields
@@ -91,7 +92,10 @@ def build_matched_update_ds(
             captured_schema,
         )
 
-    return joined.map_batches(_transform, batch_format="pyarrow")
+    map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
+    if ray_remote_args:
+        map_kwargs["ray_remote_args"] = ray_remote_args
+    return joined.map_batches(_transform, **map_kwargs)
 
 
 def distributed_update_apply(
@@ -184,7 +188,10 @@ def distributed_update_apply(
             frid_col, pa.array(frids, type=pa.int64())
         )
 
-    with_frid = update_ds.map_batches(_assign_frid, batch_format="pyarrow")
+    map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
+    if ray_remote_args:
+        map_kwargs["ray_remote_args"] = ray_remote_args
+    with_frid = update_ds.map_batches(_assign_frid, **map_kwargs)
 
     captured_table = table
     captured_cols = cols
@@ -225,7 +232,7 @@ def distributed_update_apply(
     )
     msgs_ds = with_frid.groupby(
         frid_col, num_partitions=group_partitions
-    ).map_groups(_apply_group, batch_format="pyarrow")
+    ).map_groups(_apply_group, **map_kwargs)
 
     all_msgs: list = []
     num_updated = 0
@@ -250,6 +257,7 @@ def build_not_matched_insert_ds(
     num_partitions: int,
     target_empty: bool = False,
     snapshot_id: Optional[int] = None,
+    ray_remote_args: Optional[Dict[str, Any]] = None,
 ):
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.ray.shuffle import _coerce_large_string_types
@@ -293,7 +301,10 @@ def build_not_matched_insert_ds(
             )
         )
 
-    return unmatched.map_batches(_transform, batch_format="pyarrow")
+    map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
+    if ray_remote_args:
+        map_kwargs["ray_remote_args"] = ray_remote_args
+    return unmatched.map_batches(_transform, **map_kwargs)
 
 
 def distributed_write_collect_msgs(

@@ -60,7 +60,7 @@ def merge_into(
 
     update_ds, insert_ds, update_cols_union = _build_datasets(
         target, source_ds, matched_specs, not_matched_specs,
-        ctx, base_snapshot, num_partitions,
+        ctx, base_snapshot, num_partitions, ray_remote_args,
     )
 
     return _execute_and_commit(
@@ -91,19 +91,27 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
         )
 
     blob_cols = _blob_col_names(table)
-    target_field_names = [
-        c for c in table.field_names if c not in blob_cols
+    full_target_field_names = list(table.field_names)
+    # SET specs only cover non-blob columns: update can't rewrite blob files
+    # (data evolution puts them in dedicated .blob files), and insert leaves
+    # blob columns null since the source can't carry them through SET="*".
+    settable_field_names = [
+        c for c in full_target_field_names if c not in blob_cols
     ]
     on_map = dict(zip(target_on_cols, source_on_cols))
     matched_specs = [
         _NormalizedClause(
-            spec=_normalize_set_spec(c.update, target_field_names, on_map),
+            spec=_normalize_set_spec(
+                c.update, settable_field_names, on_map,
+            ),
         )
         for c in when_matched
     ]
     not_matched_specs = [
         _NormalizedClause(
-            spec=_normalize_set_spec(c.insert, target_field_names, on_map),
+            spec=_normalize_set_spec(
+                c.insert, settable_field_names, on_map,
+            ),
         )
         for c in when_not_matched
     ]
@@ -111,7 +119,7 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
     source_ds = _normalize_source(source, catalog_options)
     _validate_source_on_cols(source_ds, source_on_cols)
     _validate_source_has_target_cols(
-        source_ds, target_field_names, on_map,
+        source_ds, settable_field_names, on_map,
     )
 
     import pyarrow as pa
@@ -119,20 +127,25 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
     full_pa_schema = PyarrowFieldParser.from_paimon_schema(
         table.table_schema.fields
     )
-    target_pa_schema = pa.schema(
-        [full_pa_schema.field(c) for c in target_field_names]
+    # update_pa_schema strips blob (only non-blob cols are written by the
+    # update path); insert_pa_schema is the full table schema so the writer
+    # gets every column (blob columns end up null).
+    update_pa_schema = pa.schema(
+        [full_pa_schema.field(c) for c in settable_field_names]
     )
-    ctx = (target_on_cols, source_on_cols, target_field_names,
-           target_pa_schema, catalog_options)
+    ctx = (target_on_cols, source_on_cols,
+           settable_field_names, full_target_field_names,
+           update_pa_schema, full_pa_schema, catalog_options)
     return table, source_ds, matched_specs, not_matched_specs, ctx
 
 
 def _build_datasets(
     target, source_ds, matched_specs, not_matched_specs,
-    ctx, base_snapshot, num_partitions,
+    ctx, base_snapshot, num_partitions, ray_remote_args,
 ):
-    target_on_cols, source_on_cols, target_field_names, \
-        target_pa_schema, catalog_options = ctx
+    (target_on_cols, source_on_cols,
+     settable_field_names, full_target_field_names,
+     update_pa_schema, full_pa_schema, catalog_options) = ctx
 
     # Pin every target read to base_snapshot so all branches see the same
     # snapshot the caller observed; otherwise concurrent commits in between
@@ -154,28 +167,32 @@ def _build_datasets(
             target_on=target_on_cols,
             source_on=source_on_cols,
             clauses=matched_specs,
-            target_field_names=target_field_names,
-            target_pa_schema=target_pa_schema,
+            target_field_names=settable_field_names,
+            target_pa_schema=update_pa_schema,
             update_cols=update_cols_union,
             catalog_options=catalog_options,
             num_partitions=num_partitions,
             resolve_target_projection=_resolve_target_projection,
             snapshot_id=base_snapshot_id,
+            ray_remote_args=ray_remote_args,
         )
 
     if not_matched_specs:
+        # Insert writes the full target schema; SET spec only covers
+        # settable cols, so blob columns fall through to null.
         insert_ds = build_not_matched_insert_ds(
             target_identifier=target,
             source_ds=source_ds,
             target_on=target_on_cols,
             source_on=source_on_cols,
             clauses=not_matched_specs,
-            target_field_names=target_field_names,
-            target_pa_schema=target_pa_schema,
+            target_field_names=full_target_field_names,
+            target_pa_schema=full_pa_schema,
             catalog_options=catalog_options,
             num_partitions=num_partitions,
             snapshot_id=base_snapshot_id,
             target_empty=base_snapshot is None,
+            ray_remote_args=ray_remote_args,
         )
 
     return update_ds, insert_ds, update_cols_union
