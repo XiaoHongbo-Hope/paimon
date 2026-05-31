@@ -92,9 +92,11 @@ def build_matched_update_ds(
             captured_schema,
         )
 
+    # map_batches/map_groups take ray remote options as **kwargs, not as a
+    # nested ray_remote_args dict, so spread the user-supplied dict in.
     map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
     if ray_remote_args:
-        map_kwargs["ray_remote_args"] = ray_remote_args
+        map_kwargs.update(ray_remote_args)
     return joined.map_batches(_transform, **map_kwargs)
 
 
@@ -188,9 +190,11 @@ def distributed_update_apply(
             frid_col, pa.array(frids, type=pa.int64())
         )
 
+    # map_batches/map_groups take ray remote options as **kwargs, not as a
+    # nested ray_remote_args dict, so spread the user-supplied dict in.
     map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
     if ray_remote_args:
-        map_kwargs["ray_remote_args"] = ray_remote_args
+        map_kwargs.update(ray_remote_args)
     with_frid = update_ds.map_batches(_assign_frid, **map_kwargs)
 
     captured_table = table
@@ -301,9 +305,11 @@ def build_not_matched_insert_ds(
             )
         )
 
+    # map_batches/map_groups take ray remote options as **kwargs, not as a
+    # nested ray_remote_args dict, so spread the user-supplied dict in.
     map_kwargs: Dict[str, Any] = {"batch_format": "pyarrow"}
     if ray_remote_args:
-        map_kwargs["ray_remote_args"] = ray_remote_args
+        map_kwargs.update(ray_remote_args)
     return unmatched.map_batches(_transform, **map_kwargs)
 
 

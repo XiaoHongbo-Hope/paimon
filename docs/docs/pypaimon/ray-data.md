@@ -306,7 +306,9 @@ print(metrics)   # {"num_matched": 3, "num_inserted": 2, "num_unchanged": 0}
 - `on`: key columns, or `{target_col: source_col}` for renamed keys.
 - `num_partitions`: shuffle parallelism for the join and the write; defaults to
   `max(16, cluster_cpus * 2)`, raise it for large merges.
-- `ray_remote_args`, `concurrency`: scheduling for the insert path.
+- `ray_remote_args`: Ray remote options applied to the merge's map/group
+  tasks (update transform, group write, insert transform).
+- `concurrency`: scheduling for the insert sink.
 
 **Returns:** `{"num_matched", "num_inserted", "num_unchanged"}`. In this PR
 every matched row is updated, so `num_matched` always equals `num_updated`
