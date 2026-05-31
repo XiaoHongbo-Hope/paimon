@@ -313,4 +313,4 @@ print(metrics)   # {"num_matched": 5, "num_inserted": 2, "num_unchanged": 2}
 **Returns:** `{"num_matched", "num_inserted", "num_unchanged"}`.
 
 **Notes:**
-- Blob columns cannot be updated.
+- Blob columns are silently skipped during update (same as Spark).
