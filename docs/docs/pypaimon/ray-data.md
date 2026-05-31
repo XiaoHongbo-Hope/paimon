@@ -296,7 +296,7 @@ metrics = merge_into(
     when_matched=[WhenMatched(update={"score": "s.score"})],   # or update="*"
     when_not_matched=[WhenNotMatched(insert="*")],             # optional
 )
-print(metrics)   # {"num_updated": 3, "num_inserted": 2}
+print(metrics)   # {"num_matched": 5, "num_inserted": 2, "num_unchanged": 2}
 ```
 
 - `update` / `insert`: `"*"` (all columns from source), or a dict mapping target
@@ -313,12 +313,7 @@ print(metrics)   # {"num_updated": 3, "num_inserted": 2}
 - `allow_multiple_matches`: if `False` (default), a target row matched by
   multiple source rows raises; `True` keeps the first match.
 
-**Returns:** `{"num_updated", "num_inserted"}`.
+**Returns:** `{"num_matched", "num_inserted", "num_unchanged"}`.
 
 **Notes:**
-- Blob columns cannot be updated and are never read into the join.
-- Updating a globally-indexed column raises by default; set
-  `'global-index.column-update-action' = 'DROP_PARTITION_INDEX'` to drop the
-  affected index instead (rebuild afterwards).
-- Cost scales with how many data files the updated rows touch; scattered updates
-  over a large table rewrite the updated column of many files.
+- Blob columns cannot be updated.

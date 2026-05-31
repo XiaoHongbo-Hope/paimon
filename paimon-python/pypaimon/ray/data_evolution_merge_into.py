@@ -122,11 +122,6 @@ def merge_into(
 
     base_snapshot = table.snapshot_manager().get_latest_snapshot()
 
-    global_index_action = (
-        table.options.global_index_column_update_action()
-        or GLOBAL_INDEX_ACTION_THROW_ERROR
-    )
-
     from pypaimon.schema.data_types import PyarrowFieldParser
 
     target_pa_schema = PyarrowFieldParser.from_paimon_schema(
@@ -140,9 +135,10 @@ def merge_into(
     # With both clauses on a non-empty target, matched and not-matched routing
     # share the same source/target equi-join. Build them from one materialized
     # LEFT_OUTER join instead of reading and shuffling the target table twice.
+    num_matched = 0
     if matched_specs and not_matched_specs and base_snapshot is not None:
         update_cols_union = _union_update_cols(matched_specs)
-        update_ds, insert_ds = _build_unified_both(
+        update_ds, insert_ds, num_matched = _build_unified_both(
             target_identifier=target,
             source_ds=source_ds,
             target_on=target_on_cols,
@@ -156,10 +152,9 @@ def merge_into(
             num_partitions=num_partitions,
         )
     else:
-        # Empty target → no rows can match; matched UPDATE is a no-op.
         if matched_specs and base_snapshot is not None:
             update_cols_union = _union_update_cols(matched_specs)
-            update_ds = _build_matched_update_ds(
+            update_ds, num_matched = _build_matched_update_ds(
                 target_identifier=target,
                 source_ds=source_ds,
                 target_on=target_on_cols,
@@ -173,8 +168,6 @@ def merge_into(
             )
 
         if not_matched_specs:
-            # Empty target: nothing can match, so every source row inserts.
-            # Skip all joins (ray's hash join crashes on empty partitions).
             insert_ds = _build_not_matched_insert_ds(
                 target_identifier=target,
                 source_ds=source_ds,
@@ -208,20 +201,19 @@ def merge_into(
         )
         num_inserted = sum(f.row_count for m in insert_msgs for f in m.new_files)
         all_msgs.extend(insert_msgs)
-    # Mirror Spark's checkUpdateResult: scope the global-index action to the
-    # partitions the update actually wrote and the updated indexed columns.
-    all_msgs.extend(
-        _apply_global_index_update_action(
-            table, base_snapshot, update_cols_union, update_msgs, global_index_action
-        )
-    )
+    # TODO: add global-index update action check after PR #141 merges
     if all_msgs:
         wb = table.new_batch_write_builder()
         tc = wb.new_commit()
         tc.commit(all_msgs)
         tc.close()
 
-    return {"num_updated": num_updated, "num_inserted": num_inserted}
+    num_unchanged = num_matched - num_updated
+    return {
+        "num_matched": num_matched,
+        "num_inserted": num_inserted,
+        "num_unchanged": num_unchanged,
+    }
 
 
 def _normalize_on(on: OnSpec) -> Tuple[List[str], List[str]]:
@@ -248,7 +240,7 @@ def _build_matched_update_ds(
     update_cols: Sequence[str],
     catalog_options: Dict[str, str],
     num_partitions: int,
-):
+) -> Tuple:
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.table.special_fields import SpecialFields
 
@@ -274,7 +266,9 @@ def _build_matched_update_ds(
         num_partitions=num_partitions,
         on=tuple(f"t.{c}" for c in target_on),
         right_on=tuple(f"s.{c}" for c in source_on),
-    )
+    ).materialize()
+
+    num_matched = joined.count()
 
     captured_clauses = clauses
     captured_update_cols = list(update_cols)
@@ -296,7 +290,7 @@ def _build_matched_update_ds(
                 captured_schema,
             )
 
-        return joined.map_batches(_fast, batch_format="pyarrow")
+        return joined.map_batches(_fast, batch_format="pyarrow"), num_matched
 
     def _transform(batch: pa.Table) -> pa.Table:
         return _apply_matched_transform(
@@ -309,7 +303,7 @@ def _build_matched_update_ds(
             captured_schema,
         )
 
-    return joined.map_batches(_transform, batch_format="pyarrow")
+    return joined.map_batches(_transform, batch_format="pyarrow"), num_matched
 
 
 def _apply_matched_transform(
@@ -489,10 +483,6 @@ def _distributed_update_apply(
         for n in batch.column("n_updated").to_pylist():
             num_updated += n
     return all_msgs, num_updated
-
-
-GLOBAL_INDEX_ACTION_THROW_ERROR = "THROW_ERROR"
-GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX = "DROP_PARTITION_INDEX"
 
 
 def _resolve_num_partitions(num_partitions: Optional[int]) -> int:
@@ -736,6 +726,16 @@ def _build_unified_both(
             m_field_names, row_id_name, update_schema,
         )
 
+    def _count_matched(batch: pa.Table) -> pa.Table:
+        n = pc.sum(pc.is_valid(batch.column(t_row_id_col))).as_py()
+        return pa.table({"n": [n if n else 0]})
+
+    num_matched = sum(
+        r["n"] for r in joined.map_batches(
+            _count_matched, batch_format="pyarrow"
+        ).take_all()
+    )
+
     update_ds = joined.map_batches(_matched_batch, batch_format="pyarrow")
 
     i_field_names = list(target_field_names)
@@ -756,7 +756,7 @@ def _build_unified_both(
 
     insert_ds = joined.map_batches(_insert_batch, batch_format="pyarrow")
 
-    return update_ds, insert_ds
+    return update_ds, insert_ds, num_matched
 
 
 def _distributed_write_collect_msgs(
@@ -797,74 +797,6 @@ def _distributed_write_collect_msgs(
         write_kwargs["concurrency"] = concurrency
     insert_ds.write_datasink(sink, **write_kwargs)
     return sink.collected
-
-
-def _apply_global_index_update_action(
-    table, snapshot, update_cols: Sequence[str], update_msgs, action: str
-) -> list:
-    """Handle updates touching globally-indexed columns, mirroring Spark's
-    ``checkUpdateResult``.
-
-    Scoped exactly like Spark: only index entries whose partition was written
-    by the update *and* whose indexed column is among the updated columns are
-    affected. THROW_ERROR (default) raises; DROP_PARTITION_INDEX drops those
-    entries (returned as index-delete commit messages, rebuild afterwards).
-    Like Spark, the INSERT path is left untouched.
-    """
-    if snapshot is None or not update_cols or not update_msgs:
-        return []
-    entries = _scan_global_index_entries(table, snapshot)
-    if not entries:
-        return []
-    field_by_id = {f.id: f.name for f in table.fields}
-    update_set = set(update_cols)
-    affected_partitions = {tuple(m.partition) for m in update_msgs}
-    affected = [
-        e for e in entries
-        if field_by_id.get(e.index_file.global_index_meta.index_field_id) in update_set
-        and tuple(e.partition.values) in affected_partitions
-    ]
-    if not affected:
-        return []
-    if action == GLOBAL_INDEX_ACTION_DROP_PARTITION_INDEX:
-        return _build_index_delete_msgs(affected)
-    conflicted = sorted(
-        {field_by_id.get(e.index_file.global_index_meta.index_field_id) for e in affected}
-    )
-    raise NotImplementedError(
-        f"MERGE INTO would update columns {conflicted} that have a global "
-        f"index; not supported (refusing to leave the index stale). Set "
-        f"'global-index.column-update-action' = 'DROP_PARTITION_INDEX' to drop "
-        f"the affected index instead."
-    )
-
-
-def _build_index_delete_msgs(entries) -> list:
-    """Group scanned index entries by partition into index-delete messages."""
-    from pypaimon.manifest.index_manifest_entry import IndexManifestEntry
-    from pypaimon.write.commit_message import CommitMessage
-
-    by_partition: Dict[tuple, list] = {}
-    for e in entries:
-        key = tuple(e.partition.values)
-        by_partition.setdefault(key, []).append(
-            IndexManifestEntry(
-                kind=1, partition=e.partition, bucket=e.bucket, index_file=e.index_file
-            )
-        )
-    return [
-        CommitMessage(partition=key, bucket=0, new_files=[], index_files=dels)
-        for key, dels in by_partition.items()
-    ]
-
-
-def _scan_global_index_entries(table, snapshot):
-    from pypaimon.index.index_file_handler import IndexFileHandler
-
-    handler = IndexFileHandler(table=table)
-    return handler.scan(
-        snapshot, lambda e: e.index_file.global_index_meta is not None
-    )
 
 
 def _require_ray_join() -> None:
