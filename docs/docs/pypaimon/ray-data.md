@@ -293,22 +293,20 @@ metrics = merge_into(
     source=ray_dataset,          # ray.data.Dataset / pa.Table / pandas / table-name str
     catalog_options={"warehouse": "/path/to/warehouse"},
     on=["id"],                   # or {"target_col": "source_col"} for renamed keys
-    when_matched=[WhenMatched(update={"score": "s.score"})],   # or update="*"
+    when_matched=[WhenMatched(update="*")],
     when_not_matched=[WhenNotMatched(insert="*")],             # optional
 )
 print(metrics)   # {"num_matched": 5, "num_inserted": 2, "num_unchanged": 2}
 ```
 
-- `update` / `insert`: `"*"` (all columns from source), or a dict mapping target
-  columns to `"s.<col>"`, `"t.<col>"`, or a literal.
+- `update` / `insert`: only `"*"` is supported in this PR; partial SET will be
+  added in a follow-up.
 
 **Parameters:**
 - `on`: key columns, or `{target_col: source_col}` for renamed keys.
 - `num_partitions`: shuffle parallelism for the join and the write; defaults to
   `max(16, cluster_cpus * 2)`, raise it for large merges.
 - `ray_remote_args`, `concurrency`: scheduling for the insert path.
-- `allow_multiple_matches`: if `False` (default), a target row matched by
-  multiple source rows raises; `True` keeps the first match.
 
 **Returns:** `{"num_matched", "num_inserted", "num_unchanged"}`.
 

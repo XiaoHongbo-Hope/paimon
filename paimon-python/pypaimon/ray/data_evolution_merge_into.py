@@ -18,19 +18,7 @@
 
 """MERGE INTO ... USING ... for Paimon data-evolution tables via Ray Datasets."""
 
-from dataclasses import dataclass
-from typing import (
-    Any,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
-)
-
-import pyarrow as pa
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pypaimon.ray.data_evolution_merge_join import (
     build_matched_update_ds,
@@ -39,24 +27,15 @@ from pypaimon.ray.data_evolution_merge_join import (
     distributed_update_apply,
     distributed_write_collect_msgs,
 )
+from pypaimon.ray.data_evolution_merge_transform import (
+    OnSpec,
+    SetSpec,
+    WhenMatched,
+    WhenNotMatched,
+    _NormalizedClause,
+)
 
-SetSpec = Union[str, Dict[str, Any]]
-OnSpec = Union[Sequence[str], Mapping[str, str]]
-
-
-@dataclass
-class WhenMatched:
-    update: SetSpec
-
-
-@dataclass
-class WhenNotMatched:
-    insert: SetSpec
-
-
-@dataclass
-class _NormalizedClause:
-    spec: Dict[str, Any]
+__all__ = ["merge_into", "WhenMatched", "WhenNotMatched"]
 
 
 def merge_into(
@@ -340,25 +319,13 @@ def _normalize_set_spec(
     on_map: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     on_map = on_map or {}
-    if isinstance(spec, str):
-        if spec != "*":
-            raise ValueError(
-                f"SET spec strings other than '*' are not supported; got {spec!r}."
-            )
-        # A renamed ON key resolves via the source's ON column, not its own name.
-        return {col: f"s.{on_map.get(col, col)}" for col in target_field_names}
-    if not isinstance(spec, dict):
-        raise ValueError(
-            f"SET spec must be '*' or a dict, got {type(spec).__name__}."
+    if spec != "*":
+        raise NotImplementedError(
+            "merge_into currently only supports '*' for update/insert; "
+            "partial SET will be added in a follow-up PR."
         )
-    target_set = set(target_field_names)
-    for col in spec:
-        if col not in target_set:
-            raise ValueError(
-                f"SET key '{col}' is not a column of the target table "
-                f"(columns: {list(target_field_names)})."
-            )
-    return dict(spec)
+    # A renamed ON key resolves via the source's ON column, not its own name.
+    return {col: f"s.{on_map.get(col, col)}" for col in target_field_names}
 
 
 def _normalize_source(source: Any, catalog_options: Dict[str, str]):

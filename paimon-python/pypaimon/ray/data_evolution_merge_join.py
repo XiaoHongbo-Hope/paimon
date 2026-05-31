@@ -20,8 +20,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pyarrow as pa
 
-from pypaimon.ray.data_evolution_merge_into import _NormalizedClause
 from pypaimon.ray.data_evolution_merge_transform import (
+    _NormalizedClause,
     apply_insert_transform,
     apply_matched_transform,
     build_update_schema,

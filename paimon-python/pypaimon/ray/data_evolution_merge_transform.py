@@ -16,11 +16,30 @@
 # limitations under the License.
 ################################################################################
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import (
+    Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union,
+)
 
 import pyarrow as pa
 
-from pypaimon.ray.data_evolution_merge_into import _NormalizedClause
+SetSpec = str
+OnSpec = Union[Sequence[str], Mapping[str, str]]
+
+
+@dataclass
+class WhenMatched:
+    update: SetSpec
+
+
+@dataclass
+class WhenNotMatched:
+    insert: SetSpec
+
+
+@dataclass
+class _NormalizedClause:
+    spec: Dict[str, Any]
 
 
 def clauses_use_vector_fast_path(
