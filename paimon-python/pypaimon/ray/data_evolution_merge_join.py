@@ -100,24 +100,31 @@ def build_matched_update_ds(
     captured_on_pairs = list(zip(source_on, target_on))
     captured_schema = update_schema
 
+    matched_count = None
+    captured_apply = None
+    captured_rewritten = None
+    if condition is not None:
+        from pypaimon.ray.merge_condition import apply_condition, rewrite_condition
+        captured_rewritten = rewrite_condition(condition)
+        captured_apply = apply_condition
+        joined = joined.materialize()
+        matched_count = joined.count()
+
     def _transform(batch: pa.Table) -> pa.Table:
-        if condition is not None:
-            from pypaimon.ray.merge_condition import filter_batch
-            batch = filter_batch(batch, condition)
+        if captured_apply is not None:
+            batch = captured_apply(
+                batch, captured_rewritten, captured_schema,
+            )
             if batch.num_rows == 0:
-                return pa.table(
-                    {captured_row_id_name: pa.array([], type=pa.int64())}
-                    | {c: pa.array([], type=captured_schema.field(c).type)
-                       for c in captured_update_cols},
-                    schema=captured_schema,
-                )
+                return batch
         return vectorized_matched_transform(
             batch, spec, captured_on_pairs,
             captured_update_cols, captured_row_id_name,
             captured_schema,
         )
 
-    return joined.map_batches(_transform, **_map_kwargs(ray_remote_args))
+    ds = joined.map_batches(_transform, **_map_kwargs(ray_remote_args))
+    return ds, matched_count
 
 
 def distributed_update_apply(
@@ -320,17 +327,20 @@ def build_not_matched_insert_ds(
     )
     spec = clauses[0].spec
     condition = clauses[0].condition
+    captured_apply = None
+    captured_rewritten = None
+    if condition is not None:
+        from pypaimon.ray.merge_condition import apply_condition, rewrite_condition
+        captured_rewritten = rewrite_condition(condition)
+        captured_apply = apply_condition
 
     def _transform(batch: pa.Table) -> pa.Table:
-        if condition is not None:
-            from pypaimon.ray.merge_condition import filter_batch
-            batch = filter_batch(batch, condition)
+        if captured_apply is not None:
+            batch = captured_apply(
+                batch, captured_rewritten, out_schema,
+            )
             if batch.num_rows == 0:
-                return pa.table(
-                    {c: pa.array([], type=out_schema.field(c).type)
-                     for c in captured_field_names},
-                    schema=out_schema,
-                )
+                return batch
         return _coerce_large_string_types(
             vectorized_insert_transform(
                 batch, spec, captured_field_names, out_schema

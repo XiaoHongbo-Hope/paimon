@@ -153,6 +153,21 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             )
         self.assertIn("'id'", str(ctx.exception))
 
+    def test_not_matched_condition_rejects_target_refs(self):
+        target = self._create_table()
+        with self.assertRaises(ValueError) as ctx:
+            merge_into(
+                target=target,
+                source=self._source(),
+                catalog_options=self.catalog_options,
+                on=['id'],
+                when_not_matched=[
+                    WhenNotMatched(insert='*', condition='t.age > 10')
+                ],
+                num_partitions=_TEST_NUM_PARTITIONS,
+            )
+        self.assertIn('t.', str(ctx.exception))
+
     def test_matched_update_star(self):
         target = self._create_table()
         self._write(
@@ -549,7 +564,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             schema=self.pa_schema,
         )
 
-        merge_into(
+        metrics = merge_into(
             target=target,
             source=source,
             catalog_options=self.catalog_options,
@@ -565,6 +580,9 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['id'], [1, 2, 3])
         self.assertEqual(out['name'], ['a2', 'b', 'c'])
         self.assertEqual(out['age'], [50, 20, 30])
+        self.assertEqual(metrics['num_matched'], 1)
+        self.assertEqual(metrics['num_unchanged'], 1)
+        self.assertEqual(metrics['num_inserted'], 1)
 
     def test_condition_no_rows_match_is_noop(self):
         target = self._create_table()
@@ -637,11 +655,25 @@ class MergeConditionUnitTest(unittest.TestCase):
             '"s.age" > "t.age" + 10',
         )
 
+    def test_rewrite_condition_preserves_string_literals(self):
+        from pypaimon.ray.merge_condition import rewrite_condition
+        self.assertEqual(
+            rewrite_condition("s.status = 't.active' AND s.age > t.age"),
+            '"s.status" = \'t.active\' AND "s.age" > "t.age"',
+        )
+
     def test_extract_target_columns(self):
         from pypaimon.ray.merge_condition import extract_target_columns
         self.assertEqual(
             extract_target_columns('s.name = t.name AND s.age > t.age'),
             {'name', 'age'},
+        )
+
+    def test_extract_target_columns_ignores_string_literals(self):
+        from pypaimon.ray.merge_condition import extract_target_columns
+        self.assertEqual(
+            extract_target_columns("s.name = 't.fake' AND s.age > t.age"),
+            {'age'},
         )
 
     def test_extract_columns(self):

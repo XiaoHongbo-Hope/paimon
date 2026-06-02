@@ -36,14 +36,41 @@ def _require_datafusion():
         )
 
 
+_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
+
+
+def _strip_string_literals(condition: str) -> str:
+    return _STRING_LITERAL.sub('', condition)
+
+
 def rewrite_condition(condition: str) -> str:
-    return _COL_REF_PATTERN.sub(r'"\1.\2"', condition)
+    parts, last = [], 0
+    for m in _STRING_LITERAL.finditer(condition):
+        parts.append(_COL_REF_PATTERN.sub(r'"\1.\2"', condition[last:m.start()]))
+        parts.append(m.group())
+        last = m.end()
+    parts.append(_COL_REF_PATTERN.sub(r'"\1.\2"', condition[last:]))
+    return ''.join(parts)
 
 
-def filter_batch(batch: pa.Table, condition: str) -> pa.Table:
-    datafusion = _require_datafusion()
-    rewritten = rewrite_condition(condition)
-    ctx = datafusion.SessionContext()
+_SESSION_CTX = None
+
+
+def _get_session_context():
+    global _SESSION_CTX
+    if _SESSION_CTX is None:
+        datafusion = _require_datafusion()
+        _SESSION_CTX = datafusion.SessionContext()
+    return _SESSION_CTX
+
+
+def filter_batch(
+    batch: pa.Table, condition: str, _pre_rewritten: bool = False,
+) -> pa.Table:
+    rewritten = condition if _pre_rewritten else rewrite_condition(condition)
+    ctx = _get_session_context()
+    if ctx.table_exist("_merge_batch"):
+        ctx.deregister_table("_merge_batch")
     ctx.register_record_batches("_merge_batch", [batch.to_batches()])
     result = ctx.sql(
         f'SELECT * FROM _merge_batch WHERE {rewritten}'
@@ -51,11 +78,26 @@ def filter_batch(batch: pa.Table, condition: str) -> pa.Table:
     return result.to_arrow_table()
 
 
+def apply_condition(
+    batch: pa.Table, rewritten: str, empty_schema: pa.Schema,
+) -> pa.Table:
+    batch = filter_batch(batch, rewritten, _pre_rewritten=True)
+    if batch.num_rows == 0:
+        return pa.table(
+            {c: pa.array([], type=empty_schema.field(c).type)
+             for c in empty_schema.names},
+            schema=empty_schema,
+        )
+    return batch
+
+
 def extract_columns(condition: str) -> Set[str]:
+    stripped = _strip_string_literals(condition)
     return {f"{m.group(1)}.{m.group(2)}"
-            for m in _COL_REF_PATTERN.finditer(condition)}
+            for m in _COL_REF_PATTERN.finditer(stripped)}
 
 
 def extract_target_columns(condition: str) -> Set[str]:
-    return {m.group(2) for m in _COL_REF_PATTERN.finditer(condition)
+    stripped = _strip_string_literals(condition)
+    return {m.group(2) for m in _COL_REF_PATTERN.finditer(stripped)
             if m.group(1) == "t"}
