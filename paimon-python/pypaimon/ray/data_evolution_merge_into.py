@@ -134,8 +134,18 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
         for c in list(when_matched) + list(when_not_matched)
     )
     if has_condition:
-        from pypaimon.ray.merge_condition import _require_datafusion
+        from pypaimon.ray.merge_condition import (
+            _require_datafusion, extract_target_columns,
+        )
         _require_datafusion()
+        for c in list(when_matched) + list(when_not_matched):
+            if c.condition is not None:
+                blob_refs = extract_target_columns(c.condition) & blob_cols
+                if blob_refs:
+                    raise ValueError(
+                        f"condition must not reference blob columns, "
+                        f"but found: {sorted(blob_refs)}"
+                    )
     for c in when_not_matched:
         if c.condition is not None:
             from pypaimon.ray.merge_condition import extract_target_columns
