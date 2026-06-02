@@ -93,11 +93,7 @@ def apply_condition(
 ) -> pa.Table:
     batch = filter_batch(batch, rewritten, _pre_rewritten=True)
     if batch.num_rows == 0:
-        return pa.table(
-            {c: pa.array([], type=empty_schema.field(c).type)
-             for c in empty_schema.names},
-            schema=empty_schema,
-        )
+        return empty_schema.empty_table()
     return batch
 
 

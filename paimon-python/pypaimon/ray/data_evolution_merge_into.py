@@ -129,6 +129,13 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
         )
         for c in when_matched
     ]
+    has_condition = any(
+        c.condition is not None
+        for c in list(when_matched) + list(when_not_matched)
+    )
+    if has_condition:
+        from pypaimon.ray.merge_condition import _require_datafusion
+        _require_datafusion()
     for c in when_not_matched:
         if c.condition is not None:
             from pypaimon.ray.merge_condition import extract_target_columns
