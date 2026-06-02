@@ -30,15 +30,24 @@ public class VectorSearch implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
-    private final float[] vector;
+    private final float[][] vectors;
     private final String fieldName;
     private final int limit;
 
     @Nullable private RoaringNavigableMap64 includeRowIds;
 
     public VectorSearch(float[] vector, int limit, String fieldName) {
-        if (vector == null) {
-            throw new IllegalArgumentException("Search cannot be null");
+        this(new float[][] {vector}, limit, fieldName);
+    }
+
+    public VectorSearch(float[][] vectors, int limit, String fieldName) {
+        if (vectors == null || vectors.length == 0) {
+            throw new IllegalArgumentException("Search vectors cannot be null or empty");
+        }
+        for (float[] v : vectors) {
+            if (v == null) {
+                throw new IllegalArgumentException("Search vector element cannot be null");
+            }
         }
         if (limit <= 0) {
             throw new IllegalArgumentException("Limit must be positive, got: " + limit);
@@ -46,13 +55,29 @@ public class VectorSearch implements Serializable {
         if (fieldName == null || fieldName.isEmpty()) {
             throw new IllegalArgumentException("Field name cannot be null or empty");
         }
-        this.vector = vector;
+        this.vectors = vectors;
         this.limit = limit;
         this.fieldName = fieldName;
     }
 
     public float[] vector() {
-        return vector;
+        return vectors[0];
+    }
+
+    public float[][] vectors() {
+        return vectors;
+    }
+
+    public int vectorCount() {
+        return vectors.length;
+    }
+
+    public VectorSearch forIndex(int i) {
+        VectorSearch single = new VectorSearch(vectors[i], limit, fieldName);
+        if (includeRowIds != null) {
+            single.withIncludeRowIds(includeRowIds);
+        }
+        return single;
     }
 
     public int limit() {
@@ -81,7 +106,7 @@ public class VectorSearch implements Serializable {
             for (long rowId : and64) {
                 roaringNavigableMap64Offset.add(rowId - from);
             }
-            VectorSearch target = new VectorSearch(vector, limit, fieldName);
+            VectorSearch target = new VectorSearch(vectors, limit, fieldName);
             target.withIncludeRowIds(roaringNavigableMap64Offset);
             return target;
         }
@@ -90,6 +115,7 @@ public class VectorSearch implements Serializable {
 
     @Override
     public String toString() {
-        return String.format("FieldName(%s), Limit(%s)", fieldName, limit);
+        return String.format(
+                "FieldName(%s), Limit(%s), VectorCount(%s)", fieldName, limit, vectors.length);
     }
 }

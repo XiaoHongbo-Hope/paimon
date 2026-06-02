@@ -61,25 +61,39 @@ public class VectorReadImpl implements VectorRead {
     private final Predicate filter;
     private final int limit;
     private final DataField vectorColumn;
-    private final float[] vector;
+    private final float[][] vectors;
 
     public VectorReadImpl(
             FileStoreTable table,
             Predicate filter,
             int limit,
             DataField vectorColumn,
-            float[] vector) {
+            float[][] vectors) {
         this.table = table;
         this.filter = filter;
         this.limit = limit;
         this.vectorColumn = vectorColumn;
-        this.vector = vector;
+        this.vectors = vectors;
     }
 
     @Override
     public GlobalIndexResult read(List<VectorSearchSplit> splits) {
+        if (vectors.length > 1) {
+            throw new IllegalStateException(
+                    "read() supports single vector only; use readBatch() for multiple vectors");
+        }
+        return readBatch(splits).get(0);
+    }
+
+    @Override
+    public List<GlobalIndexResult> readBatch(List<VectorSearchSplit> splits) {
+        int n = vectors.length;
         if (splits.isEmpty()) {
-            return GlobalIndexResult.createEmpty();
+            List<GlobalIndexResult> empty = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                empty.add(GlobalIndexResult.createEmpty());
+            }
+            return empty;
         }
 
         RoaringNavigableMap64 preFilter = preFilter(splits).orElse(null);
@@ -93,11 +107,11 @@ public class VectorReadImpl implements VectorRead {
         int parallelism = table.coreOptions().toConfiguration().get(GLOBAL_INDEX_THREAD_NUM);
         ExecutorService executor = GlobalIndexReadThreadPool.getExecutorService(parallelism);
 
-        List<CompletableFuture<Optional<ScoredGlobalIndexResult>>> futures =
+        List<CompletableFuture<List<Optional<ScoredGlobalIndexResult>>>> futures =
                 new ArrayList<>(splits.size());
         for (VectorSearchSplit split : splits) {
             futures.add(
-                    eval(
+                    evalBatch(
                             globalIndexer,
                             indexPathFactory,
                             split.rowRangeStart(),
@@ -109,15 +123,25 @@ public class VectorReadImpl implements VectorRead {
 
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-        ScoredGlobalIndexResult result = ScoredGlobalIndexResult.createEmpty();
-        for (CompletableFuture<Optional<ScoredGlobalIndexResult>> f : futures) {
-            Optional<ScoredGlobalIndexResult> next = f.join();
-            if (next.isPresent()) {
-                result = result.or(next.get());
+        ScoredGlobalIndexResult[] merged = new ScoredGlobalIndexResult[n];
+        for (int i = 0; i < n; i++) {
+            merged[i] = ScoredGlobalIndexResult.createEmpty();
+        }
+
+        for (CompletableFuture<List<Optional<ScoredGlobalIndexResult>>> future : futures) {
+            List<Optional<ScoredGlobalIndexResult>> splitResults = future.join();
+            for (int i = 0; i < n; i++) {
+                if (splitResults.get(i).isPresent()) {
+                    merged[i] = merged[i].or(splitResults.get(i).get());
+                }
             }
         }
 
-        return result.topK(limit);
+        List<GlobalIndexResult> results = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            results.add(merged[i].topK(limit));
+        }
+        return results;
     }
 
     private Optional<RoaringNavigableMap64> preFilter(List<VectorSearchSplit> splits) {
@@ -139,7 +163,7 @@ public class VectorReadImpl implements VectorRead {
         }
     }
 
-    private CompletableFuture<Optional<ScoredGlobalIndexResult>> eval(
+    private CompletableFuture<List<Optional<ScoredGlobalIndexResult>>> evalBatch(
             GlobalIndexer globalIndexer,
             IndexPathFactory indexPathFactory,
             long rowRangeStart,
@@ -147,6 +171,23 @@ public class VectorReadImpl implements VectorRead {
             List<IndexFileMeta> vectorIndexFiles,
             @Nullable RoaringNavigableMap64 includeRowIds,
             ExecutorService executor) {
+        List<GlobalIndexIOMeta> indexIOMetaList =
+                buildIOMetaList(indexPathFactory, vectorIndexFiles);
+        @SuppressWarnings("resource")
+        FileIO fileIO = table.fileIO();
+        GlobalIndexFileReader indexFileReader = m -> fileIO.newInputStream(m.filePath());
+        GlobalIndexReader reader =
+                globalIndexer.createReader(indexFileReader, indexIOMetaList, executor);
+        VectorSearch vectorSearch =
+                new VectorSearch(vectors, limit, vectorColumn.name())
+                        .withIncludeRowIds(includeRowIds);
+        return new OffsetGlobalIndexReader(reader, rowRangeStart, rowRangeEnd)
+                .visitBatchVectorSearch(vectorSearch)
+                .whenComplete((r, t) -> IOUtils.closeQuietly(reader));
+    }
+
+    private List<GlobalIndexIOMeta> buildIOMetaList(
+            IndexPathFactory indexPathFactory, List<IndexFileMeta> vectorIndexFiles) {
         List<GlobalIndexIOMeta> indexIOMetaList = new ArrayList<>();
         for (IndexFileMeta indexFile : vectorIndexFiles) {
             GlobalIndexMeta meta = checkNotNull(indexFile.globalIndexMeta());
@@ -156,16 +197,6 @@ public class VectorReadImpl implements VectorRead {
                             indexFile.fileSize(),
                             meta.indexMeta()));
         }
-        @SuppressWarnings("resource")
-        FileIO fileIO = table.fileIO();
-        GlobalIndexFileReader indexFileReader = m -> fileIO.newInputStream(m.filePath());
-        GlobalIndexReader reader =
-                globalIndexer.createReader(indexFileReader, indexIOMetaList, executor);
-        VectorSearch vectorSearch =
-                new VectorSearch(vector, limit, vectorColumn.name())
-                        .withIncludeRowIds(includeRowIds);
-        return new OffsetGlobalIndexReader(reader, rowRangeStart, rowRangeEnd)
-                .visitVectorSearch(vectorSearch)
-                .whenComplete((r, t) -> IOUtils.closeQuietly(reader));
+        return indexIOMetaList;
     }
 }
