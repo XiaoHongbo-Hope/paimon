@@ -483,7 +483,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             {
                 'id': pa.array([1, 2, 3], type=pa.int32()),
                 'name': ['a2', 'b2', 'c2'],
-                'age': pa.array([15, 25, 35], type=pa.int32()),
+                'age': pa.array([15, 25, 45], type=pa.int32()),
             },
             schema=self.pa_schema,
         )
@@ -500,7 +500,7 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         out = self._read_sorted(target)
         self.assertEqual(out['id'], [1, 2, 3])
         self.assertEqual(out['name'], ['a', 'b', 'c2'])
-        self.assertEqual(out['age'], [10, 20, 35])
+        self.assertEqual(out['age'], [10, 20, 45])
 
     def test_matched_condition_with_source_on_key(self):
         target = self._create_table()
