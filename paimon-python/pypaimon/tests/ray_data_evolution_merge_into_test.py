@@ -714,6 +714,17 @@ class MergeConditionUnitTest(unittest.TestCase):
         remapped = remap_source_on_keys(rewritten, {'uid': 'id'})
         self.assertEqual(remapped, '"t.id" > 1')
 
+    def test_remap_preserves_string_literals(self):
+        from pypaimon.ray.merge_condition import (
+            remap_source_on_keys, rewrite_condition,
+        )
+        rewritten = rewrite_condition("s.note = '\"s.id\"' AND s.id = 1")
+        remapped = remap_source_on_keys(rewritten, {'id': 'id'})
+        self.assertEqual(
+            remapped,
+            '"s.note" = \'\"s.id\"\' AND "t.id" = 1',
+        )
+
     def test_extract_target_columns(self):
         from pypaimon.ray.merge_condition import extract_target_columns
         self.assertEqual(

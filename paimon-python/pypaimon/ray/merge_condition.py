@@ -57,7 +57,14 @@ def remap_source_on_keys(
     rewritten: str, on_map: Mapping[str, str],
 ) -> str:
     for s_col, t_col in on_map.items():
-        rewritten = rewritten.replace(f'"s.{s_col}"', f'"t.{t_col}"')
+        old, new = f'"s.{s_col}"', f'"t.{t_col}"'
+        parts, last = [], 0
+        for m in _STRING_LITERAL.finditer(rewritten):
+            parts.append(rewritten[last:m.start()].replace(old, new))
+            parts.append(m.group())
+            last = m.end()
+        parts.append(rewritten[last:].replace(old, new))
+        rewritten = ''.join(parts)
     return rewritten
 
 
