@@ -103,8 +103,13 @@ def build_matched_update_ds(
     captured_apply = None
     captured_rewritten = None
     if condition is not None:
-        from pypaimon.ray.merge_condition import apply_condition, rewrite_condition
-        captured_rewritten = rewrite_condition(condition)
+        from pypaimon.ray.merge_condition import (
+            apply_condition, remap_source_on_keys, rewrite_condition,
+        )
+        on_map = dict(zip(source_on, target_on))
+        captured_rewritten = remap_source_on_keys(
+            rewrite_condition(condition), on_map,
+        )
         captured_apply = apply_condition
 
     def _transform(batch: pa.Table) -> pa.Table:

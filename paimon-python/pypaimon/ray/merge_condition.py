@@ -17,7 +17,7 @@
 ################################################################################
 
 import re
-from typing import Set
+from typing import Mapping, Set
 
 import pyarrow as pa
 
@@ -51,6 +51,14 @@ def rewrite_condition(condition: str) -> str:
         last = m.end()
     parts.append(_COL_REF_PATTERN.sub(r'"\1.\2"', condition[last:]))
     return ''.join(parts)
+
+
+def remap_source_on_keys(
+    rewritten: str, on_map: Mapping[str, str],
+) -> str:
+    for s_col, t_col in on_map.items():
+        rewritten = rewritten.replace(f'"s.{s_col}"', f'"t.{t_col}"')
+    return rewritten
 
 
 _SESSION_CTX = None

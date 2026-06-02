@@ -502,6 +502,43 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b', 'c2'])
         self.assertEqual(out['age'], [10, 20, 35])
 
+    def test_matched_condition_with_source_on_key(self):
+        target = self._create_table()
+        self._write(
+            target,
+            pa.Table.from_pydict(
+                {
+                    'id': pa.array([1, 2, 3], type=pa.int32()),
+                    'name': ['a', 'b', 'c'],
+                    'age': pa.array([10, 20, 30], type=pa.int32()),
+                },
+                schema=self.pa_schema,
+            ),
+        )
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 2, 3], type=pa.int32()),
+                'name': ['a2', 'b2', 'c2'],
+                'age': pa.array([15, 25, 35], type=pa.int32()),
+            },
+            schema=self.pa_schema,
+        )
+
+        merge_into(
+            target=target,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[WhenMatched(update='*', condition='s.id >= 2')],
+            num_partitions=_TEST_NUM_PARTITIONS,
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2, 3])
+        self.assertEqual(out['name'], ['a', 'b2', 'c2'])
+        self.assertEqual(out['age'], [10, 25, 35])
+
     def test_not_matched_insert_with_condition(self):
         target = self._create_table()
         self._write(
@@ -660,6 +697,22 @@ class MergeConditionUnitTest(unittest.TestCase):
             rewrite_condition("s.status = 't.active' AND s.age > t.age"),
             '"s.status" = \'t.active\' AND "s.age" > "t.age"',
         )
+
+    def test_remap_source_on_keys(self):
+        from pypaimon.ray.merge_condition import (
+            remap_source_on_keys, rewrite_condition,
+        )
+        rewritten = rewrite_condition('s.id > 1 AND s.age > t.age')
+        remapped = remap_source_on_keys(rewritten, {'id': 'id'})
+        self.assertEqual(remapped, '"t.id" > 1 AND "s.age" > "t.age"')
+
+    def test_remap_source_on_keys_renamed(self):
+        from pypaimon.ray.merge_condition import (
+            remap_source_on_keys, rewrite_condition,
+        )
+        rewritten = rewrite_condition('s.uid > 1')
+        remapped = remap_source_on_keys(rewritten, {'uid': 'id'})
+        self.assertEqual(remapped, '"t.id" > 1')
 
     def test_extract_target_columns(self):
         from pypaimon.ray.merge_condition import extract_target_columns
