@@ -94,12 +94,23 @@ def build_matched_update_ds(
         f"build_matched_update_ds expected 1 clause, got {len(clauses)}"
     )
     spec = clauses[0].spec
+    condition = clauses[0].condition
     captured_update_cols = list(update_cols)
     captured_row_id_name = row_id_name
     captured_on_pairs = list(zip(source_on, target_on))
     captured_schema = update_schema
 
     def _transform(batch: pa.Table) -> pa.Table:
+        if condition is not None:
+            from pypaimon.ray.merge_condition import filter_batch
+            batch = filter_batch(batch, condition)
+            if batch.num_rows == 0:
+                return pa.table(
+                    {captured_row_id_name: pa.array([], type=pa.int64())}
+                    | {c: pa.array([], type=captured_schema.field(c).type)
+                       for c in captured_update_cols},
+                    schema=captured_schema,
+                )
         return vectorized_matched_transform(
             batch, spec, captured_on_pairs,
             captured_update_cols, captured_row_id_name,
@@ -308,8 +319,18 @@ def build_not_matched_insert_ds(
         f"build_not_matched_insert_ds expected 1 clause, got {len(clauses)}"
     )
     spec = clauses[0].spec
+    condition = clauses[0].condition
 
     def _transform(batch: pa.Table) -> pa.Table:
+        if condition is not None:
+            from pypaimon.ray.merge_condition import filter_batch
+            batch = filter_batch(batch, condition)
+            if batch.num_rows == 0:
+                return pa.table(
+                    {c: pa.array([], type=out_schema.field(c).type)
+                     for c in captured_field_names},
+                    schema=out_schema,
+                )
         return _coerce_large_string_types(
             vectorized_insert_transform(
                 batch, spec, captured_field_names, out_schema
