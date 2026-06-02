@@ -341,7 +341,7 @@ def build_not_matched_insert_ds(
                 batch, captured_rewritten, out_schema,
             )
             if batch.num_rows == 0:
-                return batch
+                return _coerce_large_string_types(batch)
         return _coerce_large_string_types(
             vectorized_insert_transform(
                 batch, spec, captured_field_names, out_schema
