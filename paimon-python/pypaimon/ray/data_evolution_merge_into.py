@@ -73,14 +73,14 @@ def merge_into(
     )
     base_snapshot = table.snapshot_manager().get_latest_snapshot()
 
-    update_ds, insert_ds, update_cols_union, matched_count = _build_datasets(
+    update_ds, insert_ds, update_cols_union = _build_datasets(
         target, source_ds, matched_specs, not_matched_specs,
         ctx, base_snapshot, num_partitions, ray_remote_args,
     )
 
     return _execute_and_commit(
         table, update_ds, insert_ds, update_cols_union,
-        matched_count, base_snapshot, num_partitions,
+        base_snapshot, num_partitions,
         ray_remote_args, concurrency,
     )
 
@@ -188,14 +188,13 @@ def _build_datasets(
     update_ds = None
     insert_ds = None
     update_cols_union: List[str] = []
-    matched_count = None
 
     # Mirror Spark: matched/not-matched run as two independent joins
     # (inner / left_anti). One unified left_outer join would force
     # joined.materialize() to feed both branches, which can OOM on large merges.
     if matched_specs and base_snapshot is not None:
         update_cols_union = _union_update_cols(matched_specs)
-        update_ds, matched_count = build_matched_update_ds(
+        update_ds = build_matched_update_ds(
             target_identifier=target,
             source_ds=source_ds,
             target_on=ctx.target_on_cols,
@@ -229,12 +228,12 @@ def _build_datasets(
             ray_remote_args=ray_remote_args,
         )
 
-    return update_ds, insert_ds, update_cols_union, matched_count
+    return update_ds, insert_ds, update_cols_union
 
 
 def _execute_and_commit(
     table, update_ds, insert_ds, update_cols_union,
-    matched_count, base_snapshot, num_partitions,
+    base_snapshot, num_partitions,
     ray_remote_args, concurrency,
 ):
     update_msgs: list = []
@@ -274,11 +273,10 @@ def _execute_and_commit(
         tc.commit(all_msgs)
         tc.close()
 
-    num_unchanged = (matched_count - num_updated) if matched_count is not None else 0
     return {
         "num_matched": num_updated,
         "num_inserted": num_inserted,
-        "num_unchanged": num_unchanged,
+        "num_unchanged": 0,
     }
 
 

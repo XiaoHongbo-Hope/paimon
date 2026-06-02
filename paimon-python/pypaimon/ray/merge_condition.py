@@ -67,6 +67,8 @@ def _get_session_context():
 def filter_batch(
     batch: pa.Table, condition: str, _pre_rewritten: bool = False,
 ) -> pa.Table:
+    if batch.num_rows == 0:
+        return batch
     rewritten = condition if _pre_rewritten else rewrite_condition(condition)
     ctx = _get_session_context()
     if ctx.table_exist("_merge_batch"):

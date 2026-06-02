@@ -100,15 +100,12 @@ def build_matched_update_ds(
     captured_on_pairs = list(zip(source_on, target_on))
     captured_schema = update_schema
 
-    matched_count = None
     captured_apply = None
     captured_rewritten = None
     if condition is not None:
         from pypaimon.ray.merge_condition import apply_condition, rewrite_condition
         captured_rewritten = rewrite_condition(condition)
         captured_apply = apply_condition
-        joined = joined.materialize()
-        matched_count = joined.count()
 
     def _transform(batch: pa.Table) -> pa.Table:
         if captured_apply is not None:
@@ -123,8 +120,7 @@ def build_matched_update_ds(
             captured_schema,
         )
 
-    ds = joined.map_batches(_transform, **_map_kwargs(ray_remote_args))
-    return ds, matched_count
+    return joined.map_batches(_transform, **_map_kwargs(ray_remote_args))
 
 
 def distributed_update_apply(

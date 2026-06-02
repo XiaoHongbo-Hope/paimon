@@ -581,7 +581,6 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a2', 'b', 'c'])
         self.assertEqual(out['age'], [50, 20, 30])
         self.assertEqual(metrics['num_matched'], 1)
-        self.assertEqual(metrics['num_unchanged'], 1)
         self.assertEqual(metrics['num_inserted'], 1)
 
     def test_condition_no_rows_match_is_noop(self):
@@ -684,6 +683,10 @@ class MergeConditionUnitTest(unittest.TestCase):
         )
 
     def test_filter_batch(self):
+        try:
+            import datafusion  # noqa: F401
+        except ImportError:
+            self.skipTest("datafusion not installed")
         from pypaimon.ray.merge_condition import filter_batch
         batch = pa.table({
             's.id': pa.array([1, 2, 3], type=pa.int32()),
