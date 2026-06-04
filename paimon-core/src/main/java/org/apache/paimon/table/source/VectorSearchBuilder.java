@@ -44,7 +44,9 @@ public interface VectorSearchBuilder extends Serializable {
     VectorSearchBuilder withVector(float[] vector);
 
     /** The vectors to batch search; result {@code i} corresponds to {@code vectors[i]}. */
-    VectorSearchBuilder withVectors(float[][] vectors);
+    default VectorSearchBuilder withVectors(float[][] vectors) {
+        throw new UnsupportedOperationException();
+    }
 
     /** Create vector scan to scan index files. */
     VectorScan newVectorScan();

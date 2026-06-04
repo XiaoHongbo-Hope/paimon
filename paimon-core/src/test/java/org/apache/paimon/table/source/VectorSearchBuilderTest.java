@@ -563,6 +563,41 @@ public class VectorSearchBuilderTest extends TableTestBase {
     }
 
     @Test
+    public void testBatchVectorSearchWithMultipleIndexFiles() throws Exception {
+        createTableDefault();
+        FileStoreTable table = getTableDefault();
+
+        float[][] allVectors = {
+            {1.0f, 0.0f},
+            {0.95f, 0.1f},
+            {0.1f, 0.95f},
+            {0.98f, 0.05f},
+            {0.0f, 1.0f},
+            {0.05f, 0.98f}
+        };
+
+        writeVectors(table, allVectors);
+        buildAndCommitMultipleIndexFiles(table, allVectors);
+
+        List<GlobalIndexResult> results =
+                table.newVectorSearchBuilder()
+                        .withVectors(new float[][] {{0.85f, 0.15f}, {0.0f, 1.0f}})
+                        .withLimit(3)
+                        .withVectorColumn(VECTOR_FIELD_NAME)
+                        .executeBatchLocal();
+
+        assertThat(results).hasSize(2);
+
+        List<Integer> ids0 = readIds(table, results.get(0));
+        assertThat(ids0.size()).isLessThanOrEqualTo(3);
+        assertThat(ids0).contains(0, 3);
+
+        List<Integer> ids1 = readIds(table, results.get(1));
+        assertThat(ids1.size()).isLessThanOrEqualTo(3);
+        assertThat(ids1).contains(4, 5);
+    }
+
+    @Test
     public void testBatchSingleVector() throws Exception {
         createTableDefault();
         FileStoreTable table = getTableDefault();
@@ -613,6 +648,16 @@ public class VectorSearchBuilderTest extends TableTestBase {
             }
             commit.commit(write.prepareCommit());
         }
+    }
+
+    private List<Integer> readIds(FileStoreTable table, GlobalIndexResult result) throws Exception {
+        ReadBuilder readBuilder = table.newReadBuilder();
+        TableScan.Plan plan = readBuilder.newScan().withGlobalIndexResult(result).plan();
+        List<Integer> ids = new ArrayList<>();
+        try (RecordReader<InternalRow> reader = readBuilder.newRead().createReader(plan)) {
+            reader.forEachRemaining(row -> ids.add(row.getInt(0)));
+        }
+        return ids;
     }
 
     private void buildAndCommitIndex(FileStoreTable table, float[][] vectors) throws Exception {
