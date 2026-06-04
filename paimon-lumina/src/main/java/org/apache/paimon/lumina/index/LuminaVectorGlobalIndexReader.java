@@ -24,6 +24,7 @@ import org.apache.paimon.globalindex.GlobalIndexReader;
 import org.apache.paimon.globalindex.GlobalIndexResult;
 import org.apache.paimon.globalindex.ScoredGlobalIndexResult;
 import org.apache.paimon.globalindex.io.GlobalIndexFileReader;
+import org.apache.paimon.predicate.BatchVectorSearch;
 import org.apache.paimon.predicate.FieldRef;
 import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.types.ArrayType;
@@ -110,41 +111,41 @@ public class LuminaVectorGlobalIndexReader implements GlobalIndexReader {
 
     @Override
     public CompletableFuture<List<Optional<ScoredGlobalIndexResult>>> visitBatchVectorSearch(
-            VectorSearch vectorSearch) {
+            BatchVectorSearch batchVectorSearch) {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
                         ensureLoaded();
-                        return searchBatch(vectorSearch);
+                        return searchBatch(batchVectorSearch);
                     } catch (IOException e) {
                         throw new RuntimeException(
                                 String.format(
                                         "Failed to batch search Lumina vector index with fieldName=%s, limit=%d, vectorCount=%d",
-                                        vectorSearch.fieldName(),
-                                        vectorSearch.limit(),
-                                        vectorSearch.vectorCount()),
+                                        batchVectorSearch.fieldName(),
+                                        batchVectorSearch.limit(),
+                                        batchVectorSearch.vectorCount()),
                                 e);
                     }
                 },
                 executor);
     }
 
-    private List<Optional<ScoredGlobalIndexResult>> searchBatch(VectorSearch vectorSearch)
-            throws IOException {
-        int n = vectorSearch.vectorCount();
+    private List<Optional<ScoredGlobalIndexResult>> searchBatch(
+            BatchVectorSearch batchVectorSearch) throws IOException {
+        int n = batchVectorSearch.vectorCount();
         if (n == 1) {
             List<Optional<ScoredGlobalIndexResult>> results = new ArrayList<>(1);
-            results.add(Optional.ofNullable(search(vectorSearch)));
+            results.add(Optional.ofNullable(search(batchVectorSearch.forIndex(0))));
             return results;
         }
 
-        float[][] vectors = vectorSearch.vectors();
+        float[][] vectors = batchVectorSearch.vectors();
         int dim = indexMeta.dim();
         for (float[] v : vectors) {
             validateSearchVector(v);
         }
 
-        int limit = vectorSearch.limit();
+        int limit = batchVectorSearch.limit();
         LuminaVectorMetric indexMetric = indexMeta.metric();
         int effectiveK = (int) Math.min(limit, index.size());
         if (effectiveK <= 0) {
@@ -160,7 +161,7 @@ public class LuminaVectorGlobalIndexReader implements GlobalIndexReader {
             System.arraycopy(vectors[i], 0, queryVectors, i * dim, dim);
         }
 
-        RoaringNavigableMap64 includeRowIds = vectorSearch.includeRowIds();
+        RoaringNavigableMap64 includeRowIds = batchVectorSearch.includeRowIds();
         float[] distances;
         long[] labels;
 
@@ -206,20 +207,14 @@ public class LuminaVectorGlobalIndexReader implements GlobalIndexReader {
         for (int i = 0; i < n; i++) {
             PriorityQueue<ScoredRow> topK =
                     new PriorityQueue<>(effectiveK + 1, Comparator.comparingDouble(s -> s.score));
-            int offset = i * effectiveK;
-            for (int j = 0; j < effectiveK; j++) {
-                long rowId = labels[offset + j];
-                if (rowId < 0) {
-                    continue;
-                }
-                float score = convertDistanceToScore(distances[offset + j], indexMetric);
-                if (topK.size() < effectiveK) {
-                    topK.offer(new ScoredRow(rowId, score));
-                } else if (score > topK.peek().score) {
-                    topK.poll();
-                    topK.offer(new ScoredRow(rowId, score));
-                }
-            }
+            collectResults(
+                    distances,
+                    labels,
+                    i * effectiveK,
+                    effectiveK,
+                    effectiveK,
+                    topK,
+                    indexMetric);
 
             if (topK.isEmpty()) {
                 results.add(Optional.empty());
@@ -288,7 +283,10 @@ public class LuminaVectorGlobalIndexReader implements GlobalIndexReader {
         // Min-heap: smallest score at head, so we can evict the weakest candidate efficiently.
         PriorityQueue<ScoredRow> topK =
                 new PriorityQueue<>(effectiveK + 1, Comparator.comparingDouble(s -> s.score));
-        collectResults(distances, labels, effectiveK, effectiveK, topK, indexMetric);
+        collectResults(distances, labels, 0, effectiveK, effectiveK, topK, indexMetric);
+        if (topK.isEmpty()) {
+            return null;
+        }
 
         RoaringNavigableMap64 roaringBitmap64 = new RoaringNavigableMap64();
         HashMap<Long, Float> id2scores = new HashMap<>(topK.size());
@@ -309,16 +307,18 @@ public class LuminaVectorGlobalIndexReader implements GlobalIndexReader {
     private static void collectResults(
             float[] distances,
             long[] labels,
+            int offset,
             int count,
             int limit,
             PriorityQueue<ScoredRow> topK,
             LuminaVectorMetric metric) {
         for (int i = 0; i < count; i++) {
-            long rowId = labels[i];
+            int index = offset + i;
+            long rowId = labels[index];
             if (rowId < 0) {
                 continue;
             }
-            float score = convertDistanceToScore(distances[i], metric);
+            float score = convertDistanceToScore(distances[index], metric);
             if (topK.size() < limit) {
                 topK.offer(new ScoredRow(rowId, score));
             } else if (score > topK.peek().score) {

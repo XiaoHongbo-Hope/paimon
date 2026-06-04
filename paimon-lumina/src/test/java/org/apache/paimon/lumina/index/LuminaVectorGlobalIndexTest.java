@@ -29,6 +29,7 @@ import org.apache.paimon.globalindex.ScoredGlobalIndexResult;
 import org.apache.paimon.globalindex.io.GlobalIndexFileReader;
 import org.apache.paimon.globalindex.io.GlobalIndexFileWriter;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.predicate.BatchVectorSearch;
 import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.DataType;
@@ -786,7 +787,7 @@ public class LuminaVectorGlobalIndexTest {
                         new float[] {0.0f, 1.0f},
                         new float[] {0.7f, 0.7f}
                     };
-            VectorSearch batchSearch = new VectorSearch(queryVectors, 2, fieldName);
+            BatchVectorSearch batchSearch = new BatchVectorSearch(queryVectors, 2, fieldName);
             List<Optional<ScoredGlobalIndexResult>> batchResults =
                     reader.visitBatchVectorSearch(batchSearch).join();
 
@@ -838,8 +839,8 @@ public class LuminaVectorGlobalIndexTest {
             filter.add(1L);
             filter.add(2L);
 
-            VectorSearch batchSearch =
-                    new VectorSearch(queryVectors, 2, fieldName).withIncludeRowIds(filter);
+            BatchVectorSearch batchSearch =
+                    new BatchVectorSearch(queryVectors, 2, fieldName).withIncludeRowIds(filter);
             List<Optional<ScoredGlobalIndexResult>> batchResults =
                     reader.visitBatchVectorSearch(batchSearch).join();
 
@@ -878,7 +879,7 @@ public class LuminaVectorGlobalIndexTest {
                     new float[][] {testVectors.get(10), testVectors.get(50), testVectors.get(90)};
             int limit = 5;
 
-            VectorSearch batchSearch = new VectorSearch(queryVectors, limit, fieldName);
+            BatchVectorSearch batchSearch = new BatchVectorSearch(queryVectors, limit, fieldName);
             List<Optional<ScoredGlobalIndexResult>> batchResults =
                     reader.visitBatchVectorSearch(batchSearch).join();
 

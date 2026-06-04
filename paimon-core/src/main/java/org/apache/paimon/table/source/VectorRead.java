@@ -32,10 +32,12 @@ public interface VectorRead {
 
     GlobalIndexResult read(List<VectorSearchSplit> splits);
 
+    /** Read batch results; result {@code i} corresponds to input vector {@code i}. */
     default List<GlobalIndexResult> readBatch(VectorScan.Plan plan) {
         return readBatch(plan.splits());
     }
 
+    /** Read batch results; result {@code i} corresponds to input vector {@code i}. */
     default List<GlobalIndexResult> readBatch(List<VectorSearchSplit> splits) {
         List<GlobalIndexResult> results = new ArrayList<>(1);
         results.add(read(splits));

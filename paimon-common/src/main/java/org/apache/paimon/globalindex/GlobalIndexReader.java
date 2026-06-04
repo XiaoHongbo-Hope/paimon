@@ -18,6 +18,7 @@
 
 package org.apache.paimon.globalindex;
 
+import org.apache.paimon.predicate.BatchVectorSearch;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.FunctionVisitor;
 import org.apache.paimon.predicate.LeafPredicate;
@@ -61,11 +62,12 @@ public interface GlobalIndexReader
         throw new UnsupportedOperationException();
     }
 
+    /** Batch search; result {@code i} matches vector {@code i}. */
     default CompletableFuture<List<Optional<ScoredGlobalIndexResult>>> visitBatchVectorSearch(
-            VectorSearch vectorSearch) {
+            BatchVectorSearch batchVectorSearch) {
         List<CompletableFuture<Optional<ScoredGlobalIndexResult>>> futures = new ArrayList<>();
-        for (int i = 0; i < vectorSearch.vectorCount(); i++) {
-            futures.add(visitVectorSearch(vectorSearch.forIndex(i)));
+        for (int i = 0; i < batchVectorSearch.vectorCount(); i++) {
+            futures.add(visitVectorSearch(batchVectorSearch.forIndex(i)));
         }
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                 .thenApply(

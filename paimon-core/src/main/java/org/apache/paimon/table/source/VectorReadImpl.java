@@ -32,8 +32,8 @@ import org.apache.paimon.globalindex.io.GlobalIndexFileReader;
 import org.apache.paimon.index.GlobalIndexMeta;
 import org.apache.paimon.index.IndexFileMeta;
 import org.apache.paimon.index.IndexPathFactory;
+import org.apache.paimon.predicate.BatchVectorSearch;
 import org.apache.paimon.predicate.Predicate;
-import org.apache.paimon.predicate.VectorSearch;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.utils.IOUtils;
@@ -178,11 +178,11 @@ public class VectorReadImpl implements VectorRead {
         GlobalIndexFileReader indexFileReader = m -> fileIO.newInputStream(m.filePath());
         GlobalIndexReader reader =
                 globalIndexer.createReader(indexFileReader, indexIOMetaList, executor);
-        VectorSearch vectorSearch =
-                new VectorSearch(vectors, limit, vectorColumn.name())
+        BatchVectorSearch batchVectorSearch =
+                new BatchVectorSearch(vectors, limit, vectorColumn.name())
                         .withIncludeRowIds(includeRowIds);
         return new OffsetGlobalIndexReader(reader, rowRangeStart, rowRangeEnd)
-                .visitBatchVectorSearch(vectorSearch)
+                .visitBatchVectorSearch(batchVectorSearch)
                 .whenComplete((r, t) -> IOUtils.closeQuietly(reader));
     }
 

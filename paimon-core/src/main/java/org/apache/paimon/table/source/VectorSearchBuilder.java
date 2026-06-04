@@ -43,7 +43,7 @@ public interface VectorSearchBuilder extends Serializable {
     /** The vector to search. */
     VectorSearchBuilder withVector(float[] vector);
 
-    /** The vectors to batch search. */
+    /** The vectors to batch search; result {@code i} corresponds to {@code vectors[i]}. */
     VectorSearchBuilder withVectors(float[][] vectors);
 
     /** Create vector scan to scan index files. */
@@ -57,7 +57,7 @@ public interface VectorSearchBuilder extends Serializable {
         return newVectorRead().read(newVectorScan().scan());
     }
 
-    /** Execute batch vector index search in local. */
+    /** Execute batch vector search locally; result {@code i} corresponds to {@code vectors[i]}. */
     default List<GlobalIndexResult> executeBatchLocal() {
         return newVectorRead().readBatch(newVectorScan().scan());
     }

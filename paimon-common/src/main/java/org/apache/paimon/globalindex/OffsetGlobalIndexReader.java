@@ -18,6 +18,7 @@
 
 package org.apache.paimon.globalindex;
 
+import org.apache.paimon.predicate.BatchVectorSearch;
 import org.apache.paimon.predicate.FieldRef;
 import org.apache.paimon.predicate.FullTextSearch;
 import org.apache.paimon.predicate.VectorSearch;
@@ -148,8 +149,8 @@ public class OffsetGlobalIndexReader implements GlobalIndexReader {
 
     @Override
     public CompletableFuture<List<Optional<ScoredGlobalIndexResult>>> visitBatchVectorSearch(
-            VectorSearch vectorSearch) {
-        return wrapped.visitBatchVectorSearch(vectorSearch.offsetRange(this.offset, this.to))
+            BatchVectorSearch batchVectorSearch) {
+        return wrapped.visitBatchVectorSearch(batchVectorSearch.offsetRange(this.offset, this.to))
                 .thenApply(
                         results -> {
                             List<Optional<ScoredGlobalIndexResult>> offsetResults =
