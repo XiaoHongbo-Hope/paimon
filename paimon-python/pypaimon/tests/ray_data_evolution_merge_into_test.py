@@ -772,12 +772,9 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             schema=pt_schema,
         )
 
-        with patch(
-            'pypaimon.ray.data_evolution_merge_join.read_paimon',
-            wraps=__import__(
-                'pypaimon.ray.ray_paimon', fromlist=['read_paimon']
-            ).read_paimon,
-        ) as mock_read:
+        from pypaimon.ray import ray_paimon as _rpm
+        original = _rpm.read_paimon
+        with patch.object(_rpm, 'read_paimon', wraps=original) as mock_read:
             merge_into(
                 target=name,
                 source=source,
