@@ -677,6 +677,178 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['id'], [1, 2])
         self.assertEqual(out['pt'], ['a', 'b'])
 
+    def test_multi_partition_update(self):
+        pt_schema = pa.schema([
+            ('pt', pa.string()),
+            ('id', pa.int32()),
+            ('name', pa.string()),
+        ])
+        name = f'default.tbl_{uuid.uuid4().hex[:8]}'
+        s = Schema.from_pyarrow_schema(
+            pt_schema, partition_keys=['pt'], options=self.de_options,
+        )
+        self.catalog.create_table(name, s, False)
+
+        table = self.catalog.get_table(name)
+        wb = table.new_batch_write_builder()
+        writer = wb.new_write()
+        writer.write_arrow(pa.Table.from_pydict(
+            {
+                'pt': ['a', 'a', 'b', 'b', 'c'],
+                'id': pa.array([1, 2, 3, 4, 5], type=pa.int32()),
+                'name': ['a1', 'a2', 'b3', 'b4', 'c5'],
+            },
+            schema=pt_schema,
+        ))
+        wb.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        source = pa.Table.from_pydict(
+            {
+                'id': pa.array([1, 3, 5], type=pa.int32()),
+                'name': ['new_a1', 'new_b3', 'new_c5'],
+            },
+            schema=pa.schema([
+                ('id', pa.int32()), ('name', pa.string()),
+            ]),
+        )
+
+        result = merge_into(
+            target=name,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[WhenMatched(update={'name': source_col('name')})],
+            num_partitions=_TEST_NUM_PARTITIONS,
+        )
+
+        self.assertEqual(result['num_matched'], 3)
+
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+        out = rb.new_read().to_arrow(splits).sort_by('id').to_pydict()
+        self.assertEqual(out['id'], [1, 2, 3, 4, 5])
+        self.assertEqual(
+            out['name'],
+            ['new_a1', 'a2', 'new_b3', 'b4', 'new_c5'],
+        )
+        self.assertEqual(out['pt'], ['a', 'a', 'b', 'b', 'c'])
+
+    def test_multi_partition_update_and_insert(self):
+        pt_schema = pa.schema([
+            ('pt', pa.string()),
+            ('id', pa.int32()),
+            ('name', pa.string()),
+        ])
+        name = f'default.tbl_{uuid.uuid4().hex[:8]}'
+        s = Schema.from_pyarrow_schema(
+            pt_schema, partition_keys=['pt'], options=self.de_options,
+        )
+        self.catalog.create_table(name, s, False)
+
+        table = self.catalog.get_table(name)
+        wb = table.new_batch_write_builder()
+        writer = wb.new_write()
+        writer.write_arrow(pa.Table.from_pydict(
+            {
+                'pt': ['a', 'b', 'c'],
+                'id': pa.array([1, 2, 3], type=pa.int32()),
+                'name': ['a1', 'b2', 'c3'],
+            },
+            schema=pt_schema,
+        ))
+        wb.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        source = pa.Table.from_pydict(
+            {
+                'pt': ['a', 'b', 'd'],
+                'id': pa.array([1, 4, 5], type=pa.int32()),
+                'name': ['updated_a1', 'new_b4', 'new_d5'],
+            },
+            schema=pt_schema,
+        )
+
+        result = merge_into(
+            target=name,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[WhenMatched(update={'name': source_col('name')})],
+            when_not_matched=[WhenNotMatched(insert='*')],
+            num_partitions=_TEST_NUM_PARTITIONS,
+        )
+
+        self.assertEqual(result['num_matched'], 1)
+        self.assertEqual(result['num_inserted'], 2)
+
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+        out = rb.new_read().to_arrow(splits).sort_by('id').to_pydict()
+        self.assertEqual(out['id'], [1, 2, 3, 4, 5])
+        self.assertEqual(
+            out['name'],
+            ['updated_a1', 'b2', 'c3', 'new_b4', 'new_d5'],
+        )
+
+    def test_compound_partition_keys_update(self):
+        schema = pa.schema([
+            ('region', pa.string()),
+            ('dt', pa.string()),
+            ('id', pa.int32()),
+            ('val', pa.string()),
+        ])
+        name = f'default.tbl_{uuid.uuid4().hex[:8]}'
+        s = Schema.from_pyarrow_schema(
+            schema, partition_keys=['region', 'dt'],
+            options=self.de_options,
+        )
+        self.catalog.create_table(name, s, False)
+
+        table = self.catalog.get_table(name)
+        wb = table.new_batch_write_builder()
+        writer = wb.new_write()
+        writer.write_arrow(pa.Table.from_pydict(
+            {
+                'region': ['us', 'us', 'eu', 'eu'],
+                'dt': ['d1', 'd2', 'd1', 'd2'],
+                'id': pa.array([1, 2, 3, 4], type=pa.int32()),
+                'val': ['v1', 'v2', 'v3', 'v4'],
+            },
+            schema=schema,
+        ))
+        wb.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        source = pa.Table.from_pydict(
+            {
+                'region': ['us', 'eu'],
+                'dt': ['d1', 'd2'],
+                'id': pa.array([1, 4], type=pa.int32()),
+                'val': ['new_v1', 'new_v4'],
+            },
+            schema=schema,
+        )
+
+        result = merge_into(
+            target=name,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['region', 'dt', 'id'],
+            when_matched=[WhenMatched(update={'val': source_col('val')})],
+            num_partitions=_TEST_NUM_PARTITIONS,
+        )
+
+        self.assertEqual(result['num_matched'], 2)
+
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+        out = rb.new_read().to_arrow(splits).sort_by('id').to_pydict()
+        self.assertEqual(out['id'], [1, 2, 3, 4])
+        self.assertEqual(out['val'], ['new_v1', 'v2', 'v3', 'new_v4'])
+        self.assertEqual(out['region'], ['us', 'us', 'eu', 'eu'])
+        self.assertEqual(out['dt'], ['d1', 'd2', 'd1', 'd2'])
+
     def test_partition_pruning_update_and_insert(self):
         pt_schema = pa.schema([
             ('pt', pa.string()),
