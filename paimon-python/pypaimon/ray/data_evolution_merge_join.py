@@ -55,6 +55,7 @@ def build_matched_update_ds(
     resolve_target_projection,
     snapshot_id: Optional[int] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
+    partition_filter=None,
 ) -> Tuple:
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.table.special_fields import SpecialFields
@@ -68,6 +69,7 @@ def build_matched_update_ds(
     target_ds = read_paimon(
         target_identifier, catalog_options,
         projection=projection, snapshot_id=snapshot_id,
+        filter=partition_filter,
     )
     update_schema = build_update_schema(target_pa_schema, update_cols, row_id_name)
 
@@ -308,6 +310,7 @@ def build_not_matched_insert_ds(
     target_empty: bool = False,
     snapshot_id: Optional[int] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
+    partition_filter=None,
 ):
     from pypaimon.ray.ray_paimon import read_paimon
     from pypaimon.ray.shuffle import _coerce_large_string_types
@@ -326,6 +329,7 @@ def build_not_matched_insert_ds(
         target_ds = read_paimon(
             target_identifier, catalog_options,
             projection=list(target_on), snapshot_id=snapshot_id,
+            filter=partition_filter,
         )
         target_renamed = target_ds.rename_columns(
             {c: f"t.{c}" for c in target_on}

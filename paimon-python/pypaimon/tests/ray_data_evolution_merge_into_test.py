@@ -677,6 +677,66 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['id'], [1, 2])
         self.assertEqual(out['pt'], ['a', 'b'])
 
+    def test_partition_pruning_update_and_insert(self):
+        pt_schema = pa.schema([
+            ('pt', pa.string()),
+            ('id', pa.int32()),
+            ('name', pa.string()),
+        ])
+        name = f'default.tbl_{uuid.uuid4().hex[:8]}'
+        s = Schema.from_pyarrow_schema(
+            pt_schema, partition_keys=['pt'], options=self.de_options,
+        )
+        self.catalog.create_table(name, s, False)
+
+        table = self.catalog.get_table(name)
+        wb = table.new_batch_write_builder()
+        writer = wb.new_write()
+        writer.write_arrow(pa.Table.from_pydict(
+            {
+                'pt': ['a', 'a', 'b', 'b', 'c'],
+                'id': pa.array([1, 2, 3, 4, 5], type=pa.int32()),
+                'name': ['a1', 'a2', 'b3', 'b4', 'c5'],
+            },
+            schema=pt_schema,
+        ))
+        wb.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        source = pa.Table.from_pydict(
+            {
+                'pt': ['a', 'b'],
+                'id': pa.array([1, 6], type=pa.int32()),
+                'name': ['updated_a1', 'new_b6'],
+            },
+            schema=pt_schema,
+        )
+
+        result = merge_into(
+            target=name,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['pt', 'id'],
+            when_matched=[WhenMatched(update={'name': source_col('name')})],
+            when_not_matched=[WhenNotMatched(insert='*')],
+            num_partitions=_TEST_NUM_PARTITIONS,
+        )
+
+        self.assertEqual(result['num_matched'], 1)
+        self.assertEqual(result['num_inserted'], 1)
+
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+        out = rb.new_read().to_arrow(splits).sort_by('id').to_pydict()
+        self.assertEqual(out['id'], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(
+            out['name'],
+            ['updated_a1', 'a2', 'b3', 'b4', 'c5', 'new_b6'],
+        )
+        self.assertEqual(
+            out['pt'], ['a', 'a', 'b', 'b', 'c', 'b'],
+        )
+
     @unittest.skipIf(_SKIP_CONDITION, _SKIP_REASON)
     def test_matched_update_with_condition(self):
         target = self._create_table()

@@ -18,7 +18,7 @@
 
 """MERGE INTO ... USING ... for Paimon data-evolution tables via Ray Datasets."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pyarrow as pa
@@ -53,6 +53,7 @@ class _PrepareCtx:
     update_pa_schema: pa.Schema
     full_pa_schema: pa.Schema
     catalog_options: Dict[str, str]
+    partition_filter: Optional[Any] = field(default=None)
 
 
 def merge_into(
@@ -230,6 +231,9 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
     update_pa_schema = pa.schema(
         [full_pa_schema.field(c) for c in settable_field_names]
     )
+    partition_filter = _build_partition_filter(
+        table, target_on_cols, source_on_cols, source_ds,
+    )
     ctx = _PrepareCtx(
         target_on_cols=target_on_cols,
         source_on_cols=source_on_cols,
@@ -238,6 +242,7 @@ def _prepare(target, source, catalog_options, when_matched, when_not_matched, on
         update_pa_schema=update_pa_schema,
         full_pa_schema=full_pa_schema,
         catalog_options=catalog_options,
+        partition_filter=partition_filter,
     )
     return table, source_ds, matched_specs, not_matched_specs, ctx
 
@@ -274,6 +279,7 @@ def _build_datasets(
             resolve_target_projection=_resolve_target_projection,
             snapshot_id=base_snapshot_id,
             ray_remote_args=ray_remote_args,
+            partition_filter=ctx.partition_filter,
         )
 
     if not_matched_specs:
@@ -292,6 +298,7 @@ def _build_datasets(
             snapshot_id=base_snapshot_id,
             target_empty=base_snapshot is None,
             ray_remote_args=ray_remote_args,
+            partition_filter=ctx.partition_filter,
         )
 
     return update_ds, insert_ds, update_cols_union
@@ -344,6 +351,43 @@ def _execute_and_commit(
         "num_inserted": num_inserted,
         "num_unchanged": 0,
     }
+
+
+def _build_partition_filter(table, target_on_cols, source_on_cols, source_ds):
+    if not table.partition_keys:
+        return None
+
+    partition_keys = set(table.partition_keys)
+    partition_pairs = [
+        (t_col, s_col)
+        for t_col, s_col in zip(target_on_cols, source_on_cols)
+        if t_col in partition_keys
+    ]
+    if not partition_pairs:
+        return None
+
+    import pyarrow.compute as pc
+    from pypaimon.common.predicate_builder import PredicateBuilder
+
+    predicates = []
+    builder = PredicateBuilder(table.fields)
+    for target_col, source_col in partition_pairs:
+        distinct = set()
+        for batch in source_ds.select_columns(
+            [source_col]
+        ).iter_batches():
+            distinct.update(
+                pc.unique(batch.column(source_col)).to_pylist()
+            )
+        if distinct:
+            predicates.append(
+                builder.is_in(target_col, sorted(distinct))
+            )
+
+    return (
+        PredicateBuilder.and_predicates(predicates)
+        if predicates else None
+    )
 
 
 def _normalize_on(on: OnSpec) -> Tuple[List[str], List[str]]:
