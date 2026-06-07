@@ -375,7 +375,7 @@ def _build_partition_filter(table, target_on_cols, source_on_cols, source_ds):
         distinct = set()
         for batch in source_ds.select_columns(
             [source_col]
-        ).iter_batches():
+        ).iter_batches(batch_format="pyarrow"):
             distinct.update(
                 pc.unique(batch.column(source_col)).to_pylist()
             )
