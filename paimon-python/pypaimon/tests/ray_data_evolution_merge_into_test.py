@@ -737,6 +737,118 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
             out['pt'], ['a', 'a', 'b', 'b', 'c', 'b'],
         )
 
+    def test_partition_pruning_passes_filter_to_target_read(self):
+        pt_schema = pa.schema([
+            ('pt', pa.string()),
+            ('id', pa.int32()),
+            ('name', pa.string()),
+        ])
+        name = f'default.tbl_{uuid.uuid4().hex[:8]}'
+        s = Schema.from_pyarrow_schema(
+            pt_schema, partition_keys=['pt'], options=self.de_options,
+        )
+        self.catalog.create_table(name, s, False)
+
+        table = self.catalog.get_table(name)
+        wb = table.new_batch_write_builder()
+        writer = wb.new_write()
+        writer.write_arrow(pa.Table.from_pydict(
+            {
+                'pt': ['a', 'b'],
+                'id': pa.array([1, 2], type=pa.int32()),
+                'name': ['x', 'y'],
+            },
+            schema=pt_schema,
+        ))
+        wb.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        source = pa.Table.from_pydict(
+            {
+                'pt': ['a'],
+                'id': pa.array([1], type=pa.int32()),
+                'name': ['z'],
+            },
+            schema=pt_schema,
+        )
+
+        with patch(
+            'pypaimon.ray.data_evolution_merge_join.read_paimon',
+            wraps=__import__(
+                'pypaimon.ray.ray_paimon', fromlist=['read_paimon']
+            ).read_paimon,
+        ) as mock_read:
+            merge_into(
+                target=name,
+                source=source,
+                catalog_options=self.catalog_options,
+                on=['pt', 'id'],
+                when_matched=[
+                    WhenMatched(update={'name': source_col('name')}),
+                ],
+                num_partitions=_TEST_NUM_PARTITIONS,
+            )
+            self.assertTrue(mock_read.called)
+            for call in mock_read.call_args_list:
+                filt = call.kwargs.get('filter')
+                self.assertIsNotNone(
+                    filt,
+                    "read_paimon should receive a partition filter",
+                )
+
+    def test_partition_pruning_with_null_partition_values(self):
+        pt_schema = pa.schema([
+            ('pt', pa.string()),
+            ('id', pa.int32()),
+            ('name', pa.string()),
+        ])
+        name = f'default.tbl_{uuid.uuid4().hex[:8]}'
+        s = Schema.from_pyarrow_schema(
+            pt_schema, partition_keys=['pt'], options=self.de_options,
+        )
+        self.catalog.create_table(name, s, False)
+
+        table = self.catalog.get_table(name)
+        wb = table.new_batch_write_builder()
+        writer = wb.new_write()
+        writer.write_arrow(pa.Table.from_pydict(
+            {
+                'pt': ['a', 'b'],
+                'id': pa.array([1, 2], type=pa.int32()),
+                'name': ['x', 'y'],
+            },
+            schema=pt_schema,
+        ))
+        wb.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        source = pa.Table.from_pydict(
+            {
+                'pt': ['a', None],
+                'id': pa.array([1, 3], type=pa.int32()),
+                'name': ['updated', 'new'],
+            },
+            schema=pt_schema,
+        )
+
+        result = merge_into(
+            target=name,
+            source=source,
+            catalog_options=self.catalog_options,
+            on=['pt', 'id'],
+            when_matched=[
+                WhenMatched(update={'name': source_col('name')}),
+            ],
+            when_not_matched=[WhenNotMatched(insert='*')],
+            num_partitions=_TEST_NUM_PARTITIONS,
+        )
+
+        self.assertEqual(result['num_matched'], 1)
+        rb = table.new_read_builder()
+        splits = rb.new_scan().plan().splits()
+        out = rb.new_read().to_arrow(splits).sort_by('id').to_pydict()
+        self.assertEqual(out['name'][0], 'updated')
+
     @unittest.skipIf(_SKIP_CONDITION, _SKIP_REASON)
     def test_matched_update_with_condition(self):
         target = self._create_table()

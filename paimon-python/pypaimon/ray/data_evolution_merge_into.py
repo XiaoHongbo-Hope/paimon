@@ -353,6 +353,9 @@ def _execute_and_commit(
     }
 
 
+_PARTITION_PRUNING_MAX_VALUES = 1024
+
+
 def _build_partition_filter(table, target_on_cols, source_on_cols, source_ds):
     if not table.partition_keys:
         return None
@@ -373,16 +376,21 @@ def _build_partition_filter(table, target_on_cols, source_on_cols, source_ds):
     builder = PredicateBuilder(table.fields)
     for target_col, source_col in partition_pairs:
         distinct = set()
+        exceeded = False
         for batch in source_ds.select_columns(
             [source_col]
         ).iter_batches(batch_format="pyarrow"):
             distinct.update(
                 pc.unique(batch.column(source_col)).to_pylist()
             )
-        if distinct:
-            predicates.append(
-                builder.is_in(target_col, sorted(distinct))
-            )
+            if len(distinct) > _PARTITION_PRUNING_MAX_VALUES:
+                exceeded = True
+                break
+        if exceeded:
+            continue
+        values = sorted(v for v in distinct if v is not None)
+        if values:
+            predicates.append(builder.is_in(target_col, values))
 
     return (
         PredicateBuilder.and_predicates(predicates)
