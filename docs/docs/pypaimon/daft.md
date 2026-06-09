@@ -26,11 +26,18 @@ under the License.
 # Daft
 
 [Daft](https://www.daft.io/) is a distributed DataFrame engine for Python.
+See also the [Daft Paimon connector documentation](https://docs.daft.ai/en/stable/connectors/paimon/).
 
 This requires `daft` to be installed:
 
 ```bash
-pip install pypaimon[daft]
+pip install 'pypaimon[daft]'
+```
+
+To execute Daft plans on Ray, install both extras:
+
+```bash
+pip install 'pypaimon[daft,ray]'
 ```
 
 `pypaimon.daft` exposes a top-level `read_paimon` / `write_paimon` API that
@@ -165,11 +172,89 @@ write_paimon(
 )
 ```
 
+For unpartitioned tables, overwrite replaces the table contents. For
+partitioned tables, overwrite follows Paimon's dynamic partition overwrite
+semantics by default: only partitions present in the input DataFrame are
+replaced, and existing partitions not present in the input are kept.
+
 **Parameters:**
 - `df`: the Daft DataFrame to write.
 - `table_identifier`: full table name, e.g. `"db_name.table_name"`.
 - `catalog_options`: kwargs forwarded to `CatalogFactory.create()`.
 - `mode`: write mode — `"append"` (default) or `"overwrite"`.
+
+## Running Daft on Ray
+
+`pypaimon.daft` works with Daft's Ray runner. Configure the runner before the
+first Daft execution in the process:
+
+```python
+import daft
+import ray
+from daft import runners
+from pypaimon.daft import read_paimon, write_paimon
+
+ray.init()  # use address="auto" to connect to an existing Ray cluster
+runners.set_runner_ray()
+
+df = daft.from_pydict({
+    "id": [1, 2, 3],
+    "name": ["alice", "bob", "charlie"],
+    "dt": ["2024-01-01", "2024-01-01", "2024-01-02"],
+})
+
+write_paimon(
+    df,
+    "database_name.table_name",
+    catalog_options={"warehouse": "/path/to/warehouse"},
+)
+
+result = (
+    read_paimon(
+        "database_name.table_name",
+        catalog_options={"warehouse": "/path/to/warehouse"},
+    )
+    .where(daft.col("dt") == "2024-01-01")
+    .select("id", "name")
+)
+
+result.show()
+```
+
+Use `pypaimon.daft` when your application is written with Daft DataFrames and
+you want Daft to schedule the execution on Ray. Use `pypaimon.ray` instead when
+your application directly reads or writes Ray Datasets.
+
+## Reading Blob Columns
+
+Tables with BLOB columns (see [Blob Storage](./blob)) can be read with Daft.
+Blob columns are returned as `daft.File` references — the actual bytes are
+**not** loaded until you explicitly read them. Use `daft.func` to process blob
+data in parallel:
+
+```python
+import daft
+from pypaimon.daft import read_paimon
+
+df = read_paimon(
+    "my_db.image_table",
+    catalog_options={"warehouse": "/path/to/warehouse"},
+)
+
+# Blob columns appear as File references (lazy, no I/O yet).
+# Use @daft.func to read and process blob data in parallel.
+@daft.func
+def image_size(file: daft.File) -> int:
+    with file.open() as f:
+        return len(f.read())
+
+result = df.with_column("size", image_size(df["image"]))
+result.show()
+```
+
+When running on Ray, the UDF calls are distributed across Ray workers
+automatically — each worker processes its partition in parallel, giving you
+batch-level concurrency without any extra code.
 
 ## Catalog Abstraction
 
