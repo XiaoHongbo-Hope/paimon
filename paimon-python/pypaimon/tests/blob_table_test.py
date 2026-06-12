@@ -1305,6 +1305,72 @@ class DedicatedFormatWriterTest(unittest.TestCase):
             5: b'blob-5',
         })
 
+    def test_update_blob_and_normal_columns(self):
+        from pypaimon import Schema
+
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('value', pa.float64()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true',
+            }
+        )
+        self.catalog.create_table('test_db.blob_update_mixed', schema, False)
+        table = self.catalog.get_table('test_db.blob_update_mixed')
+
+        initial = pa.Table.from_pydict({
+            'id': [1, 2, 3],
+            'name': ['a', 'b', 'c'],
+            'value': [1.0, 2.0, 3.0],
+            'blob_data': [b'blob-1', b'blob-2', b'blob-3'],
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(initial)
+        write_builder.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        update_builder = table.new_batch_write_builder()
+        table_update = update_builder.new_update().with_update_type(
+            ['name', 'value', 'blob_data'])
+        update_data = pa.Table.from_pydict({
+            '_ROW_ID': pa.array([1], type=pa.int64()),
+            'name': ['b_updated'],
+            'value': [20.0],
+            'blob_data': pa.array([b'updated-blob-2'], type=pa.large_binary()),
+        })
+        update_messages = table_update.update_by_arrow_with_row_id(update_data)
+
+        update_files = [f for msg in update_messages for f in msg.new_files]
+        blob_files = [f for f in update_files if f.file_name.endswith('.blob')]
+        normal_files = [f for f in update_files if not f.file_name.endswith('.blob')]
+
+        for bf in blob_files:
+            self.assertEqual(bf.write_cols, ['blob_data'])
+        for nf in normal_files:
+            self.assertNotIn('blob_data', nf.write_cols)
+            self.assertIn('name', nf.write_cols)
+            self.assertIn('value', nf.write_cols)
+
+        update_builder.new_commit().commit(update_messages)
+
+        read_builder = table.new_read_builder()
+        result = read_builder.new_read().to_arrow(read_builder.new_scan().plan().splits())
+        by_id = {row['id']: row for row in result.to_pylist()}
+        self.assertEqual(by_id[2]['name'], 'b_updated')
+        self.assertEqual(by_id[2]['value'], 20.0)
+        self.assertEqual(by_id[2]['blob_data'], b'updated-blob-2')
+        self.assertEqual(by_id[1]['blob_data'], b'blob-1')
+        self.assertEqual(by_id[3]['blob_data'], b'blob-3')
+
     def test_blob_write_read_partition(self):
         """Test complete end-to-end blob functionality: write blob data and read it back to verify correctness."""
         from pypaimon import Schema
