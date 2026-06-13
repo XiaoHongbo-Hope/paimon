@@ -1059,6 +1059,141 @@ class DedicatedFormatWriterTest(unittest.TestCase):
             [b'first_blob', None, b'third_blob', None, b'fifth_blob'],
         )
 
+    def test_update_blob_column_rejected(self):
+        from pypaimon import Schema
+
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true'
+            }
+        )
+        self.catalog.create_table('test_db.blob_update_rejected', schema, False)
+        table = self.catalog.get_table('test_db.blob_update_rejected')
+
+        initial = pa.Table.from_pydict({
+            'id': [1, 2, 3],
+            'name': ['a', 'b', 'c'],
+            'blob_data': [b'blob-1', b'blob-2', b'blob-3'],
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(initial)
+        write_builder.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        update_builder = table.new_batch_write_builder()
+        table_update = update_builder.new_update().with_update_type(['blob_data'])
+        update_data = pa.Table.from_pydict({
+            '_ROW_ID': pa.array([1], type=pa.int64()),
+            'blob_data': pa.array([b'updated-blob-2'], type=pa.large_binary()),
+        })
+        with self.assertRaises(ValueError) as ctx:
+            table_update.update_by_arrow_with_row_id(update_data)
+        self.assertIn('blob', str(ctx.exception).lower())
+
+    def test_update_blob_and_normal_columns_filters_blob(self):
+        from pypaimon import Schema
+
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true'
+            }
+        )
+        self.catalog.create_table('test_db.blob_update_mixed_filtered', schema, False)
+        table = self.catalog.get_table('test_db.blob_update_mixed_filtered')
+
+        initial = pa.Table.from_pydict({
+            'id': [1, 2, 3],
+            'name': ['a', 'b', 'c'],
+            'blob_data': [b'blob-1', b'blob-2', b'blob-3'],
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(initial)
+        write_builder.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        update_builder = table.new_batch_write_builder()
+        table_update = update_builder.new_update().with_update_type(['name', 'blob_data'])
+        update_data = pa.Table.from_pydict({
+            '_ROW_ID': pa.array([1], type=pa.int64()),
+            'name': ['b_updated'],
+            'blob_data': pa.array([b'updated-blob'], type=pa.large_binary()),
+        })
+        msgs = table_update.update_by_arrow_with_row_id(update_data)
+        update_builder.new_commit().commit(msgs)
+
+        read_builder = table.new_read_builder()
+        result = read_builder.new_read().to_arrow(read_builder.new_scan().plan().splits())
+        by_id = {row['id']: row for row in result.to_pylist()}
+        self.assertEqual(by_id[2]['name'], 'b_updated')
+        self.assertEqual(by_id[2]['blob_data'], b'blob-2')
+
+    def test_update_normal_columns_on_blob_table(self):
+        from pypaimon import Schema
+
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true'
+            }
+        )
+        self.catalog.create_table('test_db.blob_update_normal_ok', schema, False)
+        table = self.catalog.get_table('test_db.blob_update_normal_ok')
+
+        initial = pa.Table.from_pydict({
+            'id': [1, 2, 3],
+            'name': ['a', 'b', 'c'],
+            'blob_data': [b'blob-1', b'blob-2', b'blob-3'],
+        }, schema=pa_schema)
+
+        write_builder = table.new_batch_write_builder()
+        writer = write_builder.new_write()
+        writer.write_arrow(initial)
+        write_builder.new_commit().commit(writer.prepare_commit())
+        writer.close()
+
+        update_builder = table.new_batch_write_builder()
+        table_update = update_builder.new_update().with_update_type(['name'])
+        update_data = pa.Table.from_pydict({
+            '_ROW_ID': pa.array([1], type=pa.int64()),
+            'name': ['b_updated'],
+        })
+        msgs = table_update.update_by_arrow_with_row_id(update_data)
+        update_builder.new_commit().commit(msgs)
+
+        read_builder = table.new_read_builder()
+        result = read_builder.new_read().to_arrow(read_builder.new_scan().plan().splits())
+        by_id = {row['id']: row for row in result.to_pylist()}
+        self.assertEqual(by_id[2]['name'], 'b_updated')
+        self.assertEqual(by_id[2]['blob_data'], b'blob-2')
+
+    @unittest.skip("Blob column updates banned; re-enable when implementation is hardened")
     def test_update_blob_column(self):
         from pypaimon import Schema
         from pypaimon.read.reader.format_blob_reader import FormatBlobReader
@@ -1135,6 +1270,7 @@ class DedicatedFormatWriterTest(unittest.TestCase):
             3: b'blob-3',
         })
 
+    @unittest.skip("Blob column updates banned; re-enable when implementation is hardened")
     def test_update_blob_column_with_rolling_files(self):
         from pypaimon import Schema
 
@@ -1210,6 +1346,7 @@ class DedicatedFormatWriterTest(unittest.TestCase):
             5: payload + b'4',
         })
 
+    @unittest.skip("Blob column updates banned; re-enable when implementation is hardened")
     def test_update_partial_blob_column_with_rolling_files(self):
         from pypaimon import Schema
         from pypaimon.read.reader.format_blob_reader import FormatBlobReader
@@ -1304,6 +1441,57 @@ class DedicatedFormatWriterTest(unittest.TestCase):
             4: payload + b'4',
             5: b'blob-5',
         })
+
+    def test_upsert_normal_columns_on_blob_table(self):
+        from pypaimon import Schema
+
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('blob_data', pa.large_binary()),
+        ])
+
+        schema = Schema.from_pyarrow_schema(
+            pa_schema,
+            options={
+                'row-tracking.enabled': 'true',
+                'data-evolution.enabled': 'true',
+            }
+        )
+        self.catalog.create_table('test_db.blob_upsert_normal', schema, False)
+        table = self.catalog.get_table('test_db.blob_upsert_normal')
+
+        initial = pa.Table.from_pydict({
+            'id': [1, 2, 3],
+            'name': ['a', 'b', 'c'],
+            'blob_data': [b'blob-1', b'blob-2', b'blob-3'],
+        }, schema=pa_schema)
+
+        wb = table.new_batch_write_builder()
+        w = wb.new_write()
+        w.write_arrow(initial)
+        wb.new_commit().commit(w.prepare_commit())
+        w.close()
+
+        upsert_data = pa.Table.from_pydict({
+            'id': [2, 4],
+            'name': ['b_updated', 'd_new'],
+        })
+
+        ub = table.new_batch_write_builder()
+        tu = ub.new_update().with_update_type(['name'])
+        msgs = tu.upsert_by_arrow_with_key(upsert_data, upsert_keys=['id'])
+        ub.new_commit().commit(msgs)
+
+        table = self.catalog.get_table('test_db.blob_upsert_normal')
+        result = table.new_read_builder().new_read().to_arrow(
+            table.new_read_builder().new_scan().plan().splits())
+        by_id = {row['id']: row for row in result.to_pylist()}
+        self.assertEqual(by_id[2]['name'], 'b_updated')
+        self.assertEqual(by_id[2]['blob_data'], b'blob-2')
+        self.assertEqual(by_id[1]['blob_data'], b'blob-1')
+        self.assertEqual(by_id[4]['name'], 'd_new')
+        self.assertIsNone(by_id[4]['blob_data'])
 
     def test_blob_write_read_partition(self):
         """Test complete end-to-end blob functionality: write blob data and read it back to verify correctness."""
