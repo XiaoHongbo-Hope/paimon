@@ -30,6 +30,8 @@ from pypaimon.utils.range import Range
 
 _MIN_BATCH_SIZE_TO_REFILL = 1024
 
+_MIN_BATCH_SIZE_TO_REFILL = 1024
+
 
 class ConcatBatchReader(RecordBatchReader):
 
