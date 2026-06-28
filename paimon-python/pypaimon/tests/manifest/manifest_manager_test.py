@@ -346,7 +346,7 @@ class ManifestFileManagerTest(_ManifestManagerSetup):
 
         wb = table.new_batch_write_builder()
         w = wb.new_write()
-        for pt in range(200):
+        for pt in range(800):
             rows = [{'pt': f'p{pt}', 'pk': i, 'val': f'v{i}'} for i in range(5)]
             w.write_arrow(pa.Table.from_pylist(rows, schema=pa_schema))
         wb.new_commit().commit(w.prepare_commit())
@@ -372,7 +372,7 @@ class ManifestFileManagerTest(_ManifestManagerSetup):
             entries = mfm.read(meta.file_name)
             self.assertEqual(len(entries), meta.num_added_files + meta.num_deleted_files)
             all_entries.extend(entries)
-        self.assertEqual(len(all_entries), 200)
+        self.assertEqual(len(all_entries), 800)
 
     def test_rolling_write_with_skewed_entries(self):
         target_size = 16 * 1024
