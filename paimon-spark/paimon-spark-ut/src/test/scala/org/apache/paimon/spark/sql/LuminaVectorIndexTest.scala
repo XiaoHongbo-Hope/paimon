@@ -123,26 +123,28 @@ class LuminaVectorIndexTest extends PaimonSparkTestBase {
     }
   }
 
-  test("batch_vector_search - distributed across index shards") {
+  test("batch_vector_search - distributed across index shards and raw splits") {
     withTable("T") {
       // Small shard size + small thread-num so the index splits exceed thread-num * 2 and the
       // distributed read (SparkBatchVectorReadImpl) actually fans out instead of running locally.
+      // search-mode = full enables searching un-indexed rows via the raw path.
       spark.sql("""
                   |CREATE TABLE T (id INT, v ARRAY<FLOAT>)
                   |TBLPROPERTIES (
                   |  'bucket' = '-1',
                   |  'global-index.row-count-per-shard' = '10',
                   |  'global-index.thread-num' = '2',
+                  |  'global-index.search-mode' = 'full',
                   |  'vector-search.distribute.enabled' = 'true',
                   |  'row-tracking.enabled' = 'true',
                   |  'data-evolution.enabled' = 'true')
                   |""".stripMargin)
 
-      val values = (0 until 100)
+      val indexed = (0 until 100)
         .map(
           i => s"($i, array(cast($i as float), cast(${i + 1} as float), cast(${i + 2} as float)))")
         .mkString(",")
-      spark.sql(s"INSERT INTO T VALUES $values")
+      spark.sql(s"INSERT INTO T VALUES $indexed")
 
       val created = spark
         .sql(
@@ -151,7 +153,7 @@ class LuminaVectorIndexTest extends PaimonSparkTestBase {
         .head
       assert(created.getBoolean(0))
 
-      // Distribution only kicks in when splits >= thread-num * 2 (= 4); assert we have enough shards.
+      // Index distribution only kicks in when splits >= thread-num * 2 (= 4).
       val shardCount = loadTable("T")
         .store()
         .newIndexFileHandler()
@@ -160,11 +162,19 @@ class LuminaVectorIndexTest extends PaimonSparkTestBase {
         .count(_.indexFile().indexType() == indexType)
       assert(shardCount >= 4, s"need >= 4 shards to exercise the distributed path, got $shardCount")
 
+      // Rows written after the index build are un-indexed and searched via the raw path. 100 raw
+      // rows >= thread-num * 2, so the raw search distributes too. Query 1 targets this region.
+      val raw = (100 until 200)
+        .map(
+          i => s"($i, array(cast($i as float), cast(${i + 1} as float), cast(${i + 2} as float)))")
+        .mkString(",")
+      spark.sql(s"INSERT INTO T VALUES $raw")
+
       val batch = spark
         .sql(
           """
             |SELECT * FROM batch_vector_search(
-            |  'T', 'v', array(array(10.0f, 11.0f, 12.0f), array(80.0f, 81.0f, 82.0f)), 5)
+            |  'T', 'v', array(array(10.0f, 11.0f, 12.0f), array(150.0f, 151.0f, 152.0f)), 5)
             |""".stripMargin)
         .collect()
       assert(batch.length == 10)
@@ -177,10 +187,12 @@ class LuminaVectorIndexTest extends PaimonSparkTestBase {
         .map(_.getInt(0))
         .toSet
       val single1 = spark
-        .sql("SELECT id FROM vector_search('T', 'v', array(80.0f, 81.0f, 82.0f), 5)")
+        .sql("SELECT id FROM vector_search('T', 'v', array(150.0f, 151.0f, 152.0f), 5)")
         .collect()
         .map(_.getInt(0))
         .toSet
+      // Query 1 must surface un-indexed ids, proving the (distributed) raw search ran.
+      assert(single1.exists(_ >= 100), s"raw search should surface un-indexed rows, got $single1")
       val batch0 = batch.filter(_.getInt(0) == 0).map(_.getInt(1)).toSet
       val batch1 = batch.filter(_.getInt(0) == 1).map(_.getInt(1)).toSet
       assert(batch0 == single0)
