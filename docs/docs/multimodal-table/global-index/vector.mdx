@@ -128,7 +128,18 @@ value for latency-sensitive queries.
 ```sql
 -- Search for top-5 nearest neighbors
 SELECT * FROM vector_search('my_table', 'embedding', array(1.0f, 2.0f, 3.0f), 5);
+
+-- Search many query vectors in one call. The result has an extra leading `query_index`
+-- column: rows with query_index = i are the top-5 for the i-th query vector.
+SELECT * FROM batch_vector_search(
+    'my_table', 'embedding',
+    array(array(1.0f, 2.0f, 3.0f), array(3.0f, 2.0f, 1.0f)), 5);
 ```
+
+Set `vector-search.distribute.enabled = true` on the table to evaluate the index shards on the
+Spark cluster instead of the driver; the fan-out parallelism reuses `global-index.thread-num`. The
+search only distributes when there are enough index shards (more than `2 * global-index.thread-num`),
+otherwise it falls back to a local search.
 
 </TabItem>
 

@@ -33,7 +33,6 @@ import org.apache.paimon.table.source.RawVectorSearchSplit;
 import org.apache.paimon.table.source.VectorReadImpl;
 import org.apache.paimon.table.source.VectorScan;
 import org.apache.paimon.types.DataField;
-import org.apache.paimon.utils.InstantiationUtil;
 import org.apache.paimon.utils.Range;
 import org.apache.paimon.utils.RoaringNavigableMap64;
 import org.apache.paimon.utils.SerializableFunction;
@@ -104,23 +103,22 @@ public class SparkVectorReadImpl extends VectorReadImpl {
 
         List<RoaringNavigableMap64> preFilters = preFilters(splits);
         String indexType = splits.get(0).vectorIndexFiles().get(0).indexType();
-        List<SerializedSplit> serializedSplits = new ArrayList<>(splits.size());
+        List<SparkVectorReads.SerializedSplit> serializedSplits = new ArrayList<>(splits.size());
         for (int i = 0; i < splits.size(); i++) {
-            try {
-                IndexVectorSearchSplit split = splits.get(i);
-                RoaringNavigableMap64 preFilter = preFilters.isEmpty() ? null : preFilters.get(i);
-                serializedSplits.add(
-                        new SerializedSplit(
-                                InstantiationUtil.serializeObject(split),
-                                preFilter == null
-                                        ? null
-                                        : InstantiationUtil.serializeObject(preFilter)));
-            } catch (IOException e) {
-                throw new RuntimeException("Failed to serialize VectorSearchSplit", e);
-            }
+            IndexVectorSearchSplit split = splits.get(i);
+            RoaringNavigableMap64 preFilter = preFilters.isEmpty() ? null : preFilters.get(i);
+            serializedSplits.add(
+                    new SparkVectorReads.SerializedSplit(
+                            SparkVectorReads.serialize(
+                                    split, "Failed to serialize VectorSearchSplit"),
+                            preFilter == null
+                                    ? null
+                                    : SparkVectorReads.serialize(
+                                            preFilter, "Failed to serialize vector pre-filter")));
         }
-        List<List<SerializedSplit>> splitGroups = splitGroups(serializedSplits, parallelism);
-        SerializableFunction<List<SerializedSplit>, byte[]> task =
+        List<List<SparkVectorReads.SerializedSplit>> splitGroups =
+                SparkVectorReads.evenGroups(serializedSplits, parallelism);
+        SerializableFunction<List<SparkVectorReads.SerializedSplit>, byte[]> task =
                 group -> {
                     GlobalIndexer taskGlobalIndexer =
                             GlobalIndexerFactoryUtils.load(indexType)
@@ -133,8 +131,9 @@ public class SparkVectorReadImpl extends VectorReadImpl {
                                     Math.min(parallelism, group.size()));
                     List<CompletableFuture<Optional<ScoredGlobalIndexResult>>> futures =
                             new ArrayList<>(group.size());
-                    for (SerializedSplit serializedSplit : group) {
-                        IndexVectorSearchSplit split = deserializeSplit(serializedSplit.split);
+                    for (SparkVectorReads.SerializedSplit serializedSplit : group) {
+                        IndexVectorSearchSplit split =
+                                SparkVectorReads.deserializeSplit(serializedSplit.split);
                         futures.add(
                                 eval(
                                         taskGlobalIndexer,
@@ -143,7 +142,8 @@ public class SparkVectorReadImpl extends VectorReadImpl {
                                         split.rowRangeEnd(),
                                         split.vectorIndexFiles(),
                                         vector,
-                                        deserializePreFilter(serializedSplit.preFilter),
+                                        SparkVectorReads.deserializePreFilter(
+                                                serializedSplit.preFilter),
                                         executor));
                     }
                     CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
@@ -188,30 +188,34 @@ public class SparkVectorReadImpl extends VectorReadImpl {
 
         String metric = rawSearchMetric(rawSearchIndexer(splits, globalIndexer));
         List<List<Range>> rangeGroups = rangeGroups(rawRowRanges, parallelism);
-        List<SerializedSplit> serializedSplits = new ArrayList<>(rangeGroups.size());
+        List<SparkVectorReads.SerializedSplit> serializedSplits =
+                new ArrayList<>(rangeGroups.size());
         for (List<Range> rangeGroup : rangeGroups) {
-            try {
-                serializedSplits.add(
-                        new SerializedSplit(
-                                InstantiationUtil.serializeObject(rangeGroup),
-                                preFilter == null
-                                        ? null
-                                        : InstantiationUtil.serializeObject(preFilter)));
-            } catch (IOException e) {
-                throw new RuntimeException("Failed to serialize raw vector row ranges", e);
-            }
+            serializedSplits.add(
+                    new SparkVectorReads.SerializedSplit(
+                            SparkVectorReads.serialize(
+                                    rangeGroup, "Failed to serialize raw vector row ranges"),
+                            preFilter == null
+                                    ? null
+                                    : SparkVectorReads.serialize(
+                                            preFilter, "Failed to serialize vector pre-filter")));
         }
-        List<List<SerializedSplit>> splitGroups = splitGroups(serializedSplits, parallelism);
+        List<List<SparkVectorReads.SerializedSplit>> splitGroups =
+                SparkVectorReads.evenGroups(serializedSplits, parallelism);
 
-        SerializableFunction<List<SerializedSplit>, byte[]> task =
+        SerializableFunction<List<SparkVectorReads.SerializedSplit>, byte[]> task =
                 group -> {
                     ScoredGlobalIndexResult result = ScoredGlobalIndexResult.createEmpty();
-                    for (SerializedSplit serializedSplit : group) {
-                        List<Range> rowRanges = deserializeRanges(serializedSplit.split);
+                    for (SparkVectorReads.SerializedSplit serializedSplit : group) {
+                        List<Range> rowRanges =
+                                SparkVectorReads.deserialize(
+                                        serializedSplit.split,
+                                        "Failed to deserialize raw vector row ranges");
                         ScoredGlobalIndexResult splitResult =
                                 readRawSearch(
                                         rowRanges,
-                                        deserializePreFilter(serializedSplit.preFilter),
+                                        SparkVectorReads.deserializePreFilter(
+                                                serializedSplit.preFilter),
                                         metric,
                                         vector);
                         result = result.or(splitResult);
@@ -243,50 +247,6 @@ public class SparkVectorReadImpl extends VectorReadImpl {
     protected <I, O> List<O> mapInSpark(
             List<I> data, SerializableFunction<I, O> func, int parallelism) {
         return createEngineContext().map(data, func, parallelism);
-    }
-
-    private IndexVectorSearchSplit deserializeSplit(byte[] bytes) {
-        try {
-            return InstantiationUtil.deserializeObject(
-                    bytes, Thread.currentThread().getContextClassLoader());
-        } catch (IOException | ClassNotFoundException e) {
-            throw new RuntimeException("Failed to deserialize VectorSearchSplit", e);
-        }
-    }
-
-    private List<Range> deserializeRanges(byte[] bytes) {
-        try {
-            return InstantiationUtil.deserializeObject(
-                    bytes, Thread.currentThread().getContextClassLoader());
-        } catch (IOException | ClassNotFoundException e) {
-            throw new RuntimeException("Failed to deserialize raw vector row ranges", e);
-        }
-    }
-
-    @Nullable
-    private RoaringNavigableMap64 deserializePreFilter(@Nullable byte[] bytes) {
-        if (bytes == null) {
-            return null;
-        }
-        try {
-            return InstantiationUtil.deserializeObject(
-                    bytes, Thread.currentThread().getContextClassLoader());
-        } catch (IOException | ClassNotFoundException e) {
-            throw new RuntimeException("Failed to deserialize vector pre-filter", e);
-        }
-    }
-
-    private List<List<SerializedSplit>> splitGroups(
-            List<SerializedSplit> serializedSplits, int parallelism) {
-        List<List<SerializedSplit>> groups = new ArrayList<>(parallelism);
-        int groupSize = (serializedSplits.size() + parallelism - 1) / parallelism;
-        for (int start = 0; start < serializedSplits.size(); start += groupSize) {
-            groups.add(
-                    new ArrayList<>(
-                            serializedSplits.subList(
-                                    start, Math.min(start + groupSize, serializedSplits.size()))));
-        }
-        return groups;
     }
 
     private ScoredGlobalIndexResult mergeRemoteResults(List<byte[]> remoteResults) {
@@ -344,18 +304,5 @@ public class SparkVectorReadImpl extends VectorReadImpl {
             rowCount += count;
         }
         return rowCount;
-    }
-
-    private static class SerializedSplit implements java.io.Serializable {
-
-        private static final long serialVersionUID = 1L;
-
-        private final byte[] split;
-        @Nullable private final byte[] preFilter;
-
-        private SerializedSplit(byte[] split, @Nullable byte[] preFilter) {
-            this.split = split;
-            this.preFilter = preFilter;
-        }
     }
 }
