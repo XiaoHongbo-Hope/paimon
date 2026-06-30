@@ -123,6 +123,71 @@ class LuminaVectorIndexTest extends PaimonSparkTestBase {
     }
   }
 
+  test("batch_vector_search - distributed across index shards") {
+    withTable("T") {
+      // Small shard size + small thread-num so the index splits exceed thread-num * 2 and the
+      // distributed read (SparkBatchVectorReadImpl) actually fans out instead of running locally.
+      spark.sql("""
+                  |CREATE TABLE T (id INT, v ARRAY<FLOAT>)
+                  |TBLPROPERTIES (
+                  |  'bucket' = '-1',
+                  |  'global-index.row-count-per-shard' = '10',
+                  |  'global-index.thread-num' = '2',
+                  |  'vector-search.distribute.enabled' = 'true',
+                  |  'row-tracking.enabled' = 'true',
+                  |  'data-evolution.enabled' = 'true')
+                  |""".stripMargin)
+
+      val values = (0 until 100)
+        .map(
+          i => s"($i, array(cast($i as float), cast(${i + 1} as float), cast(${i + 2} as float)))")
+        .mkString(",")
+      spark.sql(s"INSERT INTO T VALUES $values")
+
+      val created = spark
+        .sql(
+          s"CALL sys.create_global_index(table => 'test.T', index_column => 'v', index_type => '$indexType', options => '$defaultOptions')")
+        .collect()
+        .head
+      assert(created.getBoolean(0))
+
+      // Distribution only kicks in when splits >= thread-num * 2 (= 4); assert we have enough shards.
+      val shardCount = loadTable("T")
+        .store()
+        .newIndexFileHandler()
+        .scanEntries()
+        .asScala
+        .count(_.indexFile().indexType() == indexType)
+      assert(shardCount >= 4, s"need >= 4 shards to exercise the distributed path, got $shardCount")
+
+      val batch = spark
+        .sql(
+          """
+            |SELECT * FROM batch_vector_search(
+            |  'T', 'v', array(array(10.0f, 11.0f, 12.0f), array(80.0f, 81.0f, 82.0f)), 5)
+            |""".stripMargin)
+        .collect()
+      assert(batch.length == 10)
+      assert(batch.count(_.getInt(0) == 0) == 5)
+      assert(batch.count(_.getInt(0) == 1) == 5)
+
+      val single0 = spark
+        .sql("SELECT id FROM vector_search('T', 'v', array(10.0f, 11.0f, 12.0f), 5)")
+        .collect()
+        .map(_.getInt(0))
+        .toSet
+      val single1 = spark
+        .sql("SELECT id FROM vector_search('T', 'v', array(80.0f, 81.0f, 82.0f), 5)")
+        .collect()
+        .map(_.getInt(0))
+        .toSet
+      val batch0 = batch.filter(_.getInt(0) == 0).map(_.getInt(1)).toSet
+      val batch1 = batch.filter(_.getInt(0) == 1).map(_.getInt(1)).toSet
+      assert(batch0 == single0)
+      assert(batch1 == single1)
+    }
+  }
+
   test("create lumina vector index - legacy index type") {
     withTable("T") {
       spark.sql("""
