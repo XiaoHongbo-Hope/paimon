@@ -87,8 +87,12 @@ trait BaseScan extends Scan with SupportsReportStatistics with Logging {
    */
   protected def leadingSyntheticColumns: Seq[StructField] = Seq.empty
 
-  /** Pruned read RowType, with variant fields rewritten if variant pushdown was accepted. */
-  private[paimon] val (readTableRowType, metadataFields) = {
+  /**
+   * Pruned read RowType, with variant fields rewritten if variant pushdown was accepted. Lazy so
+   * [[leadingSyntheticColumns]] is evaluated after construction (e.g. batch_vector_search injects
+   * its state post-construction), not during the trait initializer.
+   */
+  private[paimon] lazy val (readTableRowType, metadataFields) = {
     val syntheticNames = leadingSyntheticColumns.map(_.name).toSet
     val nonSyntheticFields = requiredSchema.fields.filterNot(f => syntheticNames.contains(f.name))
     nonSyntheticFields.foreach(f => checkMetadataColumn(f.name))
