@@ -32,7 +32,7 @@ import org.apache.paimon.types.RowType
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.read.{Batch, Scan, Statistics, SupportsReportStatistics}
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StructField, StructType}
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
@@ -80,11 +80,20 @@ trait BaseScan extends Scan with SupportsReportStatistics with Logging {
     }
   }
 
+  /**
+   * Leading synthetic output columns that are not stored in data files and are injected by the
+   * scan (e.g. `query_index` for batch_vector_search). They are excluded from the Paimon read and
+   * the table/metadata column partitioning, and prepended back in [[readSchema]].
+   */
+  protected def leadingSyntheticColumns: Seq[StructField] = Seq.empty
+
   /** Pruned read RowType, with variant fields rewritten if variant pushdown was accepted. */
   private[paimon] val (readTableRowType, metadataFields) = {
-    requiredSchema.fields.foreach(f => checkMetadataColumn(f.name))
+    val syntheticNames = leadingSyntheticColumns.map(_.name).toSet
+    val nonSyntheticFields = requiredSchema.fields.filterNot(f => syntheticNames.contains(f.name))
+    nonSyntheticFields.foreach(f => checkMetadataColumn(f.name))
     val (_requiredTableFields, _metadataFields) =
-      requiredSchema.fields.partition(field => tableRowType.containsField(field.name))
+      nonSyntheticFields.partition(field => tableRowType.containsField(field.name))
     val pruned =
       SparkTypeUtils.prunePaimonRowType(StructType(_requiredTableFields), tableRowType)
     val withVariants =
@@ -125,8 +134,11 @@ trait BaseScan extends Scan with SupportsReportStatistics with Logging {
   }
 
   override def readSchema(): StructType = {
+    val syntheticPresent =
+      leadingSyntheticColumns.filter(c => requiredSchema.fieldNames.contains(c.name))
     val _readSchema = StructType(
-      SparkTypeUtils.fromPaimonRowType(readTableRowType).fields ++ metadataFields)
+      syntheticPresent ++
+        SparkTypeUtils.fromPaimonRowType(readTableRowType).fields ++ metadataFields)
     if (!_readSchema.equals(requiredSchema)) {
       logInfo(
         s"Actual readSchema: ${_readSchema} is not equal to spark pushed requiredSchema: $requiredSchema")
@@ -134,10 +146,16 @@ trait BaseScan extends Scan with SupportsReportStatistics with Logging {
     _readSchema
   }
 
+  /**
+   * Input partitions fed to [[PaimonBatch]]. Defaults to [[inputPartitions]]; overridden by scans
+   * that produce tagged partitions (e.g. batch_vector_search emits per-query partitions).
+   */
+  protected def toBatchInputPartitions: Seq[PaimonInputPartition] = inputPartitions
+
   override def toBatch: Batch = {
     val metadataColumns = metadataFields.map(
       field => PaimonMetadataColumn.get(field.name, SparkTypeUtils.toSparkPartitionType(table)))
-    PaimonBatch(inputPartitions, readBuilder, coreOptions.blobAsDescriptor(), metadataColumns)
+    PaimonBatch(toBatchInputPartitions, readBuilder, coreOptions.blobAsDescriptor(), metadataColumns)
   }
 
   def estimateStatistics: Statistics = {

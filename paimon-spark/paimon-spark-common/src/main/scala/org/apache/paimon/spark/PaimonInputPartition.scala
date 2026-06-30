@@ -36,6 +36,14 @@ trait PaimonInputPartition extends InputPartition {
 }
 
 case class SimplePaimonInputPartition(splits: Seq[Split]) extends PaimonInputPartition
+
+/**
+ * Input partition for batch_vector_search. All rows produced from these splits belong to query
+ * vector [[queryIndex]]; the reader prepends [[queryIndex]] as the leading `query_index` column.
+ */
+case class PaimonQueryIndexedInputPartition(splits: Seq[Split], queryIndex: Int)
+  extends PaimonInputPartition
+
 object PaimonInputPartition {
   def apply(split: Split): PaimonInputPartition = {
     SimplePaimonInputPartition(Seq(split))

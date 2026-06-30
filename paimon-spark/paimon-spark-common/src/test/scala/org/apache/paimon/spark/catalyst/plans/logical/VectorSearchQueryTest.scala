@@ -293,6 +293,36 @@ class VectorSearchQueryTest extends AnyFunSuite {
     assert(vectorSearch.options().get("hnsw.ef_search") == "64")
   }
 
+  test("create batch vector search basic") {
+    val bvs = createBatchVectorSearch(
+      Literal("v"),
+      CreateArray(
+        Seq(
+          CreateArray(Seq(Literal(1.0f), Literal(2.0f))),
+          CreateArray(Seq(Literal(3.0f), Literal(4.0f))))),
+      Literal(5)
+    )
+    assert(bvs.vectorCount() == 2)
+    assert(bvs.fieldName() == "v")
+    assert(bvs.limit() == 5)
+    assert(bvs.vectors()(0).sameElements(Array(1.0f, 2.0f)))
+    assert(bvs.vectors()(1).sameElements(Array(3.0f, 4.0f)))
+  }
+
+  test("create batch vector search with options") {
+    val bvs = createBatchVectorSearch(
+      Literal("v"),
+      CreateArray(Seq(CreateArray(Seq(Literal(1.0f), Literal(2.0f))))),
+      Literal(3),
+      CreateMap(Seq(Literal("ivf.nprobe"), Literal("16")))
+    )
+    assert(bvs.vectorCount() == 1)
+    assert(bvs.options().get("ivf.nprobe") == "16")
+  }
+
+  private def createBatchVectorSearch(args: Expression*) =
+    BatchVectorSearchQuery(Seq.empty).createBatchVectorSearch(innerTable, args)
+
   private def createVectorSearch(args: Expression*) =
     VectorSearchQuery(Seq.empty).createVectorSearch(innerTable, args)
 

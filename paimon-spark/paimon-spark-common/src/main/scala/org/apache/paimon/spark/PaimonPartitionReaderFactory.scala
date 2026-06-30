@@ -22,6 +22,8 @@ import org.apache.paimon.spark.schema.PaimonMetadataColumn
 import org.apache.paimon.table.source.ReadBuilder
 
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, JoinedRow}
+import org.apache.spark.sql.connector.metric.CustomTaskMetric
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
 
 import java.util.Objects
@@ -34,6 +36,9 @@ case class PaimonPartitionReaderFactory(
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
     partition match {
+      case qip: PaimonQueryIndexedInputPartition =>
+        val base = PaimonPartitionReader(readBuilder, qip, metadataColumns, blobAsDescriptor)
+        new QueryIndexPrependPartitionReader(base, qip.queryIndex)
       case paimonInputPartition: PaimonInputPartition =>
         PaimonPartitionReader(readBuilder, paimonInputPartition, metadataColumns, blobAsDescriptor)
       case _ =>
@@ -53,4 +58,25 @@ case class PaimonPartitionReaderFactory(
   override def hashCode(): Int = {
     Objects.hashCode(readBuilder)
   }
+}
+
+/**
+ * Wraps a base reader to prepend a constant `query_index` value as the leading column of every row,
+ * for the batch_vector_search TVF.
+ */
+private class QueryIndexPrependPartitionReader(
+    delegate: PartitionReader[InternalRow],
+    queryIndex: Int)
+  extends PartitionReader[InternalRow] {
+
+  private val prefix = new GenericInternalRow(Array[Any](queryIndex))
+  private val joined = new JoinedRow()
+
+  override def next(): Boolean = delegate.next()
+
+  override def get(): InternalRow = joined(prefix, delegate.get())
+
+  override def currentMetricsValues(): Array[CustomTaskMetric] = delegate.currentMetricsValues()
+
+  override def close(): Unit = delegate.close()
 }

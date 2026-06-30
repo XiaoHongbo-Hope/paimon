@@ -20,11 +20,11 @@ package org.apache.paimon.spark.catalyst.plans.logical
 
 import org.apache.paimon.CoreOptions
 import org.apache.paimon.globalindex.HybridSearchRanker
-import org.apache.paimon.predicate.{FullTextQuery, FullTextSearch, HybridSearch, HybridSearchRoute, Predicate, VectorSearch}
+import org.apache.paimon.predicate.{BatchVectorSearch, FullTextQuery, FullTextSearch, HybridSearch, HybridSearchRoute, Predicate, VectorSearch}
 import org.apache.paimon.spark.{SparkTable, SparkTypeUtils, SparkV2FilterConverter}
 import org.apache.paimon.spark.catalyst.plans.logical.PaimonTableValuedFunctions._
 import org.apache.paimon.spark.schema.PaimonMetadataColumn
-import org.apache.paimon.table.{DataTable, FullTextSearchTable, HybridSearchTable, InnerTable, VectorSearchTable}
+import org.apache.paimon.table.{BatchVectorSearchTable, DataTable, FullTextSearchTable, HybridSearchTable, InnerTable, VectorSearchTable}
 import org.apache.paimon.table.source.snapshot.TimeTravelUtil.InconsistentTagBucketException
 
 import org.apache.spark.sql.PaimonUtils.{createDataset, normalizeExprs, toAttributes, translateFilterV2}
@@ -57,6 +57,7 @@ object PaimonTableValuedFunctions {
   val INCREMENTAL_BETWEEN_TIMESTAMP = "paimon_incremental_between_timestamp"
   val INCREMENTAL_TO_AUTO_TAG = "paimon_incremental_to_auto_tag"
   val VECTOR_SEARCH = "vector_search"
+  val BATCH_VECTOR_SEARCH = "batch_vector_search"
   val HYBRID_SEARCH = "hybrid_search"
   val FULL_TEXT_SEARCH = "full_text_search"
 
@@ -66,6 +67,7 @@ object PaimonTableValuedFunctions {
       INCREMENTAL_BETWEEN_TIMESTAMP,
       INCREMENTAL_TO_AUTO_TAG,
       VECTOR_SEARCH,
+      BATCH_VECTOR_SEARCH,
       HYBRID_SEARCH,
       FULL_TEXT_SEARCH)
 
@@ -98,6 +100,8 @@ object PaimonTableValuedFunctions {
         FunctionRegistryBase.build[IncrementalToAutoTag](fnName, since = None)
       case VECTOR_SEARCH =>
         FunctionRegistryBase.build[VectorSearchQuery](fnName, since = None)
+      case BATCH_VECTOR_SEARCH =>
+        FunctionRegistryBase.build[BatchVectorSearchQuery](fnName, since = None)
       case HYBRID_SEARCH =>
         FunctionRegistryBase.build[HybridSearchQuery](fnName, since = None)
       case FULL_TEXT_SEARCH =>
@@ -136,6 +140,8 @@ object PaimonTableValuedFunctions {
     tvf match {
       case vsq: VectorSearchQuery =>
         resolveVectorSearchQuery(sparkTable, sparkCatalog, ident, vsq, args.tail)
+      case bvsq: BatchVectorSearchQuery =>
+        resolveBatchVectorSearchQuery(sparkTable, sparkCatalog, ident, bvsq, args.tail)
       case hsq: HybridSearchQuery =>
         resolveHybridSearchQuery(sparkTable, sparkCatalog, ident, hsq, args.tail)
       case ftsq: FullTextSearchQuery =>
@@ -176,6 +182,28 @@ object PaimonTableValuedFunctions {
       case _ =>
         throw new RuntimeException(
           "vector_search only supports Paimon SparkTable backed by InnerTable, " +
+            s"but got table implementation: ${sparkTable.getClass.getName}")
+    }
+  }
+
+  private def resolveBatchVectorSearchQuery(
+      sparkTable: Table,
+      sparkCatalog: TableCatalog,
+      ident: Identifier,
+      bvsq: BatchVectorSearchQuery,
+      argsWithoutTable: Seq[Expression]): LogicalPlan = {
+    sparkTable match {
+      case st @ SparkTable(innerTable: InnerTable) =>
+        val batchVectorSearch = bvsq.createBatchVectorSearch(innerTable, argsWithoutTable)
+        val batchVectorSearchTable = BatchVectorSearchTable.create(innerTable, batchVectorSearch)
+        DataSourceV2Relation.create(
+          st.copy(table = batchVectorSearchTable),
+          Some(sparkCatalog),
+          Some(ident),
+          CaseInsensitiveStringMap.empty())
+      case _ =>
+        throw new RuntimeException(
+          "batch_vector_search only supports Paimon SparkTable backed by InnerTable, " +
             s"but got table implementation: ${sparkTable.getClass.getName}")
     }
   }
@@ -633,6 +661,69 @@ case class VectorSearchQuery(override val args: Seq[Expression])
       limit,
       options,
       toAttributes(SparkTypeUtils.fromPaimonRowType(innerTable.rowType())))
+  }
+}
+
+/**
+ * Plan for the [[BATCH_VECTOR_SEARCH]] table-valued function.
+ *
+ * Usage: batch_vector_search(table_name, column_name, query_vectors, limit[, options])
+ *   - query_vectors: array of query vectors, i.e. array<array<float>>
+ *
+ * The result has an additional leading `query_index` column (the 0-based position of the query
+ * vector in `query_vectors`); rows with `query_index = i` are the top-k for `query_vectors[i]`.
+ *
+ * Example: SELECT * FROM batch_vector_search('T', 'v', array(array(1.0f, 2.0f), array(3.0f, 4.0f)),
+ * 5)
+ */
+case class BatchVectorSearchQuery(override val args: Seq[Expression])
+  extends PaimonTableValueFunction(BATCH_VECTOR_SEARCH) {
+
+  override def parseArgs(args: Seq[Expression]): Map[String, String] = Map.empty
+
+  def createBatchVectorSearch(
+      innerTable: InnerTable,
+      argsWithoutTable: Seq[Expression]): BatchVectorSearch = {
+    if (argsWithoutTable.size != 3 && argsWithoutTable.size != 4) {
+      throw new RuntimeException(
+        s"$BATCH_VECTOR_SEARCH needs three or four parameters after table_name: " +
+          s"column_name, query_vectors, limit[, options]. " +
+          s"Got ${argsWithoutTable.size} parameters after table_name.")
+    }
+    val helper = VectorSearchQuery(Seq.empty)
+    val columnName = argsWithoutTable.head.eval().toString
+    if (!innerTable.rowType().containsField(columnName)) {
+      throw new RuntimeException(
+        s"Column $columnName does not exist in table ${innerTable.name()}")
+    }
+    val queryVectors = extractQueryVectors(argsWithoutTable(1))
+    if (queryVectors.isEmpty) {
+      throw new IllegalArgumentException(
+        s"$BATCH_VECTOR_SEARCH requires at least one query vector.")
+    }
+    val limit = parsePositiveLimit(argsWithoutTable(2).eval())
+    val options: Map[String, String] =
+      if (argsWithoutTable.size == 4) {
+        helper.extractOptions(argsWithoutTable(3))
+      } else {
+        Map.empty[String, String]
+      }
+    new BatchVectorSearch(queryVectors, limit, columnName, options.asJava)
+  }
+
+  private def extractQueryVectors(expr: Expression): Array[Array[Float]] = {
+    val helper = VectorSearchQuery(Seq.empty)
+    expr match {
+      case CreateArray(elements, _) if elements != null =>
+        elements.map(helper.extractQueryVector).toArray
+      case Literal(arrayData: org.apache.spark.sql.catalyst.util.ArrayData, _)
+          if arrayData != null =>
+        (0 until arrayData.numElements()).map {
+          i => arrayData.getArray(i).toFloatArray()
+        }.toArray
+      case _ =>
+        throw new RuntimeException(s"Cannot extract query vectors from expression: $expr")
+    }
   }
 }
 

@@ -129,17 +129,20 @@ class PaimonScanBuilder(val table: InnerTable)
     localScan match {
       case Some(scan) => scan
       case None =>
-        val (actualTable, vectorSearch, hybridSearch, fullTextSearch) = table match {
-          case vst: org.apache.paimon.table.VectorSearchTable =>
-            (vst.origin(), Option(vst.vectorSearch()), None, None)
-          case hst: org.apache.paimon.table.HybridSearchTable =>
-            (hst.origin(), None, Option(hst.hybridSearch()), None)
-          case ftst: org.apache.paimon.table.FullTextSearchTable =>
-            (ftst.origin(), None, None, Option(ftst.fullTextSearch()))
-          case _ => (table, pushedVectorSearch, None, pushedFullTextSearch)
-        }
+        val (actualTable, vectorSearch, hybridSearch, fullTextSearch, batchVectorSearch) =
+          table match {
+            case vst: org.apache.paimon.table.VectorSearchTable =>
+              (vst.origin(), Option(vst.vectorSearch()), None, None, None)
+            case bvst: org.apache.paimon.table.BatchVectorSearchTable =>
+              (bvst.origin(), None, None, None, Option(bvst.batchVectorSearch()))
+            case hst: org.apache.paimon.table.HybridSearchTable =>
+              (hst.origin(), None, Option(hst.hybridSearch()), None, None)
+            case ftst: org.apache.paimon.table.FullTextSearchTable =>
+              (ftst.origin(), None, None, Option(ftst.fullTextSearch()), None)
+            case _ => (table, pushedVectorSearch, None, pushedFullTextSearch, None)
+          }
 
-        PaimonScan(
+        val scan = PaimonScan(
           actualTable,
           requiredSchema,
           pushedPartitionFilters,
@@ -151,6 +154,10 @@ class PaimonScanBuilder(val table: InnerTable)
           fullTextSearch,
           acceptedVariantExtractions
         )
+        // Batch vector search is threaded via a post-construction field on the shared
+        // PaimonBaseScan to avoid touching the per-version PaimonScan constructors.
+        scan.pushedBatchVectorSearch = batchVectorSearch
+        scan
     }
   }
 }

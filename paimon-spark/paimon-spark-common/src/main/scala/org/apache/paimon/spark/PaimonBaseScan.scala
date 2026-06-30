@@ -21,12 +21,12 @@ package org.apache.paimon.spark
 import org.apache.paimon.CoreOptions
 import org.apache.paimon.globalindex.GlobalIndexResult
 import org.apache.paimon.partition.PartitionPredicate
-import org.apache.paimon.predicate.PredicateBuilder
+import org.apache.paimon.predicate.{BatchVectorSearch, PredicateBuilder}
 import org.apache.paimon.spark.metric.SparkMetricRegistry
 import org.apache.paimon.spark.read.{BaseScan, BatchReadTagCleanupListener, PaimonSupportsRuntimeFiltering, SparkHybridSearchBuilderImpl, SparkVectorSearchBuilderImpl}
 import org.apache.paimon.spark.sources.PaimonMicroBatchStream
 import org.apache.paimon.spark.util.OptionUtils
-import org.apache.paimon.table.{DataTable, FileStoreTable, InnerTable}
+import org.apache.paimon.table.{BatchVectorSearchTable, DataTable, FileStoreTable, InnerTable}
 import org.apache.paimon.table.source.{DataTableBatchScan, InnerTableScan, Split}
 
 import org.apache.spark.sql.SparkSession
@@ -34,6 +34,7 @@ import org.apache.spark.sql.catalyst.SQLConfHelper
 import org.apache.spark.sql.connector.metric.{CustomMetric, CustomTaskMetric}
 import org.apache.spark.sql.connector.read.Batch
 import org.apache.spark.sql.connector.read.streaming.MicroBatchStream
+import org.apache.spark.sql.types.{IntegerType, StructField}
 
 import scala.collection.JavaConverters._
 
@@ -44,7 +45,17 @@ abstract class PaimonBaseScan(table: InnerTable)
 
   private lazy val paimonMetricsRegistry: SparkMetricRegistry = SparkMetricRegistry()
 
+  // Set by PaimonScanBuilder.build() for the batch_vector_search TVF. Threaded as a
+  // post-construction field (rather than a constructor param) so the per-version PaimonScan
+  // case-class constructors do not need to change.
+  private[spark] var pushedBatchVectorSearch: Option[BatchVectorSearch] = None
+
   protected def getInputSplits: Array[Split] = {
+    if (pushedBatchVectorSearch.isDefined) {
+      // Flattened union of all query results' splits (used for stats/metrics); the per-query
+      // tagged partitions used for the actual read are produced in [[inputPartitions]].
+      return batchVectorResults.flatMap(splitsOf).toArray
+    }
     val scan = readBuilder
       .newScan()
       .withGlobalIndexResult(evalGlobalIndexSearch())
@@ -61,6 +72,59 @@ abstract class PaimonBaseScan(table: InnerTable)
     }
 
     plan.splits().asScala.toArray
+  }
+
+  // ---- batch_vector_search ----
+
+  /** Native batch search executed once; result i corresponds to query vector i. */
+  private lazy val batchVectorResults: Seq[GlobalIndexResult] =
+    evalBatchVectorSearch(pushedBatchVectorSearch.get)
+
+  override protected def leadingSyntheticColumns: Seq[StructField] = {
+    if (pushedBatchVectorSearch.isDefined) {
+      Seq(StructField(BatchVectorSearchTable.QUERY_INDEX_COLUMN, IntegerType, nullable = false))
+    } else {
+      Seq.empty
+    }
+  }
+
+  override protected def toBatchInputPartitions: Seq[PaimonInputPartition] = {
+    if (pushedBatchVectorSearch.isEmpty) {
+      return super.toBatchInputPartitions
+    }
+    batchVectorResults.zipWithIndex.flatMap {
+      case (result, queryIndex) =>
+        getInputPartitions(splitsOf(result).toArray)
+          .map(p => PaimonQueryIndexedInputPartition(p.splits, queryIndex))
+    }
+  }
+
+  private def splitsOf(result: GlobalIndexResult): Seq[Split] = {
+    readBuilder
+      .newScan()
+      .withGlobalIndexResult(result)
+      .asInstanceOf[InnerTableScan]
+      .withMetricRegistry(paimonMetricsRegistry)
+      .plan()
+      .splits()
+      .asScala
+      .toSeq
+  }
+
+  private def evalBatchVectorSearch(bvs: BatchVectorSearch): Seq[GlobalIndexResult] = {
+    val builder = table
+      .newBatchVectorSearchBuilder()
+      .withVectors(bvs.vectors())
+      .withVectorColumn(bvs.fieldName())
+      .withLimit(bvs.limit())
+      .withOptions(bvs.options())
+    if (pushedPartitionFilters.nonEmpty) {
+      builder.withPartitionFilter(PartitionPredicate.and(pushedPartitionFilters.asJava))
+    }
+    if (pushedDataFilters.nonEmpty) {
+      builder.withFilter(PredicateBuilder.and(pushedDataFilters.asJava))
+    }
+    builder.executeBatchLocal().asScala.toSeq
   }
 
   private def evalGlobalIndexSearch(): GlobalIndexResult = {
