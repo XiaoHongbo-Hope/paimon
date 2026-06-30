@@ -120,23 +120,4 @@ public class SparkConnectorOptions {
                     .withDescription(
                             "Whether to adjust the target split size based on pruned (projected) columns. "
                                     + "If enabled, split size estimation uses only the columns actually being read.");
-
-    public static final ConfigOption<Integer> BATCH_VECTOR_SEARCH_PARALLELISM =
-            key("vector-search.batch.parallelism")
-                    .intType()
-                    .noDefaultValue()
-                    .withDescription(
-                            "Custom parallelism for the batch_vector_search table-valued function, i.e. the "
-                                    + "number of tasks the query vectors are distributed across; each task loads "
-                                    + "the vector index and searches its share of queries. By default, if this "
-                                    + "option is not defined, the parallelism is inferred from the number of query "
-                                    + "vectors, capped by 'vector-search.batch.infer-parallelism.max'.");
-
-    public static final ConfigOption<Integer> BATCH_VECTOR_SEARCH_INFER_PARALLELISM_MAX =
-            key("vector-search.batch.infer-parallelism.max")
-                    .intType()
-                    .defaultValue(1024)
-                    .withDescription(
-                            "When 'vector-search.batch.parallelism' is not set, limit the inferred parallelism "
-                                    + "of batch_vector_search through this option.");
 }

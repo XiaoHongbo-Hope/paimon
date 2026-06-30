@@ -23,7 +23,7 @@ import org.apache.paimon.globalindex.GlobalIndexResult
 import org.apache.paimon.partition.PartitionPredicate
 import org.apache.paimon.predicate.{BatchVectorSearch, PredicateBuilder}
 import org.apache.paimon.spark.metric.SparkMetricRegistry
-import org.apache.paimon.spark.read.{BaseScan, BatchReadTagCleanupListener, PaimonSupportsRuntimeFiltering, SparkHybridSearchBuilderImpl, SparkVectorSearchBuilderImpl}
+import org.apache.paimon.spark.read.{BaseScan, BatchReadTagCleanupListener, PaimonSupportsRuntimeFiltering, SparkBatchVectorSearchBuilderImpl, SparkHybridSearchBuilderImpl, SparkVectorSearchBuilderImpl}
 import org.apache.paimon.spark.sources.PaimonMicroBatchStream
 import org.apache.paimon.spark.util.OptionUtils
 import org.apache.paimon.table.{BatchVectorSearchTable, DataTable, FileStoreTable, InnerTable}
@@ -112,8 +112,13 @@ abstract class PaimonBaseScan(table: InnerTable)
   }
 
   private def evalBatchVectorSearch(bvs: BatchVectorSearch): Seq[GlobalIndexResult] = {
-    val builder = table
-      .newBatchVectorSearchBuilder()
+    val builder =
+      if (CoreOptions.fromMap(table.options).vectorSearchDistributeEnabled()) {
+        new SparkBatchVectorSearchBuilderImpl(table)
+      } else {
+        table.newBatchVectorSearchBuilder()
+      }
+    builder
       .withVectors(bvs.vectors())
       .withVectorColumn(bvs.fieldName())
       .withLimit(bvs.limit())
