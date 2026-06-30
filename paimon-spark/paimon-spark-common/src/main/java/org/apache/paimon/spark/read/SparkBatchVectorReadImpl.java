@@ -38,6 +38,8 @@ import org.apache.paimon.utils.Range;
 import org.apache.paimon.utils.RoaringNavigableMap64;
 import org.apache.paimon.utils.SerializableFunction;
 
+import org.apache.spark.broadcast.Broadcast;
+
 import javax.annotation.Nullable;
 
 import java.io.IOException;
@@ -207,36 +209,31 @@ public class SparkBatchVectorReadImpl extends BatchVectorReadImpl {
             return local;
         }
 
-        byte[] preFilterBytes =
-                preFilter == null
-                        ? null
-                        : SparkVectorReads.serialize(
-                                preFilter, "Failed to serialize vector pre-filter");
-        List<SparkVectorReads.SerializedSplit> serializedGroups = new ArrayList<>();
+        // The pre-filter is identical for every range group, so broadcast it once instead of
+        // shipping a copy with each group.
+        Broadcast<RoaringNavigableMap64> preFilterBroadcast =
+                preFilter == null ? null : new SparkEngineContext().broadcast(preFilter);
+        List<byte[]> serializedRanges = new ArrayList<>();
         for (List<Range> rangeGroup : SparkVectorReads.rangeGroups(rawRowRanges, parallelism)) {
-            serializedGroups.add(
-                    new SparkVectorReads.SerializedSplit(
-                            SparkVectorReads.serialize(
-                                    rangeGroup, "Failed to serialize raw vector row ranges"),
-                            preFilterBytes));
+            serializedRanges.add(
+                    SparkVectorReads.serialize(
+                            rangeGroup, "Failed to serialize raw vector row ranges"));
         }
-        List<List<SparkVectorReads.SerializedSplit>> splitGroups =
-                SparkVectorReads.evenGroups(serializedGroups, parallelism);
+        List<List<byte[]>> splitGroups = SparkVectorReads.evenGroups(serializedRanges, parallelism);
         int queryCount = n;
 
-        SerializableFunction<List<SparkVectorReads.SerializedSplit>, byte[][]> task =
+        SerializableFunction<List<byte[]>, byte[][]> task =
                 group -> {
+                    RoaringNavigableMap64 groupPreFilter =
+                            preFilterBroadcast == null ? null : preFilterBroadcast.value();
                     ScoredGlobalIndexResult[] merged = new ScoredGlobalIndexResult[queryCount];
                     for (int i = 0; i < queryCount; i++) {
                         merged[i] = ScoredGlobalIndexResult.createEmpty();
                     }
-                    for (SparkVectorReads.SerializedSplit serializedSplit : group) {
+                    for (byte[] rangeBytes : group) {
                         List<Range> rowRanges =
                                 SparkVectorReads.deserialize(
-                                        serializedSplit.split,
-                                        "Failed to deserialize raw vector row ranges");
-                        RoaringNavigableMap64 groupPreFilter =
-                                SparkVectorReads.deserializePreFilter(serializedSplit.preFilter);
+                                        rangeBytes, "Failed to deserialize raw vector row ranges");
                         for (int i = 0; i < queryCount; i++) {
                             merged[i] =
                                     merged[i].or(
