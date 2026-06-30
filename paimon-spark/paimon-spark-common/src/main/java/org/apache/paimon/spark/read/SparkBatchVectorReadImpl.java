@@ -34,6 +34,7 @@ import org.apache.paimon.table.source.RawVectorSearchSplit;
 import org.apache.paimon.table.source.VectorScan;
 import org.apache.paimon.table.source.VectorSearchSplit;
 import org.apache.paimon.types.DataField;
+import org.apache.paimon.utils.Range;
 import org.apache.paimon.utils.RoaringNavigableMap64;
 import org.apache.paimon.utils.SerializableFunction;
 
@@ -54,9 +55,8 @@ import static org.apache.paimon.CoreOptions.GLOBAL_INDEX_THREAD_NUM;
  * across the Spark cluster instead of evaluating it with the local thread pool. Mirrors {@link
  * SparkVectorReadImpl} for the batch (multi-vector) path: each task evaluates a group of index
  * splits against all query vectors and returns one partial result per query, then the driver merges
- * per query and keeps the top-K.
- *
- * <p>Raw (un-indexed) splits are still searched locally per query (TODO: distribute as well).
+ * per query and keeps the top-K. Raw (un-indexed) splits are distributed the same way, by row-range
+ * group across all query vectors.
  */
 public class SparkBatchVectorReadImpl extends BatchVectorReadImpl {
 
@@ -94,12 +94,12 @@ public class SparkBatchVectorReadImpl extends BatchVectorReadImpl {
                         ? emptyScoredResults(n)
                         : readIndexedBatchInSpark(indexSplits, globalIndexer);
 
+        ScoredGlobalIndexResult[] rawResults =
+                readRawBatchInSpark(rawSplits, globalIndexer, rawPreFilter(rawSplits));
+
         List<GlobalIndexResult> results = new ArrayList<>(n);
-        RoaringNavigableMap64 rawPreFilter = rawPreFilter(rawSplits);
         for (int i = 0; i < n; i++) {
-            results.add(
-                    withRawSearch(
-                            indexedResults[i], rawSplits, globalIndexer, rawPreFilter, vectors[i]));
+            results.add(indexedResults[i].or(rawResults[i]).topK(limit));
         }
         return results;
     }
@@ -175,26 +175,103 @@ public class SparkBatchVectorReadImpl extends BatchVectorReadImpl {
                         }
                     }
 
-                    GlobalIndexResultSerializer serializer = new GlobalIndexResultSerializer();
-                    byte[][] out = new byte[queryCount][];
-                    for (int i = 0; i < queryCount; i++) {
-                        ScoredGlobalIndexResult r = merged[i].topK(limit);
-                        if (r.results().isEmpty()) {
-                            out[i] = null;
-                        } else {
-                            try {
-                                out[i] = serializer.serialize(r);
-                            } catch (IOException e) {
-                                throw new RuntimeException(
-                                        "Failed to serialize ScoredGlobalIndexResult", e);
-                            }
-                        }
-                    }
-                    return out;
+                    return serializeTopKPerQuery(merged);
                 };
 
         List<byte[][]> remoteResults = mapInSpark(splitGroups, task, splitGroups.size());
+        return mergeBatchRemoteResults(remoteResults, n);
+    }
 
+    /**
+     * Distributes the raw (un-indexed) search across the Spark cluster, mirroring {@link
+     * SparkVectorReadImpl} but evaluating every query vector per row-range group. Returns one
+     * top-k raw result per query (empty when there are no raw rows).
+     */
+    private ScoredGlobalIndexResult[] readRawBatchInSpark(
+            List<RawVectorSearchSplit> rawSplits,
+            @Nullable GlobalIndexer globalIndexer,
+            @Nullable RoaringNavigableMap64 preFilter) {
+        int n = vectors.length;
+        List<Range> rawRowRanges = rawRowRanges(rawSplits);
+        if (rawRowRanges.isEmpty()) {
+            return emptyScoredResults(n);
+        }
+
+        int parallelism = sparkParallelism();
+        String metric = rawSearchMetric(rawSearchIndexer(rawSplits, globalIndexer));
+        if (SparkVectorReads.rawRowCount(rawRowRanges) < parallelism * 2L) {
+            ScoredGlobalIndexResult[] local = new ScoredGlobalIndexResult[n];
+            for (int i = 0; i < n; i++) {
+                local[i] = readRawSearch(rawRowRanges, preFilter, metric, vectors[i]);
+            }
+            return local;
+        }
+
+        byte[] preFilterBytes =
+                preFilter == null
+                        ? null
+                        : SparkVectorReads.serialize(
+                                preFilter, "Failed to serialize vector pre-filter");
+        List<SparkVectorReads.SerializedSplit> serializedGroups = new ArrayList<>();
+        for (List<Range> rangeGroup : SparkVectorReads.rangeGroups(rawRowRanges, parallelism)) {
+            serializedGroups.add(
+                    new SparkVectorReads.SerializedSplit(
+                            SparkVectorReads.serialize(
+                                    rangeGroup, "Failed to serialize raw vector row ranges"),
+                            preFilterBytes));
+        }
+        List<List<SparkVectorReads.SerializedSplit>> splitGroups =
+                SparkVectorReads.evenGroups(serializedGroups, parallelism);
+        int queryCount = n;
+
+        SerializableFunction<List<SparkVectorReads.SerializedSplit>, byte[][]> task =
+                group -> {
+                    ScoredGlobalIndexResult[] merged = new ScoredGlobalIndexResult[queryCount];
+                    for (int i = 0; i < queryCount; i++) {
+                        merged[i] = ScoredGlobalIndexResult.createEmpty();
+                    }
+                    for (SparkVectorReads.SerializedSplit serializedSplit : group) {
+                        List<Range> rowRanges =
+                                SparkVectorReads.deserialize(
+                                        serializedSplit.split,
+                                        "Failed to deserialize raw vector row ranges");
+                        RoaringNavigableMap64 groupPreFilter =
+                                SparkVectorReads.deserializePreFilter(serializedSplit.preFilter);
+                        for (int i = 0; i < queryCount; i++) {
+                            merged[i] =
+                                    merged[i].or(
+                                            readRawSearch(
+                                                    rowRanges, groupPreFilter, metric, vectors[i]));
+                        }
+                    }
+                    return serializeTopKPerQuery(merged);
+                };
+
+        List<byte[][]> remoteResults = mapInSpark(splitGroups, task, splitGroups.size());
+        return mergeBatchRemoteResults(remoteResults, n);
+    }
+
+    /** Serializes each query's top-k result for Spark dispatch; {@code null} for empty results. */
+    private byte[][] serializeTopKPerQuery(ScoredGlobalIndexResult[] merged) {
+        GlobalIndexResultSerializer serializer = new GlobalIndexResultSerializer();
+        byte[][] out = new byte[merged.length][];
+        for (int i = 0; i < merged.length; i++) {
+            ScoredGlobalIndexResult r = merged[i].topK(limit);
+            if (r.results().isEmpty()) {
+                out[i] = null;
+            } else {
+                try {
+                    out[i] = serializer.serialize(r);
+                } catch (IOException e) {
+                    throw new RuntimeException("Failed to serialize ScoredGlobalIndexResult", e);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** Merges per-group, per-query serialized results back into one top-k result per query. */
+    private ScoredGlobalIndexResult[] mergeBatchRemoteResults(List<byte[][]> remoteResults, int n) {
         ScoredGlobalIndexResult[] result = new ScoredGlobalIndexResult[n];
         for (int i = 0; i < n; i++) {
             result[i] = ScoredGlobalIndexResult.createEmpty();
@@ -209,7 +286,8 @@ public class SparkBatchVectorReadImpl extends BatchVectorReadImpl {
                     try {
                         result[i] = result[i].or(serializer.deserialize(groupOut[i]));
                     } catch (IOException e) {
-                        throw new RuntimeException("Failed to deserialize ScoredGlobalIndexResult", e);
+                        throw new RuntimeException(
+                                "Failed to deserialize ScoredGlobalIndexResult", e);
                     }
                 }
             }

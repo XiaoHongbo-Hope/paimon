@@ -20,6 +20,7 @@ package org.apache.paimon.spark.read;
 
 import org.apache.paimon.table.source.IndexVectorSearchSplit;
 import org.apache.paimon.utils.InstantiationUtil;
+import org.apache.paimon.utils.Range;
 import org.apache.paimon.utils.RoaringNavigableMap64;
 
 import javax.annotation.Nullable;
@@ -46,6 +47,49 @@ final class SparkVectorReads {
             groups.add(new ArrayList<>(items.subList(start, Math.min(start + groupSize, items.size()))));
         }
         return groups;
+    }
+
+    /** Splits raw row ranges into at most {@code parallelism} groups of (roughly) equal row count. */
+    static List<List<Range>> rangeGroups(List<Range> ranges, int parallelism) {
+        long rowCount = rawRowCount(ranges);
+        int groupCount = (int) Math.min(parallelism, rowCount);
+        long targetRowsPerGroup = (rowCount - 1) / groupCount + 1;
+
+        List<List<Range>> groups = new ArrayList<>(groupCount);
+        List<Range> currentGroup = new ArrayList<>();
+        long currentRows = 0;
+        for (Range range : ranges) {
+            long from = range.from;
+            while (from <= range.to) {
+                if (currentRows == targetRowsPerGroup) {
+                    groups.add(currentGroup);
+                    currentGroup = new ArrayList<>();
+                    currentRows = 0;
+                }
+                long remainingGroupRows = targetRowsPerGroup - currentRows;
+                long to = Math.min(range.to, from + remainingGroupRows - 1);
+                Range next = new Range(from, to);
+                currentGroup.add(next);
+                currentRows += next.count();
+                from = to + 1;
+            }
+        }
+        if (!currentGroup.isEmpty()) {
+            groups.add(currentGroup);
+        }
+        return groups;
+    }
+
+    static long rawRowCount(List<Range> ranges) {
+        long rowCount = 0;
+        for (Range range : ranges) {
+            long count = range.count();
+            if (Long.MAX_VALUE - rowCount < count) {
+                return Long.MAX_VALUE;
+            }
+            rowCount += count;
+        }
+        return rowCount;
     }
 
     static IndexVectorSearchSplit deserializeSplit(byte[] bytes) {

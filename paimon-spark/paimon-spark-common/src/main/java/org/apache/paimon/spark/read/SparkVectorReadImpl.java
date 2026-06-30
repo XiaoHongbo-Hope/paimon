@@ -181,13 +181,13 @@ public class SparkVectorReadImpl extends VectorReadImpl {
         }
 
         int parallelism = sparkParallelism();
-        if (rawRowCount(rawRowRanges) < parallelism * 2L) {
+        if (SparkVectorReads.rawRowCount(rawRowRanges) < parallelism * 2L) {
             return readRawSearch(
                     rawRowRanges, preFilter, rawSearchIndexer(splits, globalIndexer), vector);
         }
 
         String metric = rawSearchMetric(rawSearchIndexer(splits, globalIndexer));
-        List<List<Range>> rangeGroups = rangeGroups(rawRowRanges, parallelism);
+        List<List<Range>> rangeGroups = SparkVectorReads.rangeGroups(rawRowRanges, parallelism);
         List<SparkVectorReads.SerializedSplit> serializedSplits =
                 new ArrayList<>(rangeGroups.size());
         for (List<Range> rangeGroup : rangeGroups) {
@@ -262,47 +262,5 @@ public class SparkVectorReadImpl extends VectorReadImpl {
             }
         }
         return result.topK(limit);
-    }
-
-    private List<List<Range>> rangeGroups(List<Range> ranges, int parallelism) {
-        long rowCount = rawRowCount(ranges);
-        int groupCount = (int) Math.min(parallelism, rowCount);
-        long targetRowsPerGroup = (rowCount - 1) / groupCount + 1;
-
-        List<List<Range>> groups = new ArrayList<>(groupCount);
-        List<Range> currentGroup = new ArrayList<>();
-        long currentRows = 0;
-        for (Range range : ranges) {
-            long from = range.from;
-            while (from <= range.to) {
-                if (currentRows == targetRowsPerGroup) {
-                    groups.add(currentGroup);
-                    currentGroup = new ArrayList<>();
-                    currentRows = 0;
-                }
-                long remainingGroupRows = targetRowsPerGroup - currentRows;
-                long to = Math.min(range.to, from + remainingGroupRows - 1);
-                Range next = new Range(from, to);
-                currentGroup.add(next);
-                currentRows += next.count();
-                from = to + 1;
-            }
-        }
-        if (!currentGroup.isEmpty()) {
-            groups.add(currentGroup);
-        }
-        return groups;
-    }
-
-    private long rawRowCount(List<Range> ranges) {
-        long rowCount = 0;
-        for (Range range : ranges) {
-            long count = range.count();
-            if (Long.MAX_VALUE - rowCount < count) {
-                return Long.MAX_VALUE;
-            }
-            rowCount += count;
-        }
-        return rowCount;
     }
 }
