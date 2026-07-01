@@ -23,7 +23,7 @@ import org.apache.paimon.partition.PartitionPredicate
 import org.apache.paimon.partition.PartitionPredicate.splitPartitionPredicatesAndDataPredicates
 import org.apache.paimon.predicate.{PartitionPredicateVisitor, Predicate, TopN, VectorSearch}
 import org.apache.paimon.predicate.FullTextSearch
-import org.apache.paimon.table.{SpecialFields, Table}
+import org.apache.paimon.table.{BatchVectorSearchTable, SpecialFields, Table}
 import org.apache.paimon.types.RowType
 
 import org.apache.spark.sql.connector.expressions.filter.{Predicate => SparkPredicate}
@@ -68,10 +68,17 @@ abstract class PaimonBaseScanBuilder
     val pushableDataFilters = mutable.ArrayBuffer.empty[Predicate]
     val postScan = mutable.ArrayBuffer.empty[SparkPredicate]
 
-    var newRowType = rowType
+    // Data filters target the origin table columns. batch_vector_search wraps the table with a
+    // leading synthetic query_index column, so convert filters against the origin row type to keep
+    // field indices aligned with the actual (origin-schema) read; otherwise every real column is
+    // shifted by one and the pushed predicate reads the wrong column.
+    var newRowType = table match {
+      case bvst: BatchVectorSearchTable => bvst.origin().rowType()
+      case _ => rowType
+    }
     if (
       coreOptions.rowTrackingEnabled() && coreOptions
-        .dataEvolutionEnabled() && !rowType.containsField(SpecialFields.ROW_ID.name())
+        .dataEvolutionEnabled() && !newRowType.containsField(SpecialFields.ROW_ID.name())
     ) {
       newRowType = SpecialFields.rowTypeWithRowTracking(newRowType);
     }

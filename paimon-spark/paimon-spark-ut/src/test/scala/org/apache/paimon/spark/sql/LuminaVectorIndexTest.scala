@@ -200,6 +200,72 @@ class LuminaVectorIndexTest extends PaimonSparkTestBase {
     }
   }
 
+  test("batch_vector_search - distributed raw search with a scalar pre-filter") {
+    withTable("T") {
+      spark.sql("""
+                  |CREATE TABLE T (id INT, v ARRAY<FLOAT>)
+                  |TBLPROPERTIES (
+                  |  'bucket' = '-1',
+                  |  'global-index.row-count-per-shard' = '10',
+                  |  'global-index.thread-num' = '2',
+                  |  'global-index.search-mode' = 'full',
+                  |  'vector-search.distribute.enabled' = 'true',
+                  |  'row-tracking.enabled' = 'true',
+                  |  'data-evolution.enabled' = 'true',
+                  |  'btree-index.records-per-range' = '20')
+                  |""".stripMargin)
+
+      def rowsOf(from: Int, until: Int): String =
+        (from until until)
+          .map(
+            i => s"($i, array(cast($i as float), cast(${i + 1} as float), cast(${i + 2} as float)))")
+          .mkString(",")
+
+      spark.sql(s"INSERT INTO T VALUES ${rowsOf(0, 100)}")
+      // The vector index covers only rows 0..99.
+      assert(
+        spark
+          .sql(
+            s"CALL sys.create_global_index(table => 'test.T', index_column => 'v', index_type => '$indexType', options => '$defaultOptions')")
+          .collect()
+          .head
+          .getBoolean(0))
+
+      // Rows 100..199 are un-indexed for the vector index -> searched via the raw path.
+      spark.sql(s"INSERT INTO T VALUES ${rowsOf(100, 200)}")
+      // The btree scalar index covers all rows (incl. the raw region), so a filter on id attaches
+      // a scalar index to the raw split and produces a non-null (broadcast) pre-filter.
+      assert(
+        spark
+          .sql(
+            "CALL sys.create_global_index(table => 'test.T', index_column => 'id', index_type => 'btree', options => 'btree-index.records-per-range=20')")
+          .collect()
+          .head
+          .getBoolean(0))
+
+      // id < 160 pushes down as a scalar pre-filter, so the distributed raw search runs with a
+      // non-null (broadcast) pre-filter. With a pre-filter the top-5 are drawn from ids < 160; a
+      // post-filter would instead drop the higher-scoring ids >= 160 and return fewer rows.
+      val batch = spark
+        .sql(
+          """
+            |SELECT * FROM batch_vector_search('T', 'v', array(array(150.0f, 151.0f, 152.0f)), 5)
+            |WHERE id < 160
+            |""".stripMargin)
+        .collect()
+      assert(batch.length == 5, s"expected 5 pre-filtered results, got ${batch.length}")
+      assert(batch.forall(_.getInt(1) < 160), s"pre-filter not applied: ${batch.map(_.getInt(1)).toSeq}")
+
+      val single = spark
+        .sql(
+          "SELECT id FROM vector_search('T', 'v', array(150.0f, 151.0f, 152.0f), 5) WHERE id < 160")
+        .collect()
+        .map(_.getInt(0))
+        .toSet
+      assert(batch.map(_.getInt(1)).toSet == single)
+    }
+  }
+
   test("create lumina vector index - legacy index type") {
     withTable("T") {
       spark.sql("""
