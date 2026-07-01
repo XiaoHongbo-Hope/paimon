@@ -227,6 +227,9 @@ public class SparkVectorReadImpl extends VectorReadImpl {
                 };
 
         List<byte[]> remoteResults = mapInSpark(splitGroups, task, splitGroups.size());
+        if (preFilterBroadcast != null) {
+            preFilterBroadcast.unpersist();
+        }
         return mergeRemoteResults(remoteResults);
     }
 

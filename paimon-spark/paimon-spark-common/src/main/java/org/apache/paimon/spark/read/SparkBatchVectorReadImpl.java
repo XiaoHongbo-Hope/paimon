@@ -245,6 +245,9 @@ public class SparkBatchVectorReadImpl extends BatchVectorReadImpl {
                 };
 
         List<byte[][]> remoteResults = mapInSpark(splitGroups, task, splitGroups.size());
+        if (preFilterBroadcast != null) {
+            preFilterBroadcast.unpersist();
+        }
         return mergeBatchRemoteResults(remoteResults, n);
     }
 
