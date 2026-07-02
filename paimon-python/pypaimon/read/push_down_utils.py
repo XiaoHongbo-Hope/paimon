@@ -161,3 +161,21 @@ def remove_row_id_filter(predicate: Predicate) -> Optional[Predicate]:
             return new_children[0]
         return PredicateBuilder.or_predicates(new_children)
     return predicate
+
+
+def remove_partition_filter(predicate: Optional[Predicate], partition_keys: List[str]) -> Optional[Predicate]:
+    """Drop parts referencing partition columns: they aren't in data files, so
+    their value stats are placeholders and pruning by them is wrong."""
+    if not predicate or not partition_keys:
+        return predicate
+    partition_set = set(partition_keys)
+    if predicate.method == "and":
+        kept = []
+        for p in _split_and(predicate):
+            r = remove_partition_filter(p, partition_keys)
+            if r is not None:
+                kept.append(r)
+        return PredicateBuilder.and_predicates(kept) if kept else None
+    if _get_all_fields(predicate) & partition_set:
+        return None
+    return predicate
