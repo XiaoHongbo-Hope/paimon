@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import bisect
 from collections import defaultdict
 from typing import List, Optional, Tuple
 
@@ -307,13 +308,15 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
 
         sorted_ranges = Range.sort_and_merge_overlap(list_ranges, True, False)
 
+        # sorted_ranges is sorted and disjoint; each file's range lies in exactly one, so
+        # binary-search it (the linear scan was O(files x ranges), quadratic when disjoint).
+        starts = [r.from_ for r in sorted_ranges]
         range_to_files = {}
         for file in files:
             file_range = file.row_id_range()
-            for r in sorted_ranges:
-                if r.overlaps(file_range):
-                    range_to_files.setdefault(r, []).append(file)
-                    break
+            idx = bisect.bisect_right(starts, file_range.from_) - 1
+            if idx >= 0 and sorted_ranges[idx].overlaps(file_range):
+                range_to_files.setdefault(sorted_ranges[idx], []).append(file)
 
         return list(range_to_files.values())
 
