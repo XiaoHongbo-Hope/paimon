@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from typing import List, Optional, Tuple
 
 from pypaimon.globalindex.indexed_split import IndexedSplit
@@ -24,6 +24,9 @@ from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.manifest_entry import ManifestEntry
 from pypaimon.read.scanner.split_generator import AbstractSplitGenerator
 from pypaimon.read.split import DataSplit, Split
+
+# A file paired with its row-id range and original position (mirrors Java IndexedValue).
+_RangedFile = namedtuple("_RangedFile", ["range", "index", "file"])
 
 
 class DataEvolutionSplitGenerator(AbstractSplitGenerator):
@@ -304,27 +307,26 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
         if not files:
             return []
 
-        # (range, original index, file), sorted by range start then end.
+        # Sorted by range start then end, keeping the original index to restore order.
         indexed = sorted(
-            ((f.row_id_range(), i, f) for i, f in enumerate(files)),
-            key=lambda t: (t[0].from_, t[0].to))
+            (_RangedFile(f.row_id_range(), i, f) for i, f in enumerate(files)),
+            key=lambda rf: (rf.range.from_, rf.range.to))
 
-        groups: List[List] = []
+        groups = []
         current = [indexed[0]]
-        current_end = indexed[0][0].to
-        for item in indexed[1:]:
-            file_range = item[0]
-            if file_range.from_ <= current_end:      # overlaps the current group
-                current.append(item)
-                current_end = max(current_end, file_range.to)
+        current_end = indexed[0].range.to
+        for rf in indexed[1:]:
+            if rf.range.from_ <= current_end:        # overlaps the current group
+                current.append(rf)
+                current_end = max(current_end, rf.range.to)
             else:                                    # gap -> start a new group
                 groups.append(current)
-                current = [item]
-                current_end = file_range.to
+                current = [rf]
+                current_end = rf.range.to
         groups.append(current)
 
         # Restore input order within each group.
-        return [[t[2] for t in sorted(group, key=lambda t: t[1])] for group in groups]
+        return [[rf.file for rf in sorted(group, key=lambda rf: rf.index)] for group in groups]
 
     def _wrap_to_indexed_splits(self, splits: List[Split], row_ranges: List[Range]) -> List[Split]:
         """
