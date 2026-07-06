@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import bisect
 from collections import defaultdict
 from typing import List, Optional, Tuple
 
@@ -298,27 +297,34 @@ class DataEvolutionSplitGenerator(AbstractSplitGenerator):
     @staticmethod
     def _split_by_row_id(files: List[DataFileMeta]) -> List[List[DataFileMeta]]:
         """
-        Split files by row ID for data evolution tables.
-        Files are grouped by their overlapping row ID ranges.
+        Group data-evolution files whose row-id ranges overlap. Mirrors Java
+        RangeHelper.mergeOverlappingRanges: sort by range start, sweep-merge overlapping
+        ranges into groups, then restore input order within each group. O(n log n).
         """
-        list_ranges = [file.row_id_range() for file in files]
-
-        if not list_ranges:
+        if not files:
             return []
 
-        sorted_ranges = Range.sort_and_merge_overlap(list_ranges, True, False)
+        # (range, original index, file), sorted by range start then end.
+        indexed = sorted(
+            ((f.row_id_range(), i, f) for i, f in enumerate(files)),
+            key=lambda t: (t[0].from_, t[0].to))
 
-        # sorted_ranges is sorted and disjoint; each file's range lies in exactly one, so
-        # binary-search it (the linear scan was O(files x ranges), quadratic when disjoint).
-        starts = [r.from_ for r in sorted_ranges]
-        range_to_files = {}
-        for file in files:
-            file_range = file.row_id_range()
-            idx = bisect.bisect_right(starts, file_range.from_) - 1
-            if idx >= 0 and sorted_ranges[idx].overlaps(file_range):
-                range_to_files.setdefault(sorted_ranges[idx], []).append(file)
+        groups: List[List] = []
+        current = [indexed[0]]
+        current_end = indexed[0][0].to
+        for item in indexed[1:]:
+            file_range = item[0]
+            if file_range.from_ <= current_end:      # overlaps the current group
+                current.append(item)
+                current_end = max(current_end, file_range.to)
+            else:                                    # gap -> start a new group
+                groups.append(current)
+                current = [item]
+                current_end = file_range.to
+        groups.append(current)
 
-        return list(range_to_files.values())
+        # Restore input order within each group.
+        return [[t[2] for t in sorted(group, key=lambda t: t[1])] for group in groups]
 
     def _wrap_to_indexed_splits(self, splits: List[Split], row_ranges: List[Range]) -> List[Split]:
         """

@@ -52,6 +52,11 @@ def _shape(groups):
     return [[f.tag for f in g] for g in groups]
 
 
+def _grouping(groups):
+    """Files grouped together, ignoring order -- the functional invariant."""
+    return {frozenset(f.tag for f in g) for g in groups}
+
+
 class SplitByRowIdEquivalenceTest(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(DataEvolutionSplitGenerator._split_by_row_id([]), [])
@@ -67,7 +72,12 @@ class SplitByRowIdEquivalenceTest(unittest.TestCase):
         groups = DataEvolutionSplitGenerator._split_by_row_id([original, delta])
         self.assertEqual(_shape(groups), [[0, 1]])
 
-    def test_matches_reference_on_random_inputs(self):
+    def test_groups_ordered_by_range_start(self):
+        files = [_F(0, 10, 14), _F(1, 0, 4), _F(2, 5, 9)]  # unsorted input
+        self.assertEqual(_shape(DataEvolutionSplitGenerator._split_by_row_id(files)),
+                         [[1], [2], [0]])  # groups come out ordered by range start
+
+    def test_matches_reference_grouping_on_random_inputs(self):
         rng = random.Random(1234)
         for _ in range(1000):
             n = rng.randint(0, 50)
@@ -87,8 +97,8 @@ class SplitByRowIdEquivalenceTest(unittest.TestCase):
                 files.append(_F(tag, from_, to))
             rng.shuffle(files)
             self.assertEqual(
-                _shape(DataEvolutionSplitGenerator._split_by_row_id(files)),
-                _shape(_reference_split(files)))
+                _grouping(DataEvolutionSplitGenerator._split_by_row_id(files)),
+                _grouping(_reference_split(files)))
 
 
 if __name__ == "__main__":
