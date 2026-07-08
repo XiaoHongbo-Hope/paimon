@@ -15,7 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import bisect
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,6 +70,12 @@ class TableUpdateByRowId:
     """
 
     FIRST_ROW_ID_COLUMN = '_FIRST_ROW_ID'
+
+    # Above this original-file row count, non-blob updates rewrite the file
+    # streaming batch-by-batch instead of materializing it whole, so worker
+    # memory scales with the batch size, not the file row count (avoids OOM
+    # on huge single data files). Smaller files use the in-memory path.
+    _STREAM_REWRITE_ROWS = 1_000_000
 
     def __init__(
             self, table, commit_user: str, commit_identifier: int,
@@ -182,12 +187,11 @@ class TableUpdateByRowId:
             if col_name not in self.table.field_names:
                 raise ValueError(f"Column {col_name} not found in table schema")
 
-        sort_keys = [(SpecialFields.ROW_ID.name, "ascending")]
-        if hasattr(data, "sort_by"):
-            sorted_data = data.sort_by(sort_keys)
-        else:
-            sorted_data = data.take(pc.sort_indices(data, sort_keys=sort_keys))
-        data_with_first_row_id = self._calculate_first_row_id(sorted_data)
+        # No global sort of the (possibly huge) input here: the streaming
+        # write path sorts each group via a bounded index, and the in-memory
+        # path sorts its own small group. _calculate_first_row_id is
+        # order-independent.
+        data_with_first_row_id = self._calculate_first_row_id(data)
         self._write_by_first_row_id(data_with_first_row_id, column_names)
 
         return self.commit_messages
@@ -274,36 +278,48 @@ class TableUpdateByRowId:
         Validates that every input ``_ROW_ID`` is unique and belongs to
         a valid row_id range. Supports partial / non-consecutive updates.
         """
-        row_id_arr = data[SpecialFields.ROW_ID.name]
-        row_ids = row_id_arr.to_pylist()
+        # Vectorized with numpy so this stays O(n log n) and allocation-light
+        # at 100M+ rows (a Python to_pylist + per-row loop would materialize
+        # several GB of Python objects and dominate the update).
+        rids = data[SpecialFields.ROW_ID.name].combine_chunks().to_numpy(
+            zero_copy_only=False)
+        n = rids.size
 
-        if len(row_ids) != len(set(row_ids)):
+        if np.unique(rids).size != n:
             raise ValueError("Input data contains duplicate _ROW_ID values")
 
-        if not row_ids:
+        if n == 0:
             return data.append_column(
                 self.FIRST_ROW_ID_COLUMN, pa.array([], type=pa.int64()),
             )
 
-        for row_id in row_ids:
-            if not any(r.contains(row_id) for r in self.valid_row_id_ranges):
-                raise ValueError(
-                    f"Row ID {row_id} does not belong to any valid range "
-                    f"{[f'[{r.from_}, {r.to}]' for r in self.valid_row_id_ranges]}"
-                )
+        # Every id must fall in a live row-id range. Ranges are sorted and
+        # non-overlapping, so one searchsorted locates each id's owning range.
+        ranges = self.valid_row_id_ranges
+        if ranges:
+            froms = np.fromiter((r.from_ for r in ranges), dtype=np.int64,
+                                count=len(ranges))
+            tos = np.fromiter((r.to for r in ranges), dtype=np.int64,
+                              count=len(ranges))
+            idx = np.searchsorted(froms, rids, side="right") - 1
+            invalid = (idx < 0) | (rids > tos[np.clip(idx, 0, None)])
+        else:
+            invalid = np.ones(n, dtype=bool)
+        if invalid.any():
+            bad = int(rids[int(np.argmax(invalid))])
+            raise ValueError(
+                f"Row ID {bad} does not belong to any valid range "
+                f"{[f'[{r.from_}, {r.to}]' for r in ranges]}"
+            )
 
         if not self.first_row_ids:
             raise ValueError("The input sorted sequence is empty.")
 
-        sorted_seq = self.first_row_ids
-        bisect_right = bisect.bisect_right
-        first_row_id_values = [
-            sorted_seq[bisect_right(sorted_seq, row_id) - 1]
-            for row_id in row_ids
-        ]
+        seq = np.asarray(self.first_row_ids, dtype=np.int64)
+        pos = np.searchsorted(seq, rids, side="right") - 1
         return data.append_column(
             self.FIRST_ROW_ID_COLUMN,
-            pa.array(first_row_id_values, type=pa.int64()),
+            pa.array(seq[pos], type=pa.int64()),
         )
 
     def _write_by_first_row_id(
@@ -314,7 +330,12 @@ class TableUpdateByRowId:
         """Write data grouped by first_row_id."""
         first_row_id_array = data[self.FIRST_ROW_ID_COLUMN]
         unique_first_row_ids = pc.unique(first_row_id_array).to_pylist()
-        first_row_id_values = first_row_id_array.to_pylist()
+        # Only needed to slice per-group blob objects; skip the O(rows) pylist
+        # for the common non-blob path.
+        first_row_id_values = (
+            first_row_id_array.to_pylist() if blob_object_columns else None
+        )
+        single_group = len(unique_first_row_ids) == 1
 
         for first_row_id in unique_first_row_ids:
             entry = self._first_row_id_index.get(first_row_id)
@@ -322,7 +343,9 @@ class TableUpdateByRowId:
                 raise ValueError(f"No existing file found for first_row_id {first_row_id}")
             split, _files = entry
 
-            group_data = data.filter(pc.equal(first_row_id_array, first_row_id))
+            # One group => no filter copy needed (whole table is the group).
+            group_data = data if single_group else data.filter(
+                pc.equal(first_row_id_array, first_row_id))
             group_blob_object_columns = None
             if blob_object_columns:
                 group_indices = [
@@ -513,6 +536,138 @@ class TableUpdateByRowId:
                 return getattr(table_field.type, 'type', None) == 'BLOB'
         return False
 
+    def _original_data_rows(self, first_row_id: int) -> int:
+        """Row count of the original (non-blob) data file at first_row_id."""
+        entry = self._first_row_id_index.get(first_row_id)
+        if entry is None:
+            return 0
+        _split, files = entry
+        return sum(
+            f.row_count for f in files
+            if not DataFileMeta.is_blob_file(f.file_name)
+        )
+
+    def _write_group_streaming(
+            self,
+            partition: GenericRow,
+            first_row_id: int,
+            data: pa.Table,
+            column_names: List[str]):
+        """Streaming rewrite of one large data-file group (non-blob only).
+
+        Streams the original file batch by batch, merges the matching update
+        rows into each batch, and feeds them to a single-file writer — so
+        peak memory scales with the batch size, not the file row count. The
+        eager in-memory merge (see _write_group) would materialize the whole
+        column plus an O(rows) position dict and OOM on huge files.
+
+        The overlay file keeps the original file's first_row_id (whole-file
+        DE overlay granularity), so row-id conflict detection accepts it.
+        """
+        row_id_name = SpecialFields.ROW_ID.name
+        # Bound worker memory to O(batch), not O(group): keep only the row-id
+        # array plus a sort-order index (int64, ~8 bytes/update-row), and pull
+        # each batch's update values on demand via ``take``. No full-table
+        # sort/copy of the (possibly hundreds of millions of rows) group — that
+        # is what OOMs a single huge data file's update.
+        rids = data.column(row_id_name).combine_chunks().to_numpy(
+            zero_copy_only=False)
+        order = np.argsort(rids, kind="stable")
+        upd_rids = rids[order]
+        upd_cols = {
+            col: data.column(col)
+            for col in column_names
+            if col in data.column_names
+        }
+
+        entry = self._first_row_id_index.get(first_row_id)
+        if entry is None:
+            raise ValueError(f"No file found for first_row_id {first_row_id}")
+        owning_split, target_files = entry
+        # Non-blob read: only data files carry the values. Dropping blob files
+        # avoids split-read setup over the (possibly tens of thousands of)
+        # blob entries that overlap this row-id range.
+        data_files = [
+            f for f in target_files
+            if not DataFileMeta.is_blob_file(f.file_name)
+        ]
+        origin_split = DataSplit(
+            files=data_files,
+            partition=owning_split.partition,
+            bucket=owning_split.bucket,
+            raw_convertible=True,
+        )
+        read_fields: List[DataField] = [
+            f for f in self.table.fields if f.name in set(column_names)
+        ]
+        reader = TableRead(
+            self.table, predicate=None, read_type=read_fields,
+        ).to_arrow_batch_reader([origin_split])
+
+        partition_tuple = tuple(partition.values)
+        file_store_write = FileStoreWrite(self.table, self.commit_user)
+        file_store_write.disable_rolling()
+
+        offset = 0
+        write_cols_set = False
+        success = False
+        try:
+            for batch in reader:
+                n = batch.num_rows
+                if n == 0:
+                    continue
+                lo = first_row_id + offset
+                hi = lo + n
+                left = int(np.searchsorted(upd_rids, lo, side="left"))
+                right = int(np.searchsorted(upd_rids, hi, side="left"))
+                if right > left:
+                    sel = pa.array(order[left:right])
+                    positions = (upd_rids[left:right] - lo).astype(np.int64)
+                    mask_np = np.zeros(n, dtype=bool)
+                    mask_np[positions] = True
+                    mask_arr = pa.array(mask_np)
+                    arrays = []
+                    for name in batch.schema.names:
+                        orig_col = batch.column(name)
+                        new_vals = upd_cols[name].take(sel)
+                        if isinstance(new_vals, pa.ChunkedArray):
+                            new_vals = new_vals.combine_chunks()
+                        if new_vals.type != orig_col.type:
+                            new_vals = self._coerce_column(
+                                new_vals, orig_col.type)
+                        arrays.append(pc.replace_with_mask(
+                            orig_col, mask_arr, new_vals))
+                    out_batch = pa.RecordBatch.from_arrays(
+                        arrays, schema=batch.schema)
+                else:
+                    out_batch = batch
+                if not write_cols_set:
+                    file_store_write.write_cols = list(batch.schema.names)
+                    write_cols_set = True
+                file_store_write.write(partition_tuple, 0, out_batch)
+                offset += n
+
+            new_files = []
+            for msg in file_store_write.prepare_commit(self.commit_identifier):
+                new_files.extend(msg.new_files)
+            if new_files:
+                self._assign_update_file_metadata(
+                    new_files, first_row_id, column_names, {})
+                self.commit_messages.append(
+                    CommitMessage(
+                        partition=partition_tuple,
+                        bucket=0,
+                        new_files=new_files,
+                        check_from_snapshot=self.snapshot_id,
+                    )
+                )
+            success = True
+        finally:
+            if success:
+                file_store_write.close()
+            else:
+                file_store_write.abort()
+
     def _write_group(
             self,
             partition: GenericRow,
@@ -524,7 +679,25 @@ class TableUpdateByRowId:
 
         Reads the original file data, merges in the update values, and
         writes a single output file (rolling disabled) for the group.
+
+        Large non-blob groups take the streaming path to bound memory.
         """
+        has_blob = bool(blob_object_columns) or any(
+            self._is_blob_column(c) for c in column_names)
+        if (not has_blob
+                and self._original_data_rows(first_row_id)
+                > self._STREAM_REWRITE_ROWS):
+            self._write_group_streaming(
+                partition, first_row_id, data, column_names)
+            return
+
+        # In-memory merge fills masked positions in _ROW_ID order, so the group
+        # must be sorted. The update_rows_columns path already sorts (and keeps
+        # blob_object_columns aligned to that order), so only re-sort the plain
+        # update_columns path, which never carries blob objects.
+        if blob_object_columns is None:
+            data = data.sort_by([(SpecialFields.ROW_ID.name, "ascending")])
+
         original_data = self._read_original_file_data(first_row_id, column_names)
         merged_data, blob_columns = self._merge_update_with_original(
             original_data,

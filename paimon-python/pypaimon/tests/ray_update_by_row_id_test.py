@@ -129,6 +129,51 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         self.assertEqual(got[21], 999)
         self.assertTrue(all(v == 0 for k, v in got.items() if k != 21))
 
+    def test_streaming_file_rewrite(self):
+        # Force the streaming (batch-by-batch) rewrite path across multiple
+        # data files and verify it yields the same result as the in-memory
+        # path. Driven directly (not through Ray) so the threshold patch and
+        # the streaming-path spy reach the worker in-process.
+        from pypaimon.snapshot.snapshot import BATCH_COMMIT_IDENTIFIER
+        from pypaimon.write.table_update_by_row_id import TableUpdateByRowId
+        target = self._create()
+        for chunk in ([1, 2, 3], [4, 5], [6, 7, 8]):  # three data files
+            self._write(target, pa.Table.from_pydict(
+                {"id": chunk, "name": [f"n{i}" for i in chunk],
+                 "age": [i * 10 for i in chunk]}, schema=self.pa_schema))
+        rid = self._rowid_by_id(target)
+        ids = [2, 4, 5, 8]  # spans all three files
+        upd = pa.table({"_ROW_ID": [rid[i] for i in ids], "age": [i * 100 for i in ids]},
+                       schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]))
+
+        table = self.catalog.get_table(target)
+        worker = TableUpdateByRowId(
+            table, "_test_" + uuid.uuid4().hex[:8], BATCH_COMMIT_IDENTIFIER)
+        real = TableUpdateByRowId._write_group_streaming
+        called = []
+
+        def spy(self_, *a, **k):
+            called.append(True)
+            return real(self_, *a, **k)
+
+        with mock.patch.object(TableUpdateByRowId, "_STREAM_REWRITE_ROWS", 0), \
+                mock.patch.object(TableUpdateByRowId, "_write_group_streaming", spy):
+            msgs = worker.update_columns(upd, ["age"])
+        self.assertEqual(len(called), 3)  # one streaming rewrite per touched file
+
+        wb = table.new_batch_write_builder()
+        tc = wb.new_commit()
+        try:
+            tc.commit(msgs)
+        finally:
+            tc.close()
+
+        back = self._read(target).sort_by("id").to_pydict()
+        got = dict(zip(back["id"], back["age"]))
+        for i in range(1, 9):
+            self.assertEqual(got[i], i * 100 if i in ids else i * 10)
+        self.assertEqual(back["name"], [f"n{i}" for i in range(1, 9)])
+
     def test_pins_base_snapshot_for_conflict_detection(self):
         # The update pins its base snapshot and threads it to distributed_update_apply,
         # which uses it for commit-time conflict detection against concurrent writers.
