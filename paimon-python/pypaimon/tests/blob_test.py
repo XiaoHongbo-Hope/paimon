@@ -1576,6 +1576,17 @@ class CoalesceRangesTest(unittest.TestCase):
         # max_span forces a split even when contiguous
         self.assertEqual(len(_coalesce_ranges(
             [(0, "a", 0, 10), (1, "a", 10, 10)], max_gap=100, max_span=15)), 2)
+        # max_read_amplification forces a split even when max_gap allows merge.
+        self.assertEqual(len(_coalesce_ranges(
+            [(0, "a", 0, 10), (1, "a", 100, 10)],
+            max_gap=100,
+            max_span=1 << 30,
+            max_read_amplification=2.0)), 2)
+        self.assertEqual(len(_coalesce_ranges(
+            [(0, "a", 0, 10), (1, "a", 100, 10)],
+            max_gap=100,
+            max_span=1 << 30,
+            max_read_amplification=0)), 1)
 
     def test_read_ranges_coalesced(self):
         from pypaimon.common.file_io import FileIO

@@ -122,7 +122,7 @@ class TestFileScannerPartitionPredicate(unittest.TestCase):
         pred = _partition_builder.equal('dt', '2024-01-15')
         scanner = self._scanner(partition_predicate=pred)
 
-        self.assertIs(scanner.partition_key_predicate, pred)
+        self.assertEqual(scanner.partition_key_predicate, pred)
         self.assertIsNone(scanner.predicate)
         self.assertIsNone(scanner.predicate_for_stats)
         self.assertIsNone(scanner.primary_key_predicate)
@@ -149,6 +149,20 @@ class TestFileScannerPartitionPredicate(unittest.TestCase):
             _manifest_file_meta(['2024-01-15', 'us-east-1'], ['2024-01-15', 'us-west-2'])))
         self.assertFalse(scanner._filter_manifest_file(
             _manifest_file_meta(['2024-01-16', 'us-east-1'], ['2024-01-16', 'us-west-2'])))
+
+    def test_rewrites_supplied_partition_predicate_to_partition_indices(self, *_):
+        full_predicate = PredicateBuilder(TABLE_FIELDS).equal('region', 'us-east-1')
+        scanner = self._scanner(partition_predicate=full_predicate)
+
+        self.assertEqual(scanner.partition_key_predicate.index, 1)
+        self.assertTrue(scanner._filter_manifest_file(
+            _manifest_file_meta(['2024-01-15', 'us-east-1'], ['2024-01-16', 'us-east-1'])))
+        self.assertFalse(scanner._filter_manifest_file(
+            _manifest_file_meta(['2024-01-15', 'us-west-2'], ['2024-01-16', 'us-west-2'])))
+        self.assertTrue(scanner._filter_manifest_entry(
+            _manifest_entry(['2024-01-15', 'us-east-1'])))
+        self.assertFalse(scanner._filter_manifest_entry(
+            _manifest_entry(['2024-01-15', 'us-west-2'])))
 
     def test_filters_manifest_entry_by_partition(self, *_):
         scanner = self._scanner(

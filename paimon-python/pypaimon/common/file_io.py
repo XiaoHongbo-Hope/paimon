@@ -50,11 +50,13 @@ def pread(stream, length: int, offset: int) -> bytes:
 
 # Coalescing bounds: merge same-file ranges whose gap is within GAP, capping a
 # merged read at SPAN so threads stay busy and memory stays bounded.
-_COALESCE_GAP = 1 << 20
-_COALESCE_SPAN = 8 << 20
+_COALESCE_GAP = int(os.environ.get("PYPAIMON_BLOB_COALESCE_MAX_GAP", str(1 << 20)))
+_COALESCE_SPAN = int(os.environ.get("PYPAIMON_BLOB_COALESCE_MAX_SPAN", str(8 << 20)))
+_COALESCE_MAX_READ_AMPLIFICATION = float(
+    os.environ.get("PYPAIMON_BLOB_COALESCE_MAX_READ_AMPLIFICATION", "0") or "0")
 
 
-def _coalesce_ranges(items, max_gap, max_span):
+def _coalesce_ranges(items, max_gap, max_span, max_read_amplification=0):
     """Group ``(idx, path, offset, length)`` (length >= 0) into merged spans:
     ``[(path, span_offset, span_length, [(idx, offset, length), ...])]``."""
     from collections import defaultdict
@@ -64,16 +66,26 @@ def _coalesce_ranges(items, max_gap, max_span):
     spans = []
     for path, group in by_path.items():
         group.sort(key=lambda x: x[2])
-        cur, start, end = [], None, None
+        cur, start, end, useful = [], None, None, 0
         for idx, _, off, length in group:
             stop = off + length
-            if cur and off - end <= max_gap and stop - start <= max_span:
+            next_useful = useful + length
+            next_start = start if cur else off
+            next_end = max(end, stop) if cur else stop
+            next_span = next_end - next_start
+            within_read_amplification = (
+                max_read_amplification <= 0
+                or next_span <= next_useful * max_read_amplification
+            )
+            if (cur and off - end <= max_gap and stop - start <= max_span
+                    and within_read_amplification):
                 cur.append((idx, off, length))
-                end = max(end, stop)
+                end = next_end
+                useful = next_useful
             else:
                 if cur:
                     spans.append((path, start, end - start, cur))
-                cur, start, end = [(idx, off, length)], off, stop
+                cur, start, end, useful = [(idx, off, length)], off, stop, length
         if cur:
             spans.append((path, start, end - start, cur))
     return spans
@@ -176,7 +188,8 @@ class FileIO(ABC):
             stream.close()
 
     def read_ranges_coalesced(self, ranges, parallelism,
-                              max_gap=_COALESCE_GAP, max_span=_COALESCE_SPAN):
+                              max_gap=_COALESCE_GAP, max_span=_COALESCE_SPAN,
+                              max_read_amplification=_COALESCE_MAX_READ_AMPLIFICATION):
         """Read ``ranges`` (each ``None`` or ``(path, offset, length)``), returning
         bytes in the same order. Same-file nearby ranges are merged into one read
         to cut round trips, then sliced; reads run on a thread pool. Negative
@@ -199,7 +212,8 @@ class FileIO(ABC):
             else:
                 coalescible.append((i, path, offset, length))
 
-        spans = _coalesce_ranges(coalescible, max_gap, max_span)
+        spans = _coalesce_ranges(
+            coalescible, max_gap, max_span, max_read_amplification)
 
         def _run(task):
             kind, payload = task

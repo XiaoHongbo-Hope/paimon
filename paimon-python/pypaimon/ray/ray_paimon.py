@@ -288,6 +288,7 @@ def write_paimon(
     concurrency: Optional[int] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     hash_fixed_precluster: str = "auto",
+    min_rows_per_write: Optional[int] = None,
 ) -> None:
     """Write a Ray Dataset to a Paimon table.
 
@@ -311,6 +312,9 @@ def write_paimon(
             and reject HASH_FIXED primary-key tables. ``"map_groups"``
             preserves the legacy small-file optimization and its single
             group memory bound for HASH_FIXED primary-key tables.
+        min_rows_per_write: Optional target number of rows for each Ray write
+            task. Ray bundles multiple input blocks and streams them through
+            one Paimon writer, reducing task-boundary small files.
     """
     _require_ray_data()
 
@@ -323,7 +327,11 @@ def write_paimon(
 
     dataset = maybe_apply_repartition(dataset, table, hash_fixed_precluster)
 
-    datasink = PaimonDatasink(table, overwrite=overwrite)
+    datasink = PaimonDatasink(
+        table,
+        overwrite=overwrite,
+        min_rows_per_write=min_rows_per_write,
+    )
 
     write_kwargs = {}
     if ray_remote_args is not None:

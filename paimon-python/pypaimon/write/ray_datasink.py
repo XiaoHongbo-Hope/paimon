@@ -73,13 +73,21 @@ class PaimonDatasink(_DatasinkBase):
         table: "Table",
         overwrite: bool = False,
         static_partition: Optional[Dict[str, Any]] = None,
+        min_rows_per_write: Optional[int] = None,
     ):
+        if min_rows_per_write is not None and min_rows_per_write <= 0:
+            raise ValueError("min_rows_per_write must be positive")
         self.table = table
         self.overwrite = overwrite
         self.static_partition = static_partition
+        self._min_rows_per_write = min_rows_per_write
         self._table_name = table.identifier.get_full_name()
         self._writer_builder: Optional["WriteBuilder"] = None
         self._pending_commit_messages: List["CommitMessage"] = []
+
+    @property
+    def min_rows_per_write(self) -> Optional[int]:
+        return self._min_rows_per_write
 
     def _is_overwrite(self) -> bool:
         return self.overwrite or self.static_partition is not None
@@ -97,6 +105,8 @@ class PaimonDatasink(_DatasinkBase):
             self._table_name = self.table.identifier.get_full_name()
         if not hasattr(self, 'static_partition'):
             self.static_partition = None
+        if not hasattr(self, '_min_rows_per_write'):
+            self._min_rows_per_write = None
 
     def on_write_start(self, schema=None) -> None:
         logger.info(f"Starting write job for table {self._table_name}")

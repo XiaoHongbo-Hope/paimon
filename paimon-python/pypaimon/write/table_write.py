@@ -104,6 +104,7 @@ class TableWrite:
         ray_remote_args: Optional[Dict[str, Any]] = None,
         hash_fixed_precluster: str = "auto",
         static_partition: Optional[dict] = None,
+        min_rows_per_write: Optional[int] = None,
     ) -> None:
         """
         Write a Ray Dataset to Paimon table.
@@ -125,6 +126,9 @@ class TableWrite:
             static_partition: Optional partition spec to overwrite. When set,
                 the Ray write runs in overwrite mode for this partition and
                 overrides any builder-level partition spec.
+            min_rows_per_write: Optional target number of rows for each Ray
+                write task. Ray bundles input blocks and streams them through
+                one Paimon writer to reduce task-boundary small files.
         """
         from pypaimon.ray.shuffle import maybe_apply_repartition
         from pypaimon.write.ray_datasink import PaimonDatasink
@@ -140,6 +144,7 @@ class TableWrite:
             self.table,
             overwrite=overwrite,
             static_partition=overwrite_partition,
+            min_rows_per_write=min_rows_per_write,
         )
         dataset.write_datasink(
             datasink,

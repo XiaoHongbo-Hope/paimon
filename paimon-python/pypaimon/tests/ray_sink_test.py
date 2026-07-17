@@ -24,6 +24,7 @@ import pyarrow as pa
 from ray.data._internal.execution.interfaces import TaskContext
 
 from pypaimon import CatalogFactory, Schema
+from pypaimon.ray.ray_paimon import write_paimon
 from pypaimon.write.ray_datasink import PaimonDatasink
 from pypaimon.write.commit_message import CommitMessage
 from pypaimon.write.table_write import TableWrite
@@ -81,8 +82,18 @@ class RaySinkTest(unittest.TestCase):
         self.assertEqual(datasink.table, self.table)
         self.assertFalse(datasink.overwrite)
         self.assertIsNone(datasink.static_partition)
+        self.assertIsNone(datasink.min_rows_per_write)
         self.assertIsNone(datasink._writer_builder)
         self.assertEqual(datasink._table_name, "test_db.test_table")
+
+        bundled_datasink = PaimonDatasink(
+            self.table,
+            min_rows_per_write=8192,
+        )
+        self.assertEqual(bundled_datasink.min_rows_per_write, 8192)
+
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            PaimonDatasink(self.table, min_rows_per_write=0)
 
         datasink_overwrite = PaimonDatasink(self.table, overwrite=True)
         self.assertTrue(datasink_overwrite.overwrite)
@@ -108,6 +119,7 @@ class RaySinkTest(unittest.TestCase):
         self.assertEqual(new_datasink.table, self.table)
         self.assertFalse(new_datasink.overwrite)
         self.assertIsNone(new_datasink.static_partition)
+        self.assertIsNone(new_datasink.min_rows_per_write)
 
     def test_table_and_writer_builder_serializable(self):
         import pickle
@@ -464,13 +476,18 @@ class RaySinkTest(unittest.TestCase):
             mock_repartition.return_value = dataset
             datasink = mock_datasink_cls.return_value
 
-            table_write.write_ray(dataset, concurrency=2)
+            table_write.write_ray(
+                dataset,
+                concurrency=2,
+                min_rows_per_write=8192,
+            )
 
             mock_repartition.assert_called_once_with(dataset, self.table, 'auto')
             mock_datasink_cls.assert_called_once_with(
                 self.table,
                 overwrite=False,
                 static_partition={'dt': '2024-01-01'},
+                min_rows_per_write=8192,
             )
             dataset.write_datasink.assert_called_once_with(
                 datasink,
@@ -497,7 +514,32 @@ class RaySinkTest(unittest.TestCase):
                 self.table,
                 overwrite=False,
                 static_partition={'dt': '2024-01-02'},
+                min_rows_per_write=None,
             )
+
+    def test_write_paimon_forwards_min_rows_per_write(self):
+        dataset = Mock()
+        catalog = Mock()
+        catalog.get_table.return_value = self.table
+
+        with patch('pypaimon.ray.ray_paimon._require_ray_data'), \
+                patch.object(CatalogFactory, 'create', return_value=catalog), \
+                patch('pypaimon.ray.shuffle.maybe_apply_repartition', return_value=dataset):
+            write_paimon(
+                dataset,
+                self.table_identifier,
+                {"warehouse": self.warehouse_path},
+                concurrency=2,
+                min_rows_per_write=8192,
+            )
+
+        datasink = dataset.write_datasink.call_args.args[0]
+        self.assertIsInstance(datasink, PaimonDatasink)
+        self.assertEqual(datasink.min_rows_per_write, 8192)
+        dataset.write_datasink.assert_called_once_with(
+            datasink,
+            concurrency=2,
+        )
 
     def test_on_write_failed(self):
         # Test without pending messages (on_write_complete() never called)
