@@ -31,7 +31,6 @@ from daft.io.source import DataSource, DataSourceTask
 from daft.logical.schema import Schema
 from daft.recordbatch import RecordBatch
 
-from pypaimon.daft.daft_compat import require_file_range_reads
 from pypaimon.daft.daft_explain import (
     PaimonReaderSplitExplain,
     PaimonScanExplain,
@@ -486,7 +485,6 @@ class PaimonDataSource(DataSource):
         )
 
         if self._has_blob_columns:
-            require_file_range_reads()
             from daft.datatype import DataType
 
             base_schema = Schema.from_pyarrow_schema(pa_schema)
