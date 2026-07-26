@@ -225,7 +225,8 @@ class ConflictDetection:
 
     def read_row_id_base_entries(self, latest_snapshot, commit_entries,
                                  index_entries=None, planned_base_entries=None,
-                                 planned_base_snapshot_identity=None):
+                                 planned_base_snapshot_identity=None,
+                                 planned_row_id_update_ranges=None):
         """Read the current entries relevant to one row-id commit window."""
         base_snapshot_id = self._row_id_check_from_snapshot
         if base_snapshot_id is None:
@@ -272,7 +273,7 @@ class ConflictDetection:
             self._row_id_history_snapshots(latest_snapshot)
             self._validate_row_id_deletion_vectors(
                 base_snapshot, latest_snapshot, planned_base_entries,
-                commit_entries)
+                commit_entries, planned_row_id_update_ranges)
             if self._row_id_overwrite_seen:
                 return self._read_current_row_id_entries(
                     latest_snapshot,
@@ -286,7 +287,7 @@ class ConflictDetection:
             latest_snapshot, commit_entries, index_entries, cache_result=True)
         self._validate_row_id_deletion_vectors(
             base_snapshot, latest_snapshot, planned_base_entries,
-            commit_entries)
+            commit_entries, planned_row_id_update_ranges)
         for snapshot, raw_entries in changes:
             if snapshot.commit_kind == "OVERWRITE":
                 return self.commit_scanner.read_conflict_entries(
@@ -448,20 +449,20 @@ class ConflictDetection:
 
     def _validate_row_id_deletion_vectors(
             self, base_snapshot, latest_snapshot, base_entries,
-            commit_entries):
+            commit_entries, row_id_update_ranges=None):
         if (self._row_id_index_overwrite_seen
                 and self._row_id_deletion_vectors_changed(
                     base_snapshot, latest_snapshot, base_entries,
-                    commit_entries)):
+                    commit_entries, row_id_update_ranges)):
             raise RowIdPlanningConflictError(
                 "Concurrent overwrite changed deletion vectors for the "
                 "current update window.")
 
     def _row_id_deletion_vectors_changed(
             self, base_snapshot, latest_snapshot, base_entries,
-            commit_entries):
+            commit_entries, row_id_update_ranges=None):
         targets = self._row_id_deletion_vector_targets(
-            base_entries, commit_entries)
+            base_entries, commit_entries, row_id_update_ranges)
         if not targets:
             return any(
                 entry.kind == 0 and entry.file.row_id_range() is not None
@@ -506,18 +507,21 @@ class ConflictDetection:
         return False
 
     def _row_id_deletion_vector_targets(
-            self, base_entries, commit_entries):
-        update_ranges = {}
-        for entry in commit_entries:
-            row_range = entry.file.row_id_range()
-            if entry.kind != 0 or row_range is None:
-                continue
-            key = (tuple(entry.partition.values), entry.bucket)
-            update_ranges.setdefault(key, []).append(row_range)
-        update_ranges = {
-            key: Range.sort_and_merge_overlap(ranges, True, True)
-            for key, ranges in update_ranges.items()
-        }
+            self, base_entries, commit_entries,
+            row_id_update_ranges=None):
+        update_ranges = row_id_update_ranges
+        if update_ranges is None:
+            update_ranges = {}
+            for entry in commit_entries:
+                row_range = entry.file.row_id_range()
+                if entry.kind != 0 or row_range is None:
+                    continue
+                key = (tuple(entry.partition.values), entry.bucket)
+                update_ranges.setdefault(key, []).append(row_range)
+            update_ranges = {
+                key: Range.sort_and_merge_overlap(ranges, True, True)
+                for key, ranges in update_ranges.items()
+            }
 
         targets = {}
         for entry in base_entries:
@@ -775,6 +779,20 @@ class ConflictDetection:
         for add in add_entries:
             for data_file_name in self._deletion_vector_data_file_names(add.index_file):
                 affected_files.append((add.partition, add.bucket, data_file_name))
+
+        missing_files = {
+            (tuple(partition.values), bucket, data_file_name)
+            for partition, bucket, data_file_name in affected_files
+        }.difference(existing_data_files)
+        if missing_files and latest_snapshot is not None:
+            current = self.commit_scanner.read_conflict_entries(
+                latest_snapshot, [], add_entries)
+            existing_data_files.update(
+                (tuple(entry.partition.values), entry.bucket,
+                 entry.file.file_name)
+                for entry in current
+                if entry.kind == 0
+            )
 
         for partition, bucket, data_file_name in affected_files:
             data_file_key = (tuple(partition.values), bucket, data_file_name)

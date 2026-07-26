@@ -29,6 +29,7 @@ from pypaimon.tests.data_evolution_test_helpers import (
     DataEvolutionTestBase,
     StreamModeMixin,
 )
+from pypaimon.write.commit.conflict_detection import CommitConflictError
 
 
 # ======================================================================
@@ -180,6 +181,14 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
             options=options,
         )
         return table
+
+    @staticmethod
+    def _list_table_files(table):
+        return {
+            os.path.relpath(os.path.join(root, name), table.table_path)
+            for root, _dirs, files in os.walk(table.table_path)
+            for name in files
+        }
 
     # ==================================================================
     # Shared tests (run under both batch and stream modes)
@@ -798,6 +807,40 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
             self.assertFalse(table.file_io.exists(path))
         self.assertNotIn(1, self._read_all(table)['id'].to_pylist())
 
+    def test_false_atomic_commit_aborts_files_and_manifests(self):
+        table = self._create_seeded_table()
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+        before_files = self._list_table_files(table)
+
+        wb = self._make_write_builder(table)
+        update = wb.new_update().with_update_type(['age'])
+        commit_id = self._next_commit_id()
+        messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            commit_id,
+        )
+
+        commit = wb.new_commit()
+        commit.file_store_commit.commit_max_retries = 0
+        with mock.patch.object(
+                commit.file_store_commit.snapshot_commit,
+                'commit', return_value=False):
+            with self.assertRaises(CommitConflictError):
+                self._apply_commit(commit, messages, commit_id)
+        commit.close()
+
+        self.assertEqual(before_files, self._list_table_files(table))
+
     def test_row_id_update_allows_disjoint_partition_dv_delete(self):
         table = self._create_seeded_deletion_vector_table(
             partition_keys=['city'])
@@ -910,7 +953,7 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         self._do_delete_by_row_id(table, [row_ids[1]])
 
         update_commit = update_wb.new_commit()
-        with self.assertRaisesRegex(RuntimeError, "index-changing overwrite"):
+        with self.assertRaisesRegex(RuntimeError, "deletion vectors"):
             self._apply_commit(
                 update_commit,
                 update_messages + delete_messages,
@@ -921,6 +964,47 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         result = self._read_all(table).to_pydict()
         self.assertNotIn(1, result['id'])
         self.assertIn(2, result['id'])
+
+    def test_mixed_row_delete_allows_disjoint_concurrent_delete(self):
+        table = self._create_seeded_deletion_vector_table(
+            partition_keys=['city'])
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        commit_id = self._next_commit_id()
+        update_messages = self._apply_update(
+            update_wb.new_update().with_update_type(['age']),
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            commit_id,
+        )
+        delete_wb = self._make_write_builder(table)
+        delete_messages = self._apply_delete_by_row_id(
+            delete_wb.new_update(),
+            [row_ids[2]],
+            commit_id,
+        )
+
+        self._do_delete_by_row_id(table, [row_ids[3]])
+
+        commit = update_wb.new_commit()
+        self._apply_commit(
+            commit, update_messages + delete_messages, commit_id)
+        commit.close()
+
+        result = self._read_all(table).to_pydict()
+        ages = dict(zip(result['id'], result['age']))
+        self.assertEqual(99, ages[1])
+        self.assertNotIn(2, ages)
+        self.assertNotIn(3, ages)
 
     def test_mixed_insert_detects_concurrent_dv_delete(self):
         table = self._create_seeded_deletion_vector_table(
@@ -1013,6 +1097,59 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         result = self._read_all(table).sort_by('id').to_pydict()
         self.assertEqual(list(range(9)), result['id'])
         self.assertEqual(b'updated', result['picture'][0])
+
+    def test_blob_update_allows_dv_delete_before_updated_row(self):
+        table_schema = pa.schema([
+            ('id', pa.int32()),
+            ('picture', pa.large_binary()),
+        ])
+        options = dict(self.table_options)
+        options['deletion-vectors.enabled'] = 'true'
+        table = self._create_table(pa_schema=table_schema, options=options)
+        self._write_arrow(table, pa.Table.from_pydict({
+            'id': list(range(10)),
+            'picture': [f'blob-{i}'.encode() for i in range(10)],
+        }, schema=table_schema))
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        wb = self._make_write_builder(table)
+        commit_id = self._next_commit_id()
+        messages = self._apply_update(
+            wb.new_update().with_update_type(['picture']),
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[9]],
+                'picture': [b'updated'],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('picture', pa.large_binary()),
+            ])),
+            commit_id,
+        )
+        blob_file = next(
+            file
+            for message in messages
+            for file in message.new_files
+            if file.file_name.endswith('.blob')
+        )
+        self.assertEqual(row_ids[0], blob_file.first_row_id)
+        self.assertEqual(10, blob_file.row_count)
+        self.assertEqual(
+            [(row_ids[9], row_ids[9])],
+            messages[0].row_id_update_ranges,
+        )
+
+        self._do_delete_by_row_id(table, [row_ids[0]])
+
+        commit = wb.new_commit()
+        self._apply_commit(commit, messages, commit_id)
+        commit.close()
+
+        result = self._read_all(table).sort_by('id').to_pydict()
+        self.assertEqual(list(range(1, 10)), result['id'])
+        self.assertEqual(b'updated', result['picture'][-1])
 
     def test_delete_by_partition_predicate_drops_partition_without_dv(self):
         table = self._create_seeded_table(partition_keys=['city'])
@@ -1757,14 +1894,6 @@ class TableUpdateBatchTest(_BatchModeMixin, _TableUpdateTestBase, unittest.TestC
                 ])), self._next_commit_id())
 
         self.assertEqual(before_files, self._list_table_files(table))
-
-    @staticmethod
-    def _list_table_files(table):
-        return {
-            os.path.relpath(os.path.join(root, name), table.table_path)
-            for root, _dirs, files in os.walk(table.table_path)
-            for name in files
-        }
 
 
 class TableUpdateStreamTest(_StreamModeMixin, _TableUpdateTestBase, unittest.TestCase):

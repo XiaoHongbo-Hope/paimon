@@ -622,6 +622,11 @@ class TableUpdateByRowId:
             if new_files:
                 self._assign_update_file_metadata(
                     new_files, first_row_id, column_names, blob_columns)
+                update_ranges = [
+                    (range_.from_, range_.to)
+                    for range_ in Range.to_ranges(
+                        data[SpecialFields.ROW_ID.name].to_pylist())
+                ]
                 self.commit_messages.append(
                     CommitMessage(
                         partition=partition_tuple,
@@ -631,6 +636,7 @@ class TableUpdateByRowId:
                         row_id_base_files=list(base_files),
                         row_id_base_snapshot_identity=(
                             self._base_snapshot_identity),
+                        row_id_update_ranges=update_ranges,
                     )
                 )
             success = True

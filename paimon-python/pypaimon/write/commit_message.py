@@ -37,6 +37,7 @@ class CommitMessage:
     hash_index_base_snapshot: Optional[int] = None
     row_id_base_files: List[DataFileMeta] = field(default_factory=list)
     row_id_base_snapshot_identity: Optional[Tuple] = None
+    row_id_update_ranges: List[Tuple[int, int]] = field(default_factory=list)
 
     def is_empty(self):
         return (

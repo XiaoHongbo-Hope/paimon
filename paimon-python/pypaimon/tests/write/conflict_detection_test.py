@@ -26,6 +26,7 @@ from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.manifest_entry import ManifestEntry
 from pypaimon.schema.data_types import AtomicType, DataField
 from pypaimon.table.row.generic_row import GenericRow
+from pypaimon.utils.range import Range
 from pypaimon.write.commit.commit_scanner import CommitScanner
 from pypaimon.write.commit.conflict_detection import (
     ConflictDetection,
@@ -623,6 +624,27 @@ class TestRowIdWindowBaseEntries(unittest.TestCase):
 
         self.assertTrue(detection._row_id_deletion_vectors_changed(
             base, latest, [], window))
+
+    def test_dv_targets_use_exact_update_ranges(self):
+        detection = self._make_detection(
+            [_FakeSnapshot(1, "APPEND")],
+            _FakeBaseEntryScanner({}, {}),
+        )
+        base = [_make_entry(
+            "base.parquet", first_row_id=100, row_count=10)]
+        window = [_make_entry(
+            "update.blob", first_row_id=100, row_count=10)]
+
+        targets = detection._row_id_deletion_vector_targets(
+            base,
+            window,
+            {((), 0): [Range(102, 102), Range(109, 109)]},
+        )
+
+        self.assertEqual(
+            {((), 0, "base.parquet"): [Range(2, 2), Range(9, 9)]},
+            targets,
+        )
 
     def test_bounded_overwrite_is_checked_for_later_windows(self):
         base = _FakeSnapshot(

@@ -47,6 +47,7 @@ from pypaimon.snapshot.snapshot_commit import (PartitionStatistics,
                                                SnapshotCommit)
 from pypaimon.table.row.generic_row import GenericRow
 from pypaimon.table.row.offset_row import OffsetRow
+from pypaimon.utils.range import Range
 from pypaimon.write.commit.commit_rollback import CommitRollback
 from pypaimon.write.commit.commit_scanner import CommitScanner
 from pypaimon.write.commit.conflict_detection import (
@@ -195,6 +196,8 @@ class FileStoreCommit:
         commit_entries = self._collect_manifest_entries(commit_messages)
         row_id_base_entries, row_id_base_snapshot_identity = (
             self._collect_row_id_base_entries(commit_messages))
+        row_id_update_ranges = self._collect_row_id_update_ranges(
+            commit_messages)
         changelog_entries = self._collect_changelog_entries(commit_messages)
 
         logger.info("Finished collecting changes, including: %d entries, %d changelog entries",
@@ -258,7 +261,8 @@ class FileStoreCommit:
                          hash_index_base_snapshot=hash_index_base_snapshot,
                          row_id_base_entries=row_id_base_entries,
                          row_id_base_snapshot_identity=(
-                             row_id_base_snapshot_identity))
+                             row_id_base_snapshot_identity),
+                         row_id_update_ranges=row_id_update_ranges)
 
     def overwrite(self, overwrite_partition, commit_messages: List[CommitMessage], commit_identifier: int):
         """Commit the given commit messages in overwrite mode."""
@@ -413,7 +417,8 @@ class FileStoreCommit:
                     index_adds=None, changelog_entries=None,
                     hash_index_base_snapshot=None,
                     row_id_base_entries=None,
-                    row_id_base_snapshot_identity=None):
+                    row_id_base_snapshot_identity=None,
+                    row_id_update_ranges=None):
 
         retry_count = 0
         retry_result = None
@@ -457,6 +462,7 @@ class FileStoreCommit:
                     row_id_base_entries=row_id_base_entries,
                     row_id_base_snapshot_identity=(
                         row_id_base_snapshot_identity),
+                    row_id_update_ranges=row_id_update_ranges,
                     previous_outcome_unknown=outcome_unknown,
                 )
 
@@ -506,7 +512,7 @@ class FileStoreCommit:
                     )
                     error_type = (
                         CommitOutcomeUnknownError
-                        if outcome_unknown else RuntimeError
+                        if outcome_unknown else CommitConflictError
                     )
                     error_cause = (
                         outcome_unknown_cause
@@ -539,6 +545,7 @@ class FileStoreCommit:
                          hash_index_base_snapshot=None,
                          row_id_base_entries=None,
                          row_id_base_snapshot_identity=None,
+                         row_id_update_ranges=None,
                          previous_outcome_unknown=None) -> CommitResult:
         start_millis = int(time.time() * 1000)
         if previous_outcome_unknown is None:
@@ -586,6 +593,7 @@ class FileStoreCommit:
                             index_entries,
                             row_id_base_entries,
                             row_id_base_snapshot_identity,
+                            row_id_update_ranges,
                         )
                     )
                 except RowIdPlanningConflictError as error:
@@ -746,18 +754,6 @@ class FileStoreCommit:
             with self.snapshot_commit:
                 success = self.snapshot_commit.commit(snapshot_data, statistics)
                 atomic_call_returned = True
-                if not success:
-                    commit_time_s = (int(time.time() * 1000) - start_millis) / 1000
-                    logger.warning(
-                        "Atomic commit failed for snapshot #%d by user %s "
-                        "with identifier %s and kind %s after %.0f seconds. Try again.",
-                        new_snapshot_id,
-                        self.commit_user,
-                        commit_identifier,
-                        commit_kind,
-                        commit_time_s,
-                    )
-                    return RetryResult(latest_snapshot, None, base_data_files=base_data_files)
         except Exception as e:
             if (not atomic_call_returned
                     and _is_deterministic_atomic_commit_failure(e)):
@@ -774,6 +770,33 @@ class FileStoreCommit:
                 base_data_files=base_data_files,
                 outcome_unknown=True,
             )
+
+        if not success:
+            commit_time_s = (int(time.time() * 1000) - start_millis) / 1000
+            logger.warning(
+                "Atomic commit failed for snapshot #%d by user %s "
+                "with identifier %s and kind %s after %.0f seconds. Try again.",
+                new_snapshot_id,
+                self.commit_user,
+                commit_identifier,
+                commit_kind,
+                commit_time_s,
+            )
+            try:
+                self._clean_up_reuse_tmp_manifests(
+                    delta_manifest_list,
+                    changelog_manifest_list_name,
+                    new_index_manifest,
+                )
+                self._clean_up_no_reuse_tmp_manifests(
+                    base_manifest_list, merge_new_files)
+            except Exception:
+                logger.warning(
+                    "Failed to clean up rejected commit manifests.",
+                    exc_info=True,
+                )
+            return RetryResult(
+                latest_snapshot, None, base_data_files=base_data_files)
 
         logger.info(
             "Successfully commit snapshot %d to table %s by user %s "
@@ -923,10 +946,7 @@ class FileStoreCommit:
         return commit_entries
 
     def _collect_row_id_base_entries(self, commit_messages):
-        messages = [
-            msg for msg in commit_messages
-            if msg.check_from_snapshot != -1
-        ]
+        messages = self._row_id_data_messages(commit_messages)
         if (not messages
                 or any(not getattr(msg, "row_id_base_files", None)
                        or getattr(
@@ -958,6 +978,33 @@ class FileStoreCommit:
                 )
                 entries[entry.identifier()] = entry
         return list(entries.values()), snapshot
+
+    def _collect_row_id_update_ranges(self, commit_messages):
+        messages = self._row_id_data_messages(commit_messages)
+        if (not messages
+                or any(not getattr(msg, "row_id_update_ranges", None)
+                       for msg in messages)):
+            return None
+
+        ranges = {}
+        for msg in messages:
+            key = (tuple(msg.partition), msg.bucket)
+            ranges.setdefault(key, []).extend(
+                Range(from_, to)
+                for from_, to in msg.row_id_update_ranges
+            )
+        return {
+            key: Range.sort_and_merge_overlap(values, True, True)
+            for key, values in ranges.items()
+        }
+
+    @staticmethod
+    def _row_id_data_messages(commit_messages):
+        return [
+            msg for msg in commit_messages
+            if msg.check_from_snapshot != -1
+            and (msg.new_files or msg.deleted_files)
+        ]
 
     def _clean_up_reuse_tmp_manifests(
             self,

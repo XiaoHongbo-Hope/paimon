@@ -611,12 +611,34 @@ class TestFileStoreCommit(unittest.TestCase):
         file_store_commit._try_commit_once = Mock(
             return_value=RetryResult(None))
 
-        with self.assertRaises(RuntimeError) as raised:
+        with self.assertRaises(CommitConflictError) as raised:
             file_store_commit._try_commit(
                 "APPEND", 1, lambda _snapshot: [Mock()])
 
         self.assertNotIsInstance(
             raised.exception, CommitOutcomeUnknownError)
+
+    def test_false_atomic_commit_cleans_attempt_manifests(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit, snapshot_commit, commit_entry = (
+            self._prepare_atomic_attempt())
+        snapshot_commit.commit.return_value = False
+        file_store_commit._clean_up_reuse_tmp_manifests = Mock()
+        file_store_commit._clean_up_no_reuse_tmp_manifests = Mock()
+
+        result = file_store_commit._try_commit_once(
+            retry_result=None,
+            commit_kind="APPEND",
+            commit_entries=[commit_entry],
+            changelog_entries=[],
+            commit_identifier=1,
+            latest_snapshot=None,
+        )
+
+        self.assertFalse(result.is_success())
+        self.assertFalse(result.outcome_unknown)
+        file_store_commit._clean_up_reuse_tmp_manifests.assert_called_once()
+        file_store_commit._clean_up_no_reuse_tmp_manifests.assert_called_once()
 
     def test_unknown_outcome_survives_later_failure(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
@@ -999,6 +1021,41 @@ class TestFileStoreCommit(unittest.TestCase):
 
         entries, snapshot = file_store_commit._collect_row_id_base_entries(
             [complete, legacy])
+
+        self.assertEqual(identity, snapshot)
+        self.assertEqual([base_file], [entry.file for entry in entries])
+
+    def test_index_only_message_keeps_row_id_base_evidence(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+        self.mock_table.partition_keys_fields = []
+        self.mock_table.total_buckets = 1
+        identity = (7, "user", 1, "APPEND", 1, "base", "delta", None, None)
+        base_file = Mock(
+            file_name="base.parquet",
+            level=0,
+            extra_files=[],
+            embedded_index=None,
+            external_path=None,
+        )
+        update = CommitMessage(
+            partition=(),
+            bucket=0,
+            new_files=[Mock()],
+            check_from_snapshot=7,
+            row_id_base_files=[base_file],
+            row_id_base_snapshot_identity=identity,
+        )
+        row_delete = CommitMessage(
+            partition=("other",),
+            bucket=0,
+            new_files=[],
+            check_from_snapshot=7,
+            index_adds=[Mock()],
+        )
+
+        entries, snapshot = file_store_commit._collect_row_id_base_entries(
+            [update, row_delete])
 
         self.assertEqual(identity, snapshot)
         self.assertEqual([base_file], [entry.file for entry in entries])
