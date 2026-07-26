@@ -60,6 +60,7 @@ class _FilesInfo:
         field(default_factory=dict)
     )
     valid_row_id_ranges: List[Range] = field(default_factory=list)
+    snapshot_identity: Optional[Tuple] = None
 
 
 class TableUpdateByRowId:
@@ -93,6 +94,7 @@ class TableUpdateByRowId:
         self.first_row_ids = info.first_row_ids
         self._first_row_id_index = info.first_row_id_index
         self.valid_row_id_ranges = info.valid_row_id_ranges
+        self._base_snapshot_identity = info.snapshot_identity
 
         self.commit_messages: List[CommitMessage] = []
 
@@ -103,6 +105,7 @@ class TableUpdateByRowId:
             first_row_ids=self.first_row_ids,
             first_row_id_index=self._first_row_id_index,
             valid_row_id_ranges=self.valid_row_id_ranges,
+            snapshot_identity=self._base_snapshot_identity,
         )
 
     def _load_existing_files_info(self) -> _FilesInfo:
@@ -125,10 +128,11 @@ class TableUpdateByRowId:
             ]
             data_files = [
                 file for file in files_with_row_id
-                if not DataFileMeta.is_blob_file(file.file_name)
+                if not self._is_dedicated_file(file.file_name)
             ]
             for file in split.files:
-                if file.first_row_id is None or DataFileMeta.is_blob_file(file.file_name):
+                if (file.first_row_id is None
+                        or self._is_dedicated_file(file.file_name)):
                     continue
                 row_id_ranges.append(file.row_id_range())
             for file in data_files:
@@ -156,16 +160,41 @@ class TableUpdateByRowId:
             merged = []
 
         snapshot_id = plan.snapshot_id if plan.snapshot_id is not None else -1
+        snapshot = scan.file_scanner.scanned_snapshot
+        if snapshot is not None and snapshot.id != snapshot_id:
+            raise RuntimeError("Planned snapshot changed during row-id routing.")
         return _FilesInfo(
             snapshot_id=snapshot_id,
             first_row_ids=sorted(index.keys()),
             first_row_id_index=index,
             valid_row_id_ranges=merged,
+            snapshot_identity=self._snapshot_fingerprint(snapshot),
         )
 
     @staticmethod
     def _overlaps(left: Range, right: Range) -> bool:
         return left.from_ <= right.to and right.from_ <= left.to
+
+    @staticmethod
+    def _is_dedicated_file(file_name: str) -> bool:
+        return (DataFileMeta.is_blob_file(file_name)
+                or DataFileMeta.is_vector_file(file_name))
+
+    @staticmethod
+    def _snapshot_fingerprint(snapshot) -> Optional[Tuple]:
+        if snapshot is None:
+            return None
+        return (
+            snapshot.id,
+            getattr(snapshot, "commit_user", None),
+            getattr(snapshot, "commit_identifier", None),
+            getattr(snapshot, "commit_kind", None),
+            getattr(snapshot, "time_millis", None),
+            getattr(snapshot, "base_manifest_list", None),
+            getattr(snapshot, "delta_manifest_list", None),
+            getattr(snapshot, "changelog_manifest_list", None),
+            getattr(snapshot, "index_manifest", None),
+        )
 
     def update_columns(self, data: pa.Table, column_names: List[str]) -> List[CommitMessage]:
         """
@@ -546,6 +575,10 @@ class TableUpdateByRowId:
         Reads the original file data, merges in the update values, and
         writes a single output file (rolling disabled) for the group.
         """
+        entry = self._first_row_id_index.get(first_row_id)
+        if entry is None:
+            raise ValueError(f"No file found for first_row_id {first_row_id}")
+        base_files = entry[1]
         original_data = self._read_original_file_data(first_row_id, column_names)
         merged_data, blob_columns = self._merge_update_with_original(
             original_data,
@@ -595,6 +628,9 @@ class TableUpdateByRowId:
                         bucket=0,
                         new_files=new_files,
                         check_from_snapshot=self.snapshot_id,
+                        row_id_base_files=list(base_files),
+                        row_id_base_snapshot_identity=(
+                            self._base_snapshot_identity),
                     )
                 )
             success = True

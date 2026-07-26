@@ -163,6 +163,14 @@ class ConflictDetection:
         self.manifest_list_manager = manifest_list_manager
         self.table = table
         self._row_id_check_from_snapshot = None
+        self._row_id_ignored_commit_high_watermarks = {}
+        self._row_id_history_base_snapshot = None
+        self._row_id_history_cursor = None
+        self._row_id_history_cursor_identity = None
+        self._row_id_external_snapshots = []
+        self._row_id_window_changes = None
+        self._row_id_overwrite_seen = False
+        self._bounded_row_id_conflict_state = False
         self.commit_scanner = commit_scanner
 
     def should_be_overwrite_commit(self, append_file_entries=None, append_index_files=None):
@@ -176,6 +184,253 @@ class ConflictDetection:
 
     def has_row_id_check_from_snapshot(self):
         return self._row_id_check_from_snapshot is not None
+
+    def set_row_id_check_from_snapshot(self, snapshot_id):
+        if self._row_id_check_from_snapshot == snapshot_id:
+            return
+        self._row_id_check_from_snapshot = snapshot_id
+        self.reset_row_id_history()
+
+    def reset_row_id_history(self):
+        """Clear cached row-id history."""
+        self._row_id_history_base_snapshot = None
+        self._row_id_history_cursor = None
+        self._row_id_history_cursor_identity = None
+        self._row_id_external_snapshots = []
+        self._row_id_window_changes = None
+        self._row_id_overwrite_seen = False
+
+    def clear_row_id_window_changes(self):
+        self._row_id_window_changes = None
+
+    def enable_bounded_row_id_conflict_state(self):
+        self._bounded_row_id_conflict_state = True
+
+    def ignore_row_id_commit(self, commit_user, commit_identifier):
+        """Skip a disjoint commit in later checks."""
+        current = self._row_id_ignored_commit_high_watermarks.get(commit_user)
+        if current is None or commit_identifier > current:
+            self._row_id_ignored_commit_high_watermarks[commit_user] = commit_identifier
+
+    def read_row_id_base_entries(self, latest_snapshot, commit_entries,
+                                 index_entries=None, planned_base_entries=None,
+                                 planned_base_snapshot_identity=None):
+        """Read the current entries relevant to one row-id commit window."""
+        if (planned_base_entries is None
+                or planned_base_snapshot_identity is None):
+            self._row_id_window_changes = None
+            if (self._bounded_row_id_conflict_state
+                    and self._row_id_check_from_snapshot is not None):
+                self._row_id_history_snapshots(latest_snapshot)
+                if self._row_id_overwrite_seen:
+                    raise RuntimeError(
+                        "Cannot validate a concurrent overwrite without "
+                        "planned row ID base files.")
+            return self.commit_scanner.read_conflict_entries(
+                latest_snapshot, commit_entries, index_entries)
+
+        base_snapshot_id = self._row_id_check_from_snapshot
+        if base_snapshot_id is None:
+            return self.commit_scanner.read_conflict_entries(
+                latest_snapshot, commit_entries, index_entries)
+        base_snapshot = self.snapshot_manager.get_snapshot_by_id(
+            base_snapshot_id)
+        if base_snapshot is None or latest_snapshot.id < base_snapshot_id:
+            raise RuntimeError(
+                "Row ID conflict check base snapshot {} is no longer "
+                "available.".format(base_snapshot_id))
+        if (self._snapshot_identity(base_snapshot)
+                != planned_base_snapshot_identity):
+            raise RuntimeError(
+                "Row ID conflict check base snapshot {} changed.".format(
+                    base_snapshot_id))
+
+        self._row_id_window_changes = None
+        if self._bounded_row_id_conflict_state:
+            self._row_id_history_snapshots(latest_snapshot)
+            if self._row_id_overwrite_seen:
+                return self._read_current_row_id_entries(
+                    latest_snapshot,
+                    commit_entries,
+                    index_entries,
+                    planned_base_entries,
+                )
+
+        entries = list(planned_base_entries)
+        changes = self._row_id_changes(
+            latest_snapshot, commit_entries, index_entries, cache_result=True)
+        for snapshot, raw_entries in changes:
+            if snapshot.commit_kind == "OVERWRITE":
+                return self.commit_scanner.read_conflict_entries(
+                    latest_snapshot, commit_entries, index_entries)
+            entries.extend(raw_entries)
+        return FileEntry.merge_entries(entries)
+
+    def _read_current_row_id_entries(
+            self, latest_snapshot, commit_entries, index_entries,
+            planned_base_entries):
+        current = self.commit_scanner.read_conflict_entries(
+            latest_snapshot, commit_entries, index_entries)
+        scope = CommitScanner.conflict_entry_scope(
+            commit_entries, index_entries)
+        planned = (
+            list(planned_base_entries)
+            if scope.is_empty()
+            else [
+                entry for entry in planned_base_entries
+                if scope.matches_entry(entry)
+            ]
+        )
+        if (self._row_id_entry_signatures(planned)
+                != self._row_id_entry_signatures(current)):
+            raise RuntimeError(
+                "Concurrent overwrite changed row ID files for the current "
+                "update window.")
+
+        self._row_id_external_snapshots = []
+        self._row_id_window_changes = (
+            self._row_id_change_key(latest_snapshot, commit_entries), [])
+        return current
+
+    @staticmethod
+    def _row_id_entry_signatures(entries):
+        return {
+            (
+                entry.identifier(),
+                entry.file.first_row_id,
+                entry.file.row_count,
+                entry.file.schema_id,
+                tuple(entry.file.write_cols)
+                if entry.file.write_cols is not None else None,
+            )
+            for entry in entries
+            if entry.kind == 0
+        }
+
+    def _row_id_changes(self, latest_snapshot, commit_entries,
+                        index_entries=None, cache_result=False):
+        key = self._row_id_change_key(latest_snapshot, commit_entries)
+        cached = self._row_id_window_changes
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        def changes():
+            for snapshot in self._row_id_history_snapshots(latest_snapshot):
+                yield (
+                    snapshot,
+                    self.commit_scanner.read_incremental_raw_entries_for_scope(
+                        snapshot, commit_entries, index_entries),
+                )
+
+        if not cache_result:
+            return changes()
+        result = list(changes())
+        self._row_id_window_changes = (key, result)
+        return result
+
+    def _row_id_change_key(self, latest_snapshot, commit_entries):
+        return (
+            self._snapshot_identity(latest_snapshot),
+            tuple(
+                (
+                    tuple(entry.partition.values),
+                    entry.bucket,
+                    entry.kind,
+                    entry.file.file_name,
+                    entry.file.first_row_id,
+                    entry.file.row_count,
+                )
+                for entry in commit_entries
+            ),
+        )
+
+    def _row_id_history_snapshots(self, latest_snapshot):
+        """Cache history except disjoint commits."""
+        base_snapshot = self._row_id_check_from_snapshot
+        reset_history = (
+            self._row_id_history_base_snapshot != base_snapshot
+            or self._row_id_history_cursor is None
+            or latest_snapshot.id < self._row_id_history_cursor
+        )
+        if not reset_history:
+            cursor_snapshot = (
+                latest_snapshot
+                if latest_snapshot.id == self._row_id_history_cursor
+                else self.snapshot_manager.get_snapshot_by_id(
+                    self._row_id_history_cursor)
+            )
+            reset_history = (
+                self._snapshot_identity(cursor_snapshot)
+                != self._row_id_history_cursor_identity
+            )
+
+        if reset_history:
+            self._row_id_history_base_snapshot = base_snapshot
+            self._row_id_history_cursor = base_snapshot
+            self._row_id_history_cursor_identity = None
+            self._row_id_external_snapshots = []
+            self._row_id_overwrite_seen = False
+
+        # Snapshot files below the cursor are immutable. A rollback replaces the
+        # whole tail, including the cursor, whose identity check above resets cache.
+        for snapshot_id in range(
+                self._row_id_history_cursor + 1,
+                latest_snapshot.id + 1):
+            snapshot = self.snapshot_manager.get_snapshot_by_id(snapshot_id)
+            if snapshot is None:
+                raise RuntimeError(
+                    "Row ID conflict check snapshot {} is no longer "
+                    "available.".format(snapshot_id))
+            commit_user = getattr(snapshot, "commit_user", None)
+            commit_identifier = getattr(snapshot, "commit_identifier", None)
+            ignored_through = self._row_id_ignored_commit_high_watermarks.get(
+                commit_user)
+            if (ignored_through is None
+                    or commit_identifier is None
+                    or commit_identifier > ignored_through):
+                if (snapshot.commit_kind == "OVERWRITE"
+                        and self._index_manifest_changed(snapshot)):
+                    raise RuntimeError(
+                        "Row ID conflict check encountered an index-changing "
+                        "overwrite after base snapshot {}.".format(
+                            base_snapshot))
+                if self._bounded_row_id_conflict_state:
+                    if snapshot.commit_kind == "OVERWRITE":
+                        self._row_id_overwrite_seen = True
+                    else:
+                        raise RuntimeError(
+                            "Concurrent commit detected during incremental "
+                            "update_by_row_id.")
+                else:
+                    self._row_id_external_snapshots.append(snapshot)
+
+        self._row_id_history_cursor = latest_snapshot.id
+        self._row_id_history_cursor_identity = self._snapshot_identity(
+            latest_snapshot)
+        return self._row_id_external_snapshots
+
+    def _index_manifest_changed(self, snapshot):
+        previous = self.snapshot_manager.get_snapshot_by_id(snapshot.id - 1)
+        if previous is None:
+            return True
+        return (getattr(previous, "index_manifest", None)
+                != getattr(snapshot, "index_manifest", None))
+
+    @staticmethod
+    def _snapshot_identity(snapshot):
+        if snapshot is None:
+            return None
+        return (
+            snapshot.id,
+            getattr(snapshot, "commit_user", None),
+            getattr(snapshot, "commit_identifier", None),
+            getattr(snapshot, "commit_kind", None),
+            getattr(snapshot, "time_millis", None),
+            getattr(snapshot, "base_manifest_list", None),
+            getattr(snapshot, "delta_manifest_list", None),
+            getattr(snapshot, "changelog_manifest_list", None),
+            getattr(snapshot, "index_manifest", None),
+        )
 
     @staticmethod
     def has_global_index_additions(index_entries=None):
@@ -490,13 +745,15 @@ class ConflictDetection:
         existing_index = set()
         existing_ranges = {}
         for base in base_entries:
-            if base.file.first_row_id is not None:
-                existing_index.add((
-                    base.partition, base.bucket,
-                    base.file.first_row_id, base.file.row_count))
-                if not self._is_dedicated_file(base.file.file_name):
-                    existing_ranges.setdefault((base.partition, base.bucket), []).append(
-                        base.file.row_id_range())
+            if (base.kind != 0
+                    or base.file.first_row_id is None
+                    or self._is_dedicated_file(base.file.file_name)):
+                continue
+            existing_index.add((
+                base.partition, base.bucket,
+                base.file.first_row_id, base.file.row_count))
+            existing_ranges.setdefault((base.partition, base.bucket), []).append(
+                base.file.row_id_range())
 
         existing_ranges = {
             key: Range.sort_and_merge_overlap(ranges, True, True)
@@ -662,40 +919,38 @@ class ConflictDetection:
             r = f.row_id_range()
             if r is not None:
                 delta_signatures.append(
-                    (DataFileMeta.is_blob_file(f.file_name), r.from_, r.to))
+                    (self._file_kind(f.file_name), r.from_, r.to))
 
-        for snapshot_id in range(
-                self._row_id_check_from_snapshot + 1,
-                latest_snapshot.id + 1):
-            snapshot = self.snapshot_manager.get_snapshot_by_id(snapshot_id)
-            if snapshot is None:
-                continue
-
-            if snapshot.commit_kind == "COMPACT":
-                err = self._compact_conflicts_with_delta(
-                    snapshot, delta_signatures, column_checker, commit_entries)
-                if err is not None:
-                    return err
-                continue
-
-            incremental_entries = self.commit_scanner.read_incremental_entries_from_changed_partitions(
-                snapshot, commit_entries)
-            for entry in incremental_entries:
-                file_range = entry.file.row_id_range()
-                if file_range is None:
+        try:
+            for snapshot, raw_entries in self._row_id_changes(
+                    latest_snapshot, commit_entries):
+                if snapshot.commit_kind == "COMPACT":
+                    err = self._compact_conflicts_with_delta(
+                        snapshot, delta_signatures, column_checker, raw_entries)
+                    if err is not None:
+                        return err
                     continue
-                if file_range.from_ < check_next_row_id:
-                    if column_checker.conflicts_with(entry.file):
+
+                for entry in FileEntry.merge_entries(raw_entries):
+                    if entry.kind != 0:
+                        continue
+                    file_range = entry.file.row_id_range()
+                    if file_range is None:
+                        continue
+                    if (file_range.from_ < check_next_row_id
+                            and column_checker.conflicts_with(entry.file)):
                         return RuntimeError(
                             "For Data Evolution table, multiple 'MERGE INTO' "
                             "operations have encountered conflicts, updating "
                             "the same file, which can render some updates "
                             "ineffective.")
 
-        return None
+            return None
+        finally:
+            self._row_id_window_changes = None
 
     def _compact_conflicts_with_delta(self, snapshot, delta_signatures,
-                                      column_checker, commit_entries):
+                                      column_checker, raw_entries):
         """Return RuntimeError if a COMPACT snapshot deleted a same-kind
         anchor file whose row-id range AND write columns overlap any
         staged delta; otherwise None.
@@ -708,17 +963,15 @@ class ConflictDetection:
         """
         if not delta_signatures:
             return None
-        raw_entries = self.commit_scanner.read_incremental_raw_entries_from_changed_partitions(
-            snapshot, commit_entries)
         for entry in raw_entries:
             if entry.kind != 1:
                 continue
             file_range = entry.file.row_id_range()
             if file_range is None:
                 continue
-            deleted_is_blob = DataFileMeta.is_blob_file(entry.file.file_name)
-            for delta_is_blob, from_, to in delta_signatures:
-                if delta_is_blob != deleted_is_blob:
+            deleted_kind = self._file_kind(entry.file.file_name)
+            for delta_kind, from_, to in delta_signatures:
+                if delta_kind != deleted_kind:
                     continue
                 if file_range.from_ > to or from_ > file_range.to:
                     continue
@@ -736,3 +989,11 @@ class ConflictDetection:
                         df=from_,
                         dt=to))
         return None
+
+    @staticmethod
+    def _file_kind(file_name):
+        if DataFileMeta.is_blob_file(file_name):
+            return "blob"
+        if DataFileMeta.is_vector_file(file_name):
+            return "vector"
+        return "normal"

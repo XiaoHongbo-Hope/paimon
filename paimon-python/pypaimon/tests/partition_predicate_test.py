@@ -29,6 +29,7 @@ from pypaimon.read.scanner.file_scanner import FileScanner
 from pypaimon.schema.data_types import AtomicType, DataField
 from pypaimon.table.row.generic_row import GenericRow
 from pypaimon.table.row.offset_row import OffsetRow
+from pypaimon.utils.range import Range
 from pypaimon.write.commit.commit_scanner import CommitScanner
 from pypaimon.write.commit_message import CommitMessage
 from pypaimon.write.file_store_commit import FileStoreCommit
@@ -419,6 +420,84 @@ class TestCommitScannerPartitionPredicate(unittest.TestCase):
             [_manifest_entry(['2024-01-15', 'us-east-1'])])
         self.assertIsNone(pred)
 
+    def test_conflict_scope_manifest_pruning(self):
+        partition = GenericRow(
+            ['2024-01-15', 'us-east-1'], PARTITION_FIELDS)
+
+        def data_entry(file_name):
+            file = Mock(file_name=file_name)
+            file.row_id_range.return_value = Range(10, 19)
+            return ManifestEntry(0, partition, 0, 1, file)
+
+        normal = CommitScanner.conflict_entry_scope([data_entry('data.parquet')])
+        blob = CommitScanner.conflict_entry_scope([data_entry('delta.blob')])
+        dv_file = IndexFileMeta(
+            IndexManifestFile.DELETION_VECTORS_INDEX,
+            'dv-index', 1, 1, dv_ranges={'data.parquet': Mock()},
+        )
+        dv = CommitScanner.conflict_entry_scope([], [
+            IndexManifestEntry(0, partition, 0, dv_file),
+        ])
+        global_file = IndexFileMeta(
+            'btree', 'global-index', 1, 1,
+            global_index_meta=Mock(row_range_start=10, row_range_end=19),
+        )
+        global_index = CommitScanner.conflict_entry_scope([], [
+            IndexManifestEntry(0, partition, 0, global_file),
+        ])
+
+        self.assertTrue(normal.can_prune_manifest_files())
+        self.assertTrue(blob.can_prune_manifest_files())
+        self.assertFalse(dv.can_prune_manifest_files())
+        self.assertTrue(global_index.can_prune_manifest_files())
+
+    @patch('pypaimon.write.commit.commit_scanner.ManifestFileManager')
+    def test_conflict_entries_apply_partition_and_overlapping_range(self, mock_mfm_cls):
+        target_partition = GenericRow(
+            ['2024-01-15', 'us-east-1'], PARTITION_FIELDS)
+        other_partition = GenericRow(
+            ['2024-01-16', 'us-west-2'], PARTITION_FIELDS)
+
+        def entry(partition, first_row_id, row_count=10):
+            file = Mock(file_name='f-{}-{}.parquet'.format(
+                first_row_id, row_count))
+            file.row_id_range.return_value = Range(
+                first_row_id, first_row_id + row_count - 1)
+            return ManifestEntry(0, partition, 0, 1, file)
+
+        target = entry(target_partition, 10)
+        widened = entry(target_partition, 5, 20)
+        split_left = entry(target_partition, 10, 5)
+        split_right = entry(target_partition, 15, 5)
+        same_range_other_partition = entry(other_partition, 10)
+        unrelated = entry(target_partition, 100)
+
+        def filter_entries(_manifests, manifest_entry_filter=None, **kwargs):
+            partition_filter = kwargs.get('partition_filter')
+            return [
+                candidate
+                for candidate in [
+                    target, widened, split_left, split_right,
+                    same_range_other_partition, unrelated]
+                if (partition_filter is None
+                    or partition_filter.test(candidate.partition))
+                and (manifest_entry_filter is None
+                     or manifest_entry_filter(candidate))
+            ]
+
+        mock_mfm_cls.return_value.read_entries_parallel.side_effect = filter_entries
+        scanner = self._scanner()
+        scanner.manifest_list_manager.read_all.return_value = [
+            Mock(min_row_id=None, max_row_id=None)]
+        window = entry(target_partition, 10)
+
+        result = scanner.read_conflict_entries(Mock(), [window])
+
+        self.assertEqual([target, widened, split_left, split_right], result)
+        kwargs = mock_mfm_cls.return_value.read_entries_parallel.call_args[1]
+        self.assertIsNotNone(kwargs['early_record_filter'])
+        self.assertIsNotNone(kwargs['partition_filter'])
+
     @patch('pypaimon.write.commit.commit_scanner.FileScanner')
     def test_passes_partition_predicate_to_file_scanner(self, mock_scanner_cls):
         mock_scanner_cls.return_value.read_manifest_entries.return_value = []
@@ -474,3 +553,61 @@ class TestCommitScannerPartitionPredicate(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         self.assertEqual(tuple(result[0].partition.values), ('p1', 'us'))
+
+    @patch('pypaimon.write.commit.commit_scanner.ManifestFileManager')
+    def test_scoped_raw_entries_include_overlapping_ranges(self, mock_mfm_cls):
+        partition = GenericRow(
+            ['2024-01-15', 'us-east-1'], PARTITION_FIELDS)
+
+        def entry(kind, first_row_id, row_count):
+            file = Mock(file_name='f-{}.parquet'.format(first_row_id))
+            file.row_id_range.return_value = Range(
+                first_row_id, first_row_id + row_count - 1)
+            return ManifestEntry(kind, partition, 0, 1, file)
+
+        overlap = entry(1, 0, 20)
+        unrelated = entry(0, 100, 10)
+
+        def read(_name, manifest_entry_filter=None, **_kwargs):
+            return [
+                candidate for candidate in [overlap, unrelated]
+                if manifest_entry_filter(candidate)
+            ]
+
+        mock_mfm_cls.return_value.read.side_effect = read
+        scanner = self._scanner()
+        scanner.manifest_list_manager.read_delta.return_value = [
+            Mock(file_name='m1', min_row_id=None, max_row_id=None)]
+        window = entry(0, 10, 10)
+
+        result = scanner.read_incremental_raw_entries_for_scope(
+            Mock(), [window])
+
+        self.assertEqual([overlap], result)
+        kwargs = mock_mfm_cls.return_value.read.call_args[1]
+        self.assertIsNotNone(kwargs['early_record_filter'])
+        self.assertIsNotNone(kwargs['partition_filter'])
+
+    def test_incremental_changes_falls_back_on_overwrite(self):
+        append = Mock(id=2, commit_kind='APPEND')
+        overwrite = Mock(id=3, commit_kind='OVERWRITE')
+        after_overwrite = Mock(id=4, commit_kind='APPEND')
+        snapshots = {2: append, 3: overwrite, 4: after_overwrite}
+
+        table = _mock_table()
+        snapshot_manager = table.snapshot_manager.return_value
+        snapshot_manager.get_snapshot_by_id.side_effect = snapshots.get
+        scanner = CommitScanner(table, Mock())
+        scanner.read_incremental_raw_entries_from_changed_partitions = Mock(
+            return_value=[])
+
+        result = scanner.read_incremental_changes(
+            Mock(id=1), after_overwrite, [])
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            [call[0][0]
+             for call in snapshot_manager.get_snapshot_by_id.call_args_list],
+            [2, 3],
+        )
+        scanner.read_incremental_raw_entries_from_changed_partitions.assert_called_once()

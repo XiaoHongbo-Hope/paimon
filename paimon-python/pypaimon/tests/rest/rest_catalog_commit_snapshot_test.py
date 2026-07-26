@@ -25,14 +25,21 @@ import pyarrow as pa
 from pypaimon import Schema
 from pypaimon.api.api_response import CommitTableResponse
 from pypaimon.common.options import Options
-from pypaimon.api.rest_exception import NoSuchResourceException
+from pypaimon.api.rest_exception import (
+    ForbiddenException,
+    NoSuchResourceException,
+)
 from pypaimon.catalog.catalog_context import CatalogContext
-from pypaimon.catalog.catalog_exception import TableNotExistException
+from pypaimon.catalog.catalog_exception import (
+    TableNoPermissionException,
+    TableNotExistException,
+)
 from pypaimon.catalog.rest.rest_catalog import RESTCatalog
 from pypaimon.common.identifier import Identifier
 from pypaimon.snapshot.snapshot import Snapshot
 from pypaimon.snapshot.snapshot_commit import PartitionStatistics
 from pypaimon.tests.rest.rest_base_test import RESTBaseTest
+from pypaimon.write.file_store_commit import CommitOutcomeUnknownError
 
 
 class TestRESTCatalogCommitSnapshot(unittest.TestCase):
@@ -131,6 +138,24 @@ class TestRESTCatalogCommitSnapshot(unittest.TestCase):
 
             # Test commit snapshot with table not exist
             with self.assertRaises(TableNotExistException):
+                catalog.commit_snapshot(
+                    self.identifier,
+                    "test-uuid",
+                    self.test_snapshot,
+                    self.test_statistics
+                )
+
+    def test_rest_catalog_commit_snapshot_no_permission(self):
+        with patch('pypaimon.catalog.rest.rest_catalog.RESTApi') as mock_rest_api:
+            mock_api_instance = Mock()
+            mock_api_instance.options = self.test_options
+            mock_api_instance.commit_snapshot.side_effect = ForbiddenException(
+                "forbidden")
+            mock_rest_api.return_value = mock_api_instance
+
+            catalog = RESTCatalog(self.catalog_context)
+
+            with self.assertRaises(TableNoPermissionException):
                 catalog.commit_snapshot(
                     self.identifier,
                     "test-uuid",
@@ -325,6 +350,53 @@ class TestRESTCommit(RESTBaseTest):
         self.assertEqual(
             sorted(actual.column('id').to_pylist()), [1, 2, 3, 4, 5, 6])
 
+    def test_explicit_rest_commit_rejections_are_not_retried(self):
+        pa_schema = pa.schema([('id', pa.int32())])
+        cases = [
+            (
+                "missing",
+                NoSuchResourceException("Table", "missing", "not found"),
+                TableNotExistException,
+            ),
+            (
+                "forbidden",
+                ForbiddenException("forbidden"),
+                TableNoPermissionException,
+            ),
+        ]
+
+        for suffix, rest_error, expected_error in cases:
+            with self.subTest(error=suffix):
+                table_name = f'default.test_deterministic_commit_{suffix}'
+                schema = Schema.from_pyarrow_schema(
+                    pa_schema,
+                    options={
+                        'commit.max-retries': '3',
+                        'commit.min-retry-wait': '1ms',
+                        'commit.max-retry-wait': '1ms',
+                        'commit.timeout': '10s',
+                    },
+                )
+                self.rest_catalog.create_table(table_name, schema, False)
+                table = self.rest_catalog.get_table(table_name)
+                table_write = table.new_batch_write_builder().new_write()
+                table_commit = table.new_batch_write_builder().new_commit()
+                table_write.write_arrow(pa.table({'id': [1]}, schema=pa_schema))
+                commit_messages = table_write.prepare_commit()
+
+                try:
+                    with patch(
+                            'pypaimon.api.rest_api.RESTApi.commit_snapshot',
+                            side_effect=rest_error) as rest_commit:
+                        with self.assertRaises(expected_error):
+                            table_commit.commit(commit_messages)
+
+                    rest_commit.assert_called_once()
+                    table_commit.abort(commit_messages)
+                finally:
+                    table_write.close()
+                    table_commit.close()
+
     def test_commit_succeeded_on_server_but_client_fails(self):
         pa_schema = pa.schema([('id', pa.int32()), ('name', pa.string())])
         opts = {
@@ -352,7 +424,7 @@ class TestRESTCommit(RESTBaseTest):
             raise RuntimeError("simulated")
 
         with patch.object(tc.file_store_commit.snapshot_commit, 'commit', side_effect=commit_then_raise):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(CommitOutcomeUnknownError):
                 tc.commit(cm)
         tw.close()
         tc.close()
@@ -363,6 +435,165 @@ class TestRESTCommit(RESTBaseTest):
         self.assertEqual(actual.num_rows, 3)
         self.assertEqual(actual.column('id').to_pylist(), [1, 2, 3])
         self.assertEqual(actual.column('name').to_pylist(), ['a', 'b', 'c'])
+
+    def test_lost_commit_response_resolves_duplicate_as_success(self):
+        pa_schema = pa.schema([('id', pa.int32()), ('name', pa.string())])
+        opts = {
+            'bucket': '1',
+            'file.format': 'parquet',
+            'commit.max-retries': '1',
+            'commit.min-retry-wait': '1ms',
+            'commit.max-retry-wait': '1ms',
+            'commit.timeout': '10s',
+        }
+        schema = Schema.from_pyarrow_schema(pa_schema, options=opts)
+        table_name = 'default.test_duplicate_commit_success'
+        self.rest_catalog.create_table(table_name, schema, False)
+        table = self.rest_catalog.get_table(table_name)
+
+        write_builder = table.new_batch_write_builder()
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        data = pa.Table.from_pydict(
+            {'id': [1, 2, 3], 'name': ['a', 'b', 'c']}, schema=pa_schema)
+        table_write.write_arrow(data)
+        commit_messages = table_write.prepare_commit()
+
+        real_commit = table_commit.file_store_commit.snapshot_commit.commit
+        commit_calls = []
+
+        def commit_then_lose_response(snapshot, statistics):
+            commit_calls.append(snapshot.id)
+            real_commit(snapshot, statistics)
+            raise RuntimeError("simulated lost response")
+
+        with patch.object(
+                table_commit.file_store_commit.snapshot_commit,
+                'commit',
+                side_effect=commit_then_lose_response):
+            table_commit.commit(commit_messages)
+
+        table_write.close()
+        table_commit.close()
+
+        self.assertEqual([1], commit_calls)
+        self.assertEqual(1, table.snapshot_manager().get_latest_snapshot().id)
+        read_builder = table.new_read_builder()
+        actual = read_builder.new_read().to_arrow(
+            read_builder.new_scan().plan().splits())
+        self.assertEqual(actual.num_rows, 3)
+        self.assertEqual(actual.column('id').to_pylist(), [1, 2, 3])
+        self.assertEqual(actual.column('name').to_pylist(), ['a', 'b', 'c'])
+
+    def test_lost_truncate_response_resolves_duplicate_as_success(self):
+        pa_schema = pa.schema([('id', pa.int32()), ('name', pa.string())])
+        opts = {
+            'bucket': '1',
+            'file.format': 'parquet',
+            'commit.max-retries': '1',
+            'commit.min-retry-wait': '1ms',
+            'commit.max-retry-wait': '1ms',
+            'commit.timeout': '10s',
+        }
+        schema = Schema.from_pyarrow_schema(pa_schema, options=opts)
+        table_name = 'default.test_duplicate_truncate_success'
+        self.rest_catalog.create_table(table_name, schema, False)
+        table = self.rest_catalog.get_table(table_name)
+
+        write_builder = table.new_batch_write_builder()
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        data = pa.Table.from_pydict(
+            {'id': [1, 2, 3], 'name': ['a', 'b', 'c']}, schema=pa_schema)
+        table_write.write_arrow(data)
+        table_commit.commit(table_write.prepare_commit())
+        table_write.close()
+        table_commit.close()
+
+        truncate_commit = table.new_batch_write_builder().new_commit()
+        real_commit = truncate_commit.file_store_commit.snapshot_commit.commit
+        commit_calls = []
+
+        def commit_then_lose_response(snapshot, statistics):
+            commit_calls.append(snapshot.id)
+            real_commit(snapshot, statistics)
+            raise RuntimeError("simulated lost response")
+
+        with patch.object(
+                truncate_commit.file_store_commit.snapshot_commit,
+                'commit',
+                side_effect=commit_then_lose_response):
+            truncate_commit.truncate_table()
+        truncate_commit.close()
+
+        self.assertEqual([2], commit_calls)
+        latest_snapshot = table.snapshot_manager().get_latest_snapshot()
+        self.assertEqual(2, latest_snapshot.id)
+        self.assertEqual('OVERWRITE', latest_snapshot.commit_kind)
+        read_builder = table.new_read_builder()
+        actual = read_builder.new_read().to_arrow(
+            read_builder.new_scan().plan().splits())
+        self.assertEqual(0, actual.num_rows)
+
+    def test_lost_drop_partitions_response_resolves_duplicate_as_success(self):
+        pa_schema = pa.schema([
+            ('id', pa.int32()),
+            ('name', pa.string()),
+            ('dt', pa.string()),
+        ])
+        opts = {
+            'bucket': '1',
+            'file.format': 'parquet',
+            'commit.max-retries': '1',
+            'commit.min-retry-wait': '1ms',
+            'commit.max-retry-wait': '1ms',
+            'commit.timeout': '10s',
+        }
+        schema = Schema.from_pyarrow_schema(
+            pa_schema, partition_keys=['dt'], options=opts)
+        table_name = 'default.test_duplicate_drop_partitions_success'
+        self.rest_catalog.create_table(table_name, schema, False)
+        table = self.rest_catalog.get_table(table_name)
+
+        write_builder = table.new_batch_write_builder()
+        table_write = write_builder.new_write()
+        table_commit = write_builder.new_commit()
+        data = pa.Table.from_pydict({
+            'id': [1, 2],
+            'name': ['drop', 'keep'],
+            'dt': ['p1', 'p2'],
+        }, schema=pa_schema)
+        table_write.write_arrow(data)
+        table_commit.commit(table_write.prepare_commit())
+        table_write.close()
+        table_commit.close()
+
+        partition_commit = table.new_batch_write_builder().new_commit()
+        real_commit = partition_commit.file_store_commit.snapshot_commit.commit
+        commit_calls = []
+
+        def commit_then_lose_response(snapshot, statistics):
+            commit_calls.append(snapshot.id)
+            real_commit(snapshot, statistics)
+            raise RuntimeError("simulated lost response")
+
+        with patch.object(
+                partition_commit.file_store_commit.snapshot_commit,
+                'commit',
+                side_effect=commit_then_lose_response):
+            partition_commit.truncate_partitions([{'dt': 'p1'}])
+        partition_commit.close()
+
+        self.assertEqual([2], commit_calls)
+        latest_snapshot = table.snapshot_manager().get_latest_snapshot()
+        self.assertEqual(2, latest_snapshot.id)
+        self.assertEqual('OVERWRITE', latest_snapshot.commit_kind)
+        read_builder = table.new_read_builder()
+        actual = read_builder.new_read().to_arrow(
+            read_builder.new_scan().plan().splits())
+        self.assertEqual([2], actual.column('id').to_pylist())
+        self.assertEqual(['keep'], actual.column('name').to_pylist())
+        self.assertEqual(['p2'], actual.column('dt').to_pylist())
 
 
 if __name__ == '__main__':

@@ -290,6 +290,10 @@ class FileScanner:
             self.table.table_schema.id
         )
 
+    @property
+    def scanned_snapshot(self):
+        return self._scanned_snapshot
+
     def _schema_fields(self, schema_id: int):
         """Resolve schema fields, short-circuiting current table schema id to avoid
         filesystem access (REST catalog would get 403).

@@ -638,6 +638,82 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         result = self._read_all(table).sort_by('id')
         self.assertEqual([1, 3, 4, 5, 6], result['id'].to_pylist())
 
+    def test_row_id_update_allows_disjoint_partition_overwrite(self):
+        table = self._create_seeded_table(partition_keys=['city'])
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        update = update_wb.new_update().with_update_type(['age'])
+        update_cid = self._next_commit_id()
+        update_messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            update_cid,
+        )
+
+        overwrite_wb = table.new_batch_write_builder().overwrite({'city': 'LA'})
+        overwrite_write = overwrite_wb.new_write()
+        overwrite_commit = overwrite_wb.new_commit()
+        overwrite_write.write_arrow(pa.Table.from_pydict({
+            'id': [6],
+            'name': ['Frank'],
+            'age': [28],
+            'city': ['LA'],
+        }, schema=self.pa_schema))
+        overwrite_commit.commit(overwrite_write.prepare_commit())
+        overwrite_write.close()
+        overwrite_commit.close()
+
+        update_commit = update_wb.new_commit()
+        self._apply_commit(update_commit, update_messages, update_cid)
+        update_commit.close()
+
+        result = self._read_all(table).to_pydict()
+        ages = dict(zip(result['id'], result['age']))
+        self.assertEqual({1, 3, 4, 5, 6}, set(result['id']))
+        self.assertEqual(99, ages[1])
+
+    def test_row_id_update_conflicts_with_concurrent_dv_delete(self):
+        table = self._create_seeded_deletion_vector_table()
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        update = update_wb.new_update().with_update_type(['age'])
+        update_cid = self._next_commit_id()
+        update_messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            update_cid,
+        )
+
+        self._do_delete_by_row_id(table, [row_ids[1]])
+
+        update_commit = update_wb.new_commit()
+        with self.assertRaisesRegex(RuntimeError, "index-changing overwrite"):
+            self._apply_commit(update_commit, update_messages, update_cid)
+        update_commit.close()
+
+        result = self._read_all(table).to_pydict()
+        self.assertNotIn(1, result['id'])
+
     def test_delete_by_partition_predicate_drops_partition_without_dv(self):
         table = self._create_seeded_table(partition_keys=['city'])
         pb = table.new_read_builder().new_predicate_builder()
@@ -1253,6 +1329,49 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
 # ======================================================================
 # Mode-specific mixins (add the ``update_by_arrow_with_row_id`` primitive)
 # ======================================================================
+
+
+class TableUpdateByRowIdPlanningTest(unittest.TestCase):
+
+    def test_uses_snapshot_loaded_by_planner(self):
+        from pypaimon.utils.range import Range
+        from pypaimon.write.table_update_by_row_id import TableUpdateByRowId
+
+        snapshot = mock.Mock(
+            id=7,
+            commit_user="user",
+            commit_identifier=1,
+            commit_kind="APPEND",
+            time_millis=1,
+            base_manifest_list="base",
+            delta_manifest_list="delta",
+            changelog_manifest_list=None,
+            index_manifest=None,
+        )
+        file = mock.Mock(
+            file_name="data.parquet",
+            first_row_id=0,
+        )
+        file.row_id_range.return_value = Range(0, 9)
+        split = mock.Mock(files=[file])
+        plan = mock.Mock(snapshot_id=7)
+        plan.splits.return_value = [split]
+        scan = mock.Mock()
+        scan.plan_for_write.return_value = plan
+        scan.file_scanner.scanned_snapshot = snapshot
+        table = mock.Mock()
+        table.new_read_builder.return_value.new_scan.return_value = scan
+        updater = TableUpdateByRowId.__new__(TableUpdateByRowId)
+        updater.table = table
+
+        info = updater._load_existing_files_info()
+
+        self.assertEqual(
+            TableUpdateByRowId._snapshot_fingerprint(snapshot),
+            info.snapshot_identity,
+        )
+        table.snapshot_manager.assert_not_called()
+
 
 class _BatchModeMixin(BatchModeMixin):
     def _apply_update(self, table_update, data, cid):
