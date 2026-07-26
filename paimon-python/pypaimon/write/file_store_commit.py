@@ -763,7 +763,7 @@ class FileStoreCommit:
                     exc_info=True,
                 )
 
-        # A failure after commit() returned is still outcome-unknown.
+        success = None
         atomic_call_returned = False
         try:
             with self.snapshot_commit:
@@ -778,6 +778,17 @@ class FileStoreCommit:
                 )
                 clean_up_rejected_commit()
                 raise
+            if atomic_call_returned and success is False:
+                logger.warning(
+                    "Atomic commit was rejected, but closing failed. Try again.",
+                    exc_info=True,
+                )
+                clean_up_rejected_commit()
+                return RetryResult(
+                    latest_snapshot,
+                    e,
+                    base_data_files=base_data_files,
+                )
             # Commit exception, not sure about the situation and should not clean up the files
             logger.warning("Retry commit for exception.", exc_info=True)
             return RetryResult(

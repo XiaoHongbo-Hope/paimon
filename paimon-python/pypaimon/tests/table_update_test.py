@@ -878,6 +878,51 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
 
         self.assertEqual(before_files, self._list_table_files(table))
 
+    def test_false_atomic_commit_close_failure_cleans_files(self):
+        class RejectingCommit:
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc_val, _exc_tb):
+                raise RuntimeError("close failed")
+
+            def commit(self, _snapshot, _statistics):
+                return False
+
+            def close(self):
+                pass
+
+        table = self._create_seeded_table()
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+        before_files = self._list_table_files(table)
+
+        wb = self._make_write_builder(table)
+        commit_id = self._next_commit_id()
+        messages = self._apply_update(
+            wb.new_update().with_update_type(['age']),
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            commit_id,
+        )
+
+        commit = wb.new_commit()
+        commit.file_store_commit.commit_max_retries = 0
+        commit.file_store_commit.snapshot_commit = RejectingCommit()
+        with self.assertRaises(CommitConflictError):
+            self._apply_commit(commit, messages, commit_id)
+        commit.close()
+
+        self.assertEqual(before_files, self._list_table_files(table))
+
     def test_row_id_update_allows_disjoint_partition_dv_delete(self):
         table = self._create_seeded_deletion_vector_table(
             partition_keys=['city'])

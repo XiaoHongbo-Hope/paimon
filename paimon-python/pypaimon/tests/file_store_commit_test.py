@@ -606,6 +606,30 @@ class TestFileStoreCommit(unittest.TestCase):
         self.assertTrue(result.outcome_unknown)
         self.assertIs(close_error, result.exception)
 
+    def test_false_commit_close_failure_is_deterministic(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        close_error = RuntimeError("close failed")
+        file_store_commit, snapshot_commit, commit_entry = (
+            self._prepare_atomic_attempt(close_error=close_error))
+        snapshot_commit.commit.return_value = False
+        file_store_commit._clean_up_reuse_tmp_manifests = Mock()
+        file_store_commit._clean_up_no_reuse_tmp_manifests = Mock()
+
+        result = file_store_commit._try_commit_once(
+            retry_result=None,
+            commit_kind="APPEND",
+            commit_entries=[commit_entry],
+            changelog_entries=[],
+            commit_identifier=1,
+            latest_snapshot=None,
+        )
+
+        self.assertFalse(result.is_success())
+        self.assertFalse(result.outcome_unknown)
+        self.assertIs(close_error, result.exception)
+        file_store_commit._clean_up_reuse_tmp_manifests.assert_called_once()
+        file_store_commit._clean_up_no_reuse_tmp_manifests.assert_called_once()
+
     def test_false_commit_has_deterministic_outcome(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
         file_store_commit = self._create_file_store_commit()
