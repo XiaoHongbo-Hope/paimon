@@ -461,6 +461,28 @@ class TestRowIdWindowBaseEntries(unittest.TestCase):
         self.assertEqual([2], scanner.scoped_raw_calls)
         self.assertEqual(0, scanner.fallback_calls)
 
+    def test_fallback_rejects_index_changing_overwrite(self):
+        base = _FakeSnapshot(
+            1, "APPEND", next_row_id=100,
+            delta_manifest_list="base", index_manifest="old-index")
+        overwrite = _FakeSnapshot(
+            2, "OVERWRITE", next_row_id=100,
+            commit_user="external", commit_identifier=1,
+            delta_manifest_list="overwrite", index_manifest="new-index")
+        base_entry = _make_entry(
+            "base.parquet", first_row_id=0, row_count=100)
+        window = [_make_entry(
+            "window.parquet", first_row_id=0, row_count=100)]
+        scanner = _FakeBaseEntryScanner(
+            {"base": [base_entry]}, {2: []},
+            fallback_entries=[base_entry])
+        detection = self._make_detection([base, overwrite], scanner)
+
+        with self.assertRaisesRegex(RuntimeError, "index-changing overwrite"):
+            detection.read_row_id_base_entries(overwrite, window)
+
+        self.assertEqual(0, scanner.fallback_calls)
+
     def test_disjoint_partition_overwrite_uses_current_state(self):
         base = _FakeSnapshot(
             1, "APPEND", next_row_id=200, delta_manifest_list="base")
@@ -590,6 +612,17 @@ class TestRowIdWindowBaseEntries(unittest.TestCase):
                         )
 
                     self.assertEqual(0, scanner.fallback_calls)
+
+    def test_missing_normal_dv_target_fails_closed(self):
+        base = _FakeSnapshot(1, "APPEND")
+        latest = _FakeSnapshot(2, "OVERWRITE")
+        window = [_make_entry(
+            "window.blob", first_row_id=0, row_count=1)]
+        detection = self._make_detection(
+            [base, latest], _FakeBaseEntryScanner({}, {}))
+
+        self.assertTrue(detection._row_id_deletion_vectors_changed(
+            base, latest, [], window))
 
     def test_bounded_overwrite_is_checked_for_later_windows(self):
         base = _FakeSnapshot(

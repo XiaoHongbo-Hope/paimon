@@ -836,7 +836,7 @@ class TestFileStoreCommit(unittest.TestCase):
     def test_retried_row_id_planning_conflict_preserves_error(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
         file_store_commit = self._create_file_store_commit()
-        conflict = RuntimeError("row ID planning conflict")
+        conflict = RowIdPlanningConflictError("row ID planning conflict")
         file_store_commit.conflict_detection.has_row_id_check_from_snapshot = (
             Mock(return_value=True))
         file_store_commit.conflict_detection.read_row_id_base_entries = Mock(
@@ -859,6 +859,93 @@ class TestFileStoreCommit(unittest.TestCase):
         self.assertIs(conflict, raised.exception)
         self.assertNotIsInstance(raised.exception, CommitConflictError)
         clear_window.assert_called_once()
+
+    def test_false_retry_row_id_planning_conflict_is_safe_to_abort(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+        conflict = RowIdPlanningConflictError("row ID planning conflict")
+        file_store_commit.conflict_detection.has_row_id_check_from_snapshot = (
+            Mock(return_value=True))
+        file_store_commit.conflict_detection.read_row_id_base_entries = Mock(
+            side_effect=conflict)
+
+        with self.assertRaises(CommitConflictError) as raised:
+            file_store_commit._try_commit_once(
+                retry_result=RetryResult(Mock(id=0), outcome_unknown=False),
+                commit_kind="APPEND",
+                commit_entries=[Mock()],
+                changelog_entries=[],
+                commit_identifier=1,
+                latest_snapshot=Mock(id=1),
+                detect_conflicts=True,
+            )
+
+        self.assertIs(conflict, raised.exception.__cause__)
+
+    def test_cumulative_unknown_preserves_row_id_planning_conflict(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+        conflict = RowIdPlanningConflictError("row ID planning conflict")
+        file_store_commit.conflict_detection.has_row_id_check_from_snapshot = (
+            Mock(return_value=True))
+        file_store_commit.conflict_detection.read_row_id_base_entries = Mock(
+            side_effect=conflict)
+
+        with self.assertRaises(RowIdPlanningConflictError) as raised:
+            file_store_commit._try_commit_once(
+                retry_result=RetryResult(Mock(id=0), outcome_unknown=False),
+                commit_kind="APPEND",
+                commit_entries=[Mock()],
+                changelog_entries=[],
+                commit_identifier=1,
+                latest_snapshot=Mock(id=1),
+                detect_conflicts=True,
+                previous_outcome_unknown=True,
+            )
+
+        self.assertIs(conflict, raised.exception)
+
+    def test_false_retry_generic_conflict_is_safe_to_abort(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+        conflict = RuntimeError("commit conflict")
+        file_store_commit.conflict_detection.has_row_id_check_from_snapshot = (
+            Mock(return_value=False))
+        file_store_commit.commit_scanner.read_incremental_changes = Mock(
+            return_value=[])
+        file_store_commit.conflict_detection.check_conflicts = Mock(
+            return_value=conflict)
+
+        with self.assertRaises(CommitConflictError) as raised:
+            file_store_commit._try_commit_once(
+                retry_result=RetryResult(
+                    Mock(id=0), base_data_files=[], outcome_unknown=False),
+                commit_kind="APPEND",
+                commit_entries=[Mock()],
+                changelog_entries=[],
+                commit_identifier=1,
+                latest_snapshot=Mock(id=1),
+                detect_conflicts=True,
+            )
+
+        self.assertIs(conflict, raised.exception.__cause__)
+
+    def test_false_retry_hash_conflict_is_safe_to_abort(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+
+        with self.assertRaises(CommitConflictError) as raised:
+            file_store_commit._try_commit_once(
+                retry_result=RetryResult(Mock(id=0), outcome_unknown=False),
+                commit_kind="APPEND",
+                commit_entries=[Mock()],
+                changelog_entries=[],
+                commit_identifier=1,
+                latest_snapshot=Mock(id=1),
+                hash_index_base_snapshot=0,
+            )
+
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
 
     def test_row_id_planning_io_error_preserves_error(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
@@ -886,25 +973,46 @@ class TestFileStoreCommit(unittest.TestCase):
         self.assertIs(error, raised.exception)
         clear_window.assert_called_once()
 
-    def test_mixed_row_id_base_evidence_falls_back(
+    def test_mixed_messages_keep_row_id_base_evidence(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
         file_store_commit = self._create_file_store_commit()
+        self.mock_table.partition_keys_fields = []
+        self.mock_table.total_buckets = 1
         identity = (7, "user", 1, "APPEND", 1, "base", "delta", None, None)
+        base_file = Mock(
+            file_name="base.parquet",
+            level=0,
+            extra_files=[],
+            embedded_index=None,
+            external_path=None,
+        )
         complete = CommitMessage(
             partition=(),
             bucket=0,
             new_files=[Mock()],
             check_from_snapshot=7,
-            row_id_base_files=[Mock()],
+            row_id_base_files=[base_file],
             row_id_base_snapshot_identity=identity,
         )
         legacy = CommitMessage(
             partition=(), bucket=0, new_files=[Mock()])
 
+        entries, snapshot = file_store_commit._collect_row_id_base_entries(
+            [complete, legacy])
+
+        self.assertEqual(identity, snapshot)
+        self.assertEqual([base_file], [entry.file for entry in entries])
+
+    def test_incomplete_row_id_base_evidence_falls_back(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+        message = CommitMessage(
+            partition=(), bucket=0, new_files=[Mock()],
+            check_from_snapshot=7)
+
         self.assertEqual(
             (None, None),
-            file_store_commit._collect_row_id_base_entries(
-                [complete, legacy]),
+            file_store_commit._collect_row_id_base_entries([message]),
         )
 
     def test_abort_does_not_delete_row_id_base_files(

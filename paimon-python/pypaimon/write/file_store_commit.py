@@ -457,6 +457,7 @@ class FileStoreCommit:
                     row_id_base_entries=row_id_base_entries,
                     row_id_base_snapshot_identity=(
                         row_id_base_snapshot_identity),
+                    previous_outcome_unknown=outcome_unknown,
                 )
 
                 if result.is_success():
@@ -537,8 +538,12 @@ class FileStoreCommit:
                          index_adds=None,
                          hash_index_base_snapshot=None,
                          row_id_base_entries=None,
-                         row_id_base_snapshot_identity=None) -> CommitResult:
+                         row_id_base_snapshot_identity=None,
+                         previous_outcome_unknown=None) -> CommitResult:
         start_millis = int(time.time() * 1000)
+        if previous_outcome_unknown is None:
+            previous_outcome_unknown = bool(
+                retry_result is not None and retry_result.outcome_unknown)
         if self._is_duplicate_commit(retry_result, latest_snapshot, commit_identifier, commit_kind):
             return SuccessResult()
 
@@ -553,7 +558,7 @@ class FileStoreCommit:
                     hash_index_base_snapshot, latest_snapshot_id
                 )
             )
-            if retry_result is None:
+            if not previous_outcome_unknown:
                 raise CommitConflictError(str(conflict)) from conflict
             raise conflict
 
@@ -585,7 +590,7 @@ class FileStoreCommit:
                     )
                 except RowIdPlanningConflictError as error:
                     self.conflict_detection.clear_row_id_window_changes()
-                    if retry_result is None:
+                    if not previous_outcome_unknown:
                         raise CommitConflictError(str(error)) from error
                     raise
                 except Exception:
@@ -633,7 +638,7 @@ class FileStoreCommit:
                         # re-scans from scratch (matches Java RollbackRetryResult).
                         self.conflict_detection.reset_row_id_history()
                         return RetryResult(None, conflict_exception)
-                if retry_result is None:
+                if not previous_outcome_unknown:
                     raise CommitConflictError(
                         str(conflict_exception)
                     ) from conflict_exception
@@ -918,13 +923,14 @@ class FileStoreCommit:
         return commit_entries
 
     def _collect_row_id_base_entries(self, commit_messages):
-        messages = list(commit_messages)
+        messages = [
+            msg for msg in commit_messages
+            if msg.check_from_snapshot != -1
+        ]
         if (not messages
-                or any(msg.check_from_snapshot == -1
-                       or not getattr(msg, "row_id_base_files", None)
+                or any(not getattr(msg, "row_id_base_files", None)
                        or getattr(
                            msg, "row_id_base_snapshot_identity", None) is None
-                       or msg.index_adds
                        for msg in messages)):
             return None, None
 

@@ -602,7 +602,7 @@ class DynamicBucketTest(unittest.TestCase):
             stale_writer.close()
             stale_commit.close()
 
-    def test_retry_then_hash_index_conflict_preserves_prepared_files(self):
+    def test_retry_then_hash_index_conflict_aborts_prepared_files(self):
         with tempfile.TemporaryDirectory() as root:
             table = self._create_table(root, 'retry_hash_conflict')
             writer, commit, messages = self._prepare_indexed_write(table, [1])
@@ -647,7 +647,7 @@ class DynamicBucketTest(unittest.TestCase):
 
             self.assertEqual(1, calls)
             self.assertTrue(all(
-                table.file_io.exists(path) for path in prepared_paths
+                not table.file_io.exists(path) for path in prepared_paths
             ))
             writer.close()
             commit.close()

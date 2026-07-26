@@ -861,7 +861,8 @@ class FileScanner:
             # Convert to deletion files
             deletion_files = self._to_deletion_files(entry)
             if deletion_files:
-                result[partition_bucket] = deletion_files
+                result.setdefault(partition_bucket, {}).update(
+                    deletion_files)
 
         return result
 

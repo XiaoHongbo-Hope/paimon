@@ -603,6 +603,28 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         result = self._read_all(table).sort_by('id')
         self.assertEqual([1, 3, 4, 5], result['id'].to_pylist())
 
+    def test_concurrent_deletes_on_different_files_are_preserved(self):
+        table = self._create_seeded_deletion_vector_table()
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        first_wb = self._make_write_builder(table)
+        first_update = first_wb.new_update()
+        first_cid = self._next_commit_id()
+        first_messages = self._apply_delete_by_row_id(
+            first_update, [row_ids[3]], first_cid)
+
+        self._do_delete_by_row_id(table, [row_ids[1]])
+
+        first_commit = first_wb.new_commit()
+        self._apply_commit(first_commit, first_messages, first_cid)
+        first_commit.close()
+
+        result = self._read_all(table).sort_by('id')
+        self.assertEqual([2, 4, 5], result['id'].to_pylist())
+
     def test_row_level_delete_conflicts_when_target_file_removed(self):
         table = self._create_seeded_deletion_vector_table(partition_keys=['city'])
         pb = table.new_read_builder().new_predicate_builder()
@@ -724,6 +746,58 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         result = self._read_all(table).to_pydict()
         self.assertNotIn(1, result['id'])
 
+    def test_false_retry_dv_conflict_aborts_staged_files(self):
+        table = self._create_seeded_deletion_vector_table()
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        update = update_wb.new_update().with_update_type(['age'])
+        commit_id = self._next_commit_id()
+        update_messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            commit_id,
+        )
+        staged_paths = [
+            file.external_path or file.file_path
+            for message in update_messages
+            for file in message.new_files
+        ]
+        self.assertTrue(staged_paths)
+
+        update_commit = update_wb.new_commit()
+        calls = 0
+
+        def reject_first_commit(_snapshot, _statistics):
+            nonlocal calls
+            calls += 1
+            self._do_delete_by_row_id(table, [row_ids[1]])
+            return False
+
+        with mock.patch.object(
+                update_commit.file_store_commit.snapshot_commit,
+                'commit', side_effect=reject_first_commit), mock.patch.object(
+                    update_commit.file_store_commit,
+                    '_commit_retry_wait'):
+            with self.assertRaisesRegex(RuntimeError, "deletion vectors"):
+                self._apply_commit(
+                    update_commit, update_messages, commit_id)
+        update_commit.close()
+
+        self.assertEqual(1, calls)
+        for path in staged_paths:
+            self.assertFalse(table.file_io.exists(path))
+        self.assertNotIn(1, self._read_all(table)['id'].to_pylist())
+
     def test_row_id_update_allows_disjoint_partition_dv_delete(self):
         table = self._create_seeded_deletion_vector_table(
             partition_keys=['city'])
@@ -804,6 +878,141 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         result = self._read_all(table).to_pydict()
         ages = dict(zip(result['id'], result['age']))
         self.assertEqual({1: 99}, ages)
+
+    def test_mixed_index_message_detects_concurrent_dv_delete(self):
+        table = self._create_seeded_deletion_vector_table(
+            partition_keys=['city'])
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        update = update_wb.new_update().with_update_type(['age'])
+        commit_id = self._next_commit_id()
+        update_messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            commit_id,
+        )
+
+        delete_wb = self._make_write_builder(table)
+        delete_update = delete_wb.new_update()
+        delete_messages = self._apply_delete_by_row_id(
+            delete_update, [row_ids[2]], commit_id)
+
+        self._do_delete_by_row_id(table, [row_ids[1]])
+
+        update_commit = update_wb.new_commit()
+        with self.assertRaisesRegex(RuntimeError, "index-changing overwrite"):
+            self._apply_commit(
+                update_commit,
+                update_messages + delete_messages,
+                commit_id,
+            )
+        update_commit.close()
+
+        result = self._read_all(table).to_pydict()
+        self.assertNotIn(1, result['id'])
+        self.assertIn(2, result['id'])
+
+    def test_mixed_insert_detects_concurrent_dv_delete(self):
+        table = self._create_seeded_deletion_vector_table(
+            partition_keys=['city'])
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        update = update_wb.new_update().with_update_type(['age'])
+        commit_id = self._next_commit_id()
+        update_messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            commit_id,
+        )
+
+        insert_wb = self._make_write_builder(table)
+        insert_write = insert_wb.new_write()
+        insert_write.write_arrow(pa.Table.from_pydict({
+            'id': [6],
+            'name': ['Frank'],
+            'age': [28],
+            'city': ['SF'],
+        }, schema=self.pa_schema))
+        insert_messages = self._prepare_write_commit(
+            insert_write, commit_id)
+
+        self._do_delete_by_row_id(table, [row_ids[1]])
+
+        update_commit = update_wb.new_commit()
+        with self.assertRaisesRegex(RuntimeError, "deletion vectors"):
+            self._apply_commit(
+                update_commit,
+                update_messages + insert_messages,
+                commit_id,
+            )
+        update_commit.close()
+        insert_write.close()
+
+        result = self._read_all(table).to_pydict()
+        self.assertNotIn(1, result['id'])
+        self.assertNotIn(6, result['id'])
+
+    def test_blob_update_allows_dv_delete_outside_delta_range(self):
+        table_schema = pa.schema([
+            ('id', pa.int32()),
+            ('picture', pa.large_binary()),
+        ])
+        options = dict(self.table_options)
+        options['deletion-vectors.enabled'] = 'true'
+        table = self._create_table(pa_schema=table_schema, options=options)
+        self._write_arrow(table, pa.Table.from_pydict({
+            'id': list(range(10)),
+            'picture': [f'blob-{i}'.encode() for i in range(10)],
+        }, schema=table_schema))
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        update = update_wb.new_update().with_update_type(['picture'])
+        commit_id = self._next_commit_id()
+        update_messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[0]],
+                'picture': [b'updated'],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('picture', pa.large_binary()),
+            ])),
+            commit_id,
+        )
+
+        self._do_delete_by_row_id(table, [row_ids[9]])
+
+        update_commit = update_wb.new_commit()
+        self._apply_commit(update_commit, update_messages, commit_id)
+        update_commit.close()
+
+        result = self._read_all(table).sort_by('id').to_pydict()
+        self.assertEqual(list(range(9)), result['id'])
+        self.assertEqual(b'updated', result['picture'][0])
 
     def test_delete_by_partition_predicate_drops_partition_without_dv(self):
         table = self._create_seeded_table(partition_keys=['city'])
