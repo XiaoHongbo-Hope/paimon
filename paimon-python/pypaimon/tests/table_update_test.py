@@ -24,6 +24,8 @@ from unittest import mock
 
 import pyarrow as pa
 
+from pypaimon.catalog.catalog_exception import TableNoPermissionException
+from pypaimon.common.identifier import Identifier
 from pypaimon.tests.data_evolution_test_helpers import (
     BatchModeMixin,
     DataEvolutionTestBase,
@@ -837,6 +839,41 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
                 'commit', return_value=False):
             with self.assertRaises(CommitConflictError):
                 self._apply_commit(commit, messages, commit_id)
+        commit.close()
+
+        self.assertEqual(before_files, self._list_table_files(table))
+
+    def test_deterministic_atomic_rejection_cleans_manifests(self):
+        table = self._create_seeded_table()
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+        before_files = self._list_table_files(table)
+
+        wb = self._make_write_builder(table)
+        commit_id = self._next_commit_id()
+        messages = self._apply_update(
+            wb.new_update().with_update_type(['age']),
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            commit_id,
+        )
+
+        commit = wb.new_commit()
+        error = TableNoPermissionException(
+            Identifier.create('default', 'test'))
+        with mock.patch.object(
+                commit.file_store_commit.snapshot_commit,
+                'commit', side_effect=error):
+            with self.assertRaises(TableNoPermissionException):
+                self._apply_commit(commit, messages, commit_id)
+        commit.abort(messages)
         commit.close()
 
         self.assertEqual(before_files, self._list_table_files(table))

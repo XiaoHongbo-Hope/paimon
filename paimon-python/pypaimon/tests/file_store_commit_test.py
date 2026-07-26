@@ -552,6 +552,8 @@ class TestFileStoreCommit(unittest.TestCase):
                 file_store_commit.commit_max_retries = 3
                 file_store_commit.commit_timeout = 10_000
                 file_store_commit._commit_retry_wait = Mock()
+                file_store_commit._clean_up_reuse_tmp_manifests = Mock()
+                file_store_commit._clean_up_no_reuse_tmp_manifests = Mock()
                 file_store_commit.snapshot_manager.get_latest_snapshot.return_value = None
 
                 with self.assertRaises(type(atomic_error)) as raised:
@@ -561,6 +563,8 @@ class TestFileStoreCommit(unittest.TestCase):
                 self.assertIs(atomic_error, raised.exception)
                 snapshot_commit.commit.assert_called_once()
                 file_store_commit._commit_retry_wait.assert_not_called()
+                file_store_commit._clean_up_reuse_tmp_manifests.assert_called_once()
+                file_store_commit._clean_up_no_reuse_tmp_manifests.assert_called_once()
 
     def test_atomic_transport_exception_remains_unknown(
             self, mock_manifest_list_manager, mock_manifest_file_manager):

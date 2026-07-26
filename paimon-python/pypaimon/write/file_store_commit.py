@@ -748,6 +748,21 @@ class FileStoreCommit:
             logger.warning(f"Exception occurs when preparing snapshot: {e}", exc_info=True)
             raise RuntimeError(f"Failed to prepare snapshot: {e}")
 
+        def clean_up_rejected_commit():
+            try:
+                self._clean_up_reuse_tmp_manifests(
+                    delta_manifest_list,
+                    changelog_manifest_list_name,
+                    new_index_manifest,
+                )
+                self._clean_up_no_reuse_tmp_manifests(
+                    base_manifest_list, merge_new_files)
+            except Exception:
+                logger.warning(
+                    "Failed to clean up rejected commit manifests.",
+                    exc_info=True,
+                )
+
         # A failure after commit() returned is still outcome-unknown.
         atomic_call_returned = False
         try:
@@ -761,6 +776,7 @@ class FileStoreCommit:
                     "Atomic commit was rejected deterministically; do not retry.",
                     exc_info=True,
                 )
+                clean_up_rejected_commit()
                 raise
             # Commit exception, not sure about the situation and should not clean up the files
             logger.warning("Retry commit for exception.", exc_info=True)
@@ -782,19 +798,7 @@ class FileStoreCommit:
                 commit_kind,
                 commit_time_s,
             )
-            try:
-                self._clean_up_reuse_tmp_manifests(
-                    delta_manifest_list,
-                    changelog_manifest_list_name,
-                    new_index_manifest,
-                )
-                self._clean_up_no_reuse_tmp_manifests(
-                    base_manifest_list, merge_new_files)
-            except Exception:
-                logger.warning(
-                    "Failed to clean up rejected commit manifests.",
-                    exc_info=True,
-                )
+            clean_up_rejected_commit()
             return RetryResult(
                 latest_snapshot, None, base_data_files=base_data_files)
 
