@@ -52,6 +52,7 @@ from pypaimon.write.commit.commit_scanner import CommitScanner
 from pypaimon.write.commit.conflict_detection import (
     CommitConflictError,
     ConflictDetection,
+    RowIdPlanningConflictError,
 )
 from pypaimon.write.commit.overwrite_changes_provider import OverwriteChangesProvider
 from pypaimon.table.special_fields import SpecialFields
@@ -572,13 +573,24 @@ class FileStoreCommit:
         if detect_conflicts:
             if (latest_snapshot is not None
                     and self.conflict_detection.has_row_id_check_from_snapshot()):
-                base_data_files = self.conflict_detection.read_row_id_base_entries(
-                    latest_snapshot,
-                    commit_entries,
-                    index_entries,
-                    row_id_base_entries,
-                    row_id_base_snapshot_identity,
-                )
+                try:
+                    base_data_files = (
+                        self.conflict_detection.read_row_id_base_entries(
+                            latest_snapshot,
+                            commit_entries,
+                            index_entries,
+                            row_id_base_entries,
+                            row_id_base_snapshot_identity,
+                        )
+                    )
+                except RowIdPlanningConflictError as error:
+                    self.conflict_detection.clear_row_id_window_changes()
+                    if retry_result is None:
+                        raise CommitConflictError(str(error)) from error
+                    raise
+                except Exception:
+                    self.conflict_detection.clear_row_id_window_changes()
+                    raise
             else:
                 incremental = None
                 if (latest_snapshot is not None

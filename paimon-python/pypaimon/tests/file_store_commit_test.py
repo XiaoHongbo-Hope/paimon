@@ -29,6 +29,10 @@ from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.manifest_entry import ManifestEntry
 from pypaimon.snapshot.snapshot_commit import PartitionStatistics
 from pypaimon.table.row.generic_row import GenericRow
+from pypaimon.write.commit.conflict_detection import (
+    CommitConflictError,
+    RowIdPlanningConflictError,
+)
 from pypaimon.write.commit_message import CommitMessage
 from pypaimon.write.file_store_commit import (
     CommitOutcomeUnknownError,
@@ -802,6 +806,85 @@ class TestFileStoreCommit(unittest.TestCase):
 
         self.assertEqual(identity, snapshot)
         self.assertEqual([base_file], [entry.file for entry in entries])
+
+    def test_first_row_id_planning_conflict_is_safe_to_abort(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+        conflict = RowIdPlanningConflictError("row ID planning conflict")
+        file_store_commit.conflict_detection.has_row_id_check_from_snapshot = (
+            Mock(return_value=True))
+        file_store_commit.conflict_detection.read_row_id_base_entries = Mock(
+            side_effect=conflict)
+        clear_window = Mock()
+        file_store_commit.conflict_detection.clear_row_id_window_changes = (
+            clear_window)
+
+        with self.assertRaises(CommitConflictError) as raised:
+            file_store_commit._try_commit_once(
+                retry_result=None,
+                commit_kind="APPEND",
+                commit_entries=[Mock()],
+                changelog_entries=[],
+                commit_identifier=1,
+                latest_snapshot=Mock(id=1),
+                detect_conflicts=True,
+            )
+
+        self.assertIs(conflict, raised.exception.__cause__)
+        clear_window.assert_called_once()
+
+    def test_retried_row_id_planning_conflict_preserves_error(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+        conflict = RuntimeError("row ID planning conflict")
+        file_store_commit.conflict_detection.has_row_id_check_from_snapshot = (
+            Mock(return_value=True))
+        file_store_commit.conflict_detection.read_row_id_base_entries = Mock(
+            side_effect=conflict)
+        clear_window = Mock()
+        file_store_commit.conflict_detection.clear_row_id_window_changes = (
+            clear_window)
+
+        with self.assertRaises(RuntimeError) as raised:
+            file_store_commit._try_commit_once(
+                retry_result=RetryResult(Mock(id=0), outcome_unknown=True),
+                commit_kind="APPEND",
+                commit_entries=[Mock()],
+                changelog_entries=[],
+                commit_identifier=1,
+                latest_snapshot=Mock(id=1),
+                detect_conflicts=True,
+            )
+
+        self.assertIs(conflict, raised.exception)
+        self.assertNotIsInstance(raised.exception, CommitConflictError)
+        clear_window.assert_called_once()
+
+    def test_row_id_planning_io_error_preserves_error(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        file_store_commit = self._create_file_store_commit()
+        error = OSError("row ID planning failed")
+        file_store_commit.conflict_detection.has_row_id_check_from_snapshot = (
+            Mock(return_value=True))
+        file_store_commit.conflict_detection.read_row_id_base_entries = Mock(
+            side_effect=error)
+        clear_window = Mock()
+        file_store_commit.conflict_detection.clear_row_id_window_changes = (
+            clear_window)
+
+        with self.assertRaises(OSError) as raised:
+            file_store_commit._try_commit_once(
+                retry_result=None,
+                commit_kind="APPEND",
+                commit_entries=[Mock()],
+                changelog_entries=[],
+                commit_identifier=1,
+                latest_snapshot=Mock(id=1),
+                detect_conflicts=True,
+            )
+
+        self.assertIs(error, raised.exception)
+        clear_window.assert_called_once()
 
     def test_mixed_row_id_base_evidence_falls_back(
             self, mock_manifest_list_manager, mock_manifest_file_manager):

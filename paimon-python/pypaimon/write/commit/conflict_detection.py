@@ -21,11 +21,13 @@ Conflict detection for commit operations.
 
 import bisect
 
+from pypaimon.deletionvectors.deletion_vector import DeletionVector
 from pypaimon.manifest.manifest_list_manager import ManifestListManager
 from pypaimon.manifest.index_manifest_file import IndexManifestFile
 from pypaimon.manifest.schema.data_file_meta import DataFileMeta
 from pypaimon.manifest.schema.file_entry import FileEntry
 from pypaimon.table.special_fields import SpecialFields
+from pypaimon.table.source.deletion_file import DeletionFile
 from pypaimon.utils.range import Range
 from pypaimon.utils.range_helper import RangeHelper
 from pypaimon.write.commit.commit_scanner import CommitScanner
@@ -153,6 +155,10 @@ class CommitConflictError(RuntimeError):
     """A deterministic pre-snapshot conflict which is safe to abort."""
 
 
+class RowIdPlanningConflictError(RuntimeError):
+    """A row-id conflict detected before snapshot creation."""
+
+
 class ConflictDetection:
     """Detects conflicts between base and delta files during commit."""
 
@@ -170,6 +176,8 @@ class ConflictDetection:
         self._row_id_external_snapshots = []
         self._row_id_window_changes = None
         self._row_id_overwrite_seen = False
+        self._row_id_index_overwrite_seen = False
+        self._row_id_index_manifest_cache = {}
         self._bounded_row_id_conflict_state = False
         self.commit_scanner = commit_scanner
 
@@ -199,6 +207,8 @@ class ConflictDetection:
         self._row_id_external_snapshots = []
         self._row_id_window_changes = None
         self._row_id_overwrite_seen = False
+        self._row_id_index_overwrite_seen = False
+        self._row_id_index_manifest_cache = {}
 
     def clear_row_id_window_changes(self):
         self._row_id_window_changes = None
@@ -223,7 +233,7 @@ class ConflictDetection:
                     and self._row_id_check_from_snapshot is not None):
                 self._row_id_history_snapshots(latest_snapshot)
                 if self._row_id_overwrite_seen:
-                    raise RuntimeError(
+                    raise RowIdPlanningConflictError(
                         "Cannot validate a concurrent overwrite without "
                         "planned row ID base files.")
             return self.commit_scanner.read_conflict_entries(
@@ -236,18 +246,20 @@ class ConflictDetection:
         base_snapshot = self.snapshot_manager.get_snapshot_by_id(
             base_snapshot_id)
         if base_snapshot is None or latest_snapshot.id < base_snapshot_id:
-            raise RuntimeError(
+            raise RowIdPlanningConflictError(
                 "Row ID conflict check base snapshot {} is no longer "
                 "available.".format(base_snapshot_id))
         if (self._snapshot_identity(base_snapshot)
                 != planned_base_snapshot_identity):
-            raise RuntimeError(
+            raise RowIdPlanningConflictError(
                 "Row ID conflict check base snapshot {} changed.".format(
                     base_snapshot_id))
 
         self._row_id_window_changes = None
         if self._bounded_row_id_conflict_state:
             self._row_id_history_snapshots(latest_snapshot)
+            self._validate_row_id_deletion_vectors(
+                base_snapshot, latest_snapshot, planned_base_entries)
             if self._row_id_overwrite_seen:
                 return self._read_current_row_id_entries(
                     latest_snapshot,
@@ -259,12 +271,17 @@ class ConflictDetection:
         entries = list(planned_base_entries)
         changes = self._row_id_changes(
             latest_snapshot, commit_entries, index_entries, cache_result=True)
+        self._validate_row_id_deletion_vectors(
+            base_snapshot, latest_snapshot, planned_base_entries)
         for snapshot, raw_entries in changes:
             if snapshot.commit_kind == "OVERWRITE":
                 return self.commit_scanner.read_conflict_entries(
                     latest_snapshot, commit_entries, index_entries)
             entries.extend(raw_entries)
-        return FileEntry.merge_entries(entries)
+        try:
+            return FileEntry.merge_entries(entries)
+        except RuntimeError as error:
+            raise RowIdPlanningConflictError(str(error)) from error
 
     def _read_current_row_id_entries(
             self, latest_snapshot, commit_entries, index_entries,
@@ -283,7 +300,7 @@ class ConflictDetection:
         )
         if (self._row_id_entry_signatures(planned)
                 != self._row_id_entry_signatures(current)):
-            raise RuntimeError(
+            raise RowIdPlanningConflictError(
                 "Concurrent overwrite changed row ID files for the current "
                 "update window.")
 
@@ -370,6 +387,8 @@ class ConflictDetection:
             self._row_id_history_cursor_identity = None
             self._row_id_external_snapshots = []
             self._row_id_overwrite_seen = False
+            self._row_id_index_overwrite_seen = False
+            self._row_id_index_manifest_cache = {}
 
         # Snapshot files below the cursor are immutable. A rollback replaces the
         # whole tail, including the cursor, whose identity check above resets cache.
@@ -378,7 +397,7 @@ class ConflictDetection:
                 latest_snapshot.id + 1):
             snapshot = self.snapshot_manager.get_snapshot_by_id(snapshot_id)
             if snapshot is None:
-                raise RuntimeError(
+                raise RowIdPlanningConflictError(
                     "Row ID conflict check snapshot {} is no longer "
                     "available.".format(snapshot_id))
             commit_user = getattr(snapshot, "commit_user", None)
@@ -390,15 +409,12 @@ class ConflictDetection:
                     or commit_identifier > ignored_through):
                 if (snapshot.commit_kind == "OVERWRITE"
                         and self._index_manifest_changed(snapshot)):
-                    raise RuntimeError(
-                        "Row ID conflict check encountered an index-changing "
-                        "overwrite after base snapshot {}.".format(
-                            base_snapshot))
+                    self._row_id_index_overwrite_seen = True
                 if self._bounded_row_id_conflict_state:
                     if snapshot.commit_kind == "OVERWRITE":
                         self._row_id_overwrite_seen = True
                     else:
-                        raise RuntimeError(
+                        raise RowIdPlanningConflictError(
                             "Concurrent commit detected during incremental "
                             "update_by_row_id.")
                 else:
@@ -415,6 +431,85 @@ class ConflictDetection:
             return True
         return (getattr(previous, "index_manifest", None)
                 != getattr(snapshot, "index_manifest", None))
+
+    def _validate_row_id_deletion_vectors(
+            self, base_snapshot, latest_snapshot, planned_base_entries):
+        if (self._row_id_index_overwrite_seen
+                and self._row_id_deletion_vectors_changed(
+                    base_snapshot, latest_snapshot, planned_base_entries)):
+            raise RowIdPlanningConflictError(
+                "Concurrent overwrite changed deletion vectors for the "
+                "current update window.")
+
+    def _row_id_deletion_vectors_changed(
+            self, base_snapshot, latest_snapshot, planned_base_entries):
+        targets = {
+            (
+                tuple(entry.partition.values),
+                entry.bucket,
+                entry.file.file_name,
+            )
+            for entry in planned_base_entries
+            if entry.kind == 0
+            and not self._is_dedicated_file(entry.file.file_name)
+        }
+        if not targets:
+            return True
+
+        base_files = self._deletion_vector_files(base_snapshot)
+        latest_files = self._deletion_vector_files(latest_snapshot)
+        manifest_names = {
+            getattr(snapshot, "index_manifest", None)
+            for snapshot in (base_snapshot, latest_snapshot)
+        }
+        self._row_id_index_manifest_cache = {
+            name: self._row_id_index_manifest_cache[name]
+            for name in manifest_names
+            if name in self._row_id_index_manifest_cache
+        }
+
+        for target in targets:
+            base_file = base_files.get(target)
+            latest_file = latest_files.get(target)
+            if base_file == latest_file:
+                continue
+            if base_file is None or latest_file is None:
+                return True
+            if (DeletionVector.read(self.table.file_io, base_file)
+                    != DeletionVector.read(self.table.file_io, latest_file)):
+                return True
+        return False
+
+    def _deletion_vector_files(self, snapshot):
+        manifest_name = getattr(snapshot, "index_manifest", None)
+        if manifest_name is None:
+            return {}
+        if manifest_name in self._row_id_index_manifest_cache:
+            return self._row_id_index_manifest_cache[manifest_name]
+
+        index_path = self.table.path_factory().index_path()
+        result = {}
+        for entry in IndexManifestFile(self.table).read(manifest_name):
+            index_file = entry.index_file
+            if (entry.kind != 0
+                    or index_file.index_type
+                    != IndexManifestFile.DELETION_VECTORS_INDEX):
+                continue
+            path = index_file.external_path or (
+                f"{index_path}/{index_file.file_name}")
+            for data_file_name, meta in (index_file.dv_ranges or {}).items():
+                result[(
+                    tuple(entry.partition.values),
+                    entry.bucket,
+                    data_file_name,
+                )] = DeletionFile(
+                    dv_index_path=path,
+                    offset=meta.offset,
+                    length=meta.length,
+                    cardinality=meta.cardinality,
+                )
+        self._row_id_index_manifest_cache[manifest_name] = result
+        return result
 
     @staticmethod
     def _snapshot_identity(snapshot):

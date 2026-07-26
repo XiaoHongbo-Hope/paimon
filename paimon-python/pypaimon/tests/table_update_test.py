@@ -703,16 +703,107 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
             ])),
             update_cid,
         )
+        staged_paths = [
+            file.external_path or file.file_path
+            for message in update_messages
+            for file in message.new_files
+        ]
+        self.assertTrue(staged_paths)
+        for path in staged_paths:
+            self.assertTrue(table.file_io.exists(path))
 
         self._do_delete_by_row_id(table, [row_ids[1]])
 
         update_commit = update_wb.new_commit()
-        with self.assertRaisesRegex(RuntimeError, "index-changing overwrite"):
+        with self.assertRaisesRegex(RuntimeError, "deletion vectors"):
             self._apply_commit(update_commit, update_messages, update_cid)
         update_commit.close()
+        for path in staged_paths:
+            self.assertFalse(table.file_io.exists(path))
 
         result = self._read_all(table).to_pydict()
         self.assertNotIn(1, result['id'])
+
+    def test_row_id_update_allows_disjoint_partition_dv_delete(self):
+        table = self._create_seeded_deletion_vector_table(
+            partition_keys=['city'])
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        update = update_wb.new_update().with_update_type(['age'])
+        update_cid = self._next_commit_id()
+        update_messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            update_cid,
+        )
+
+        self._do_delete_by_row_id(table, [row_ids[2]])
+
+        update_commit = update_wb.new_commit()
+        self._apply_commit(update_commit, update_messages, update_cid)
+        update_commit.close()
+
+        result = self._read_all(table).to_pydict()
+        ages = dict(zip(result['id'], result['age']))
+        self.assertEqual(99, ages[1])
+        self.assertNotIn(2, ages)
+
+    def test_row_id_update_allows_other_file_dv_delete(self):
+        options = dict(self.table_options)
+        options['deletion-vectors.enabled'] = 'true'
+        table = self._create_table(
+            partition_keys=['city'], options=options)
+        self._write_arrow(table, pa.Table.from_pydict({
+            'id': [1],
+            'name': ['Alice'],
+            'age': [25],
+            'city': ['NYC'],
+        }, schema=self.pa_schema))
+        self._write_arrow(table, pa.Table.from_pydict({
+            'id': [2],
+            'name': ['Bob'],
+            'age': [30],
+            'city': ['NYC'],
+        }, schema=self.pa_schema))
+        rb = table.new_read_builder().with_projection(['id', '_ROW_ID'])
+        rows = rb.new_read().to_arrow(rb.new_scan().plan().splits())
+        row_ids = dict(zip(
+            rows['id'].to_pylist(), rows['_ROW_ID'].to_pylist()))
+
+        update_wb = self._make_write_builder(table)
+        update = update_wb.new_update().with_update_type(['age'])
+        update_cid = self._next_commit_id()
+        update_messages = self._apply_update(
+            update,
+            pa.Table.from_pydict({
+                '_ROW_ID': [row_ids[1]],
+                'age': [99],
+            }, schema=pa.schema([
+                ('_ROW_ID', pa.int64()),
+                ('age', pa.int32()),
+            ])),
+            update_cid,
+        )
+
+        self._do_delete_by_row_id(table, [row_ids[2]])
+
+        update_commit = update_wb.new_commit()
+        self._apply_commit(update_commit, update_messages, update_cid)
+        update_commit.close()
+
+        result = self._read_all(table).to_pydict()
+        ages = dict(zip(result['id'], result['age']))
+        self.assertEqual({1: 99}, ages)
 
     def test_delete_by_partition_predicate_drops_partition_without_dv(self):
         table = self._create_seeded_table(partition_keys=['city'])

@@ -540,7 +540,7 @@ class TestRowIdWindowBaseEntries(unittest.TestCase):
                     detection._snapshot_identity(base)),
             )
 
-    def test_index_changing_overwrite_fails_closed(self):
+    def test_index_changing_overwrite_checks_deletion_vectors(self):
         base = _FakeSnapshot(
             1, "APPEND", next_row_id=100,
             delta_manifest_list="base", index_manifest="old-index")
@@ -554,26 +554,42 @@ class TestRowIdWindowBaseEntries(unittest.TestCase):
             "window.parquet", first_row_id=0, row_count=100)]
 
         for bounded in (False, True):
-            with self.subTest(bounded=bounded):
-                scanner = _FakeBaseEntryScanner(
-                    {"base": [base_entry]}, {2: []},
-                    fallback_entries=[base_entry])
-                detection = self._make_detection(
-                    [base, overwrite], scanner)
-                if bounded:
-                    detection.enable_bounded_row_id_conflict_state()
+            for changed in (False, True):
+                with self.subTest(bounded=bounded, changed=changed):
+                    scanner = _FakeBaseEntryScanner(
+                        {"base": [base_entry]}, {2: []},
+                        fallback_entries=[base_entry])
+                    detection = self._make_detection(
+                        [base, overwrite], scanner)
+                    detection._row_id_deletion_vectors_changed = (
+                        lambda *_args, changed=changed: changed)
+                    if bounded:
+                        detection.enable_bounded_row_id_conflict_state()
 
-                with self.assertRaisesRegex(
-                        RuntimeError, "index-changing overwrite"):
-                    detection.read_row_id_base_entries(
-                        overwrite,
-                        window,
-                        planned_base_entries=[base_entry],
-                        planned_base_snapshot_identity=(
-                            detection._snapshot_identity(base)),
-                    )
+                    if not changed:
+                        self.assertEqual(
+                            [base_entry],
+                            detection.read_row_id_base_entries(
+                                overwrite,
+                                window,
+                                planned_base_entries=[base_entry],
+                                planned_base_snapshot_identity=(
+                                    detection._snapshot_identity(base)),
+                            ),
+                        )
+                        continue
 
-                self.assertEqual(0, scanner.fallback_calls)
+                    with self.assertRaisesRegex(
+                            RuntimeError, "deletion vectors"):
+                        detection.read_row_id_base_entries(
+                            overwrite,
+                            window,
+                            planned_base_entries=[base_entry],
+                            planned_base_snapshot_identity=(
+                                detection._snapshot_identity(base)),
+                        )
+
+                    self.assertEqual(0, scanner.fallback_calls)
 
     def test_bounded_overwrite_is_checked_for_later_windows(self):
         base = _FakeSnapshot(
