@@ -774,12 +774,10 @@ class FileStoreCommit:
                     exc_info=True,
                 )
 
-        # Mirror a ``with`` block but drive it manually so only commit() decides
-        # the outcome. __enter__ and commit() share one capture, so an __enter__
-        # failure flows through the classification below instead of bypassing it.
-        # __exit__ gets the real commit exception triple (for extension rollback)
-        # but its own failure is only logged -- never allowed to override the
-        # commit outcome (a lost/landed commit must not be misclassified).
+        # Mirror ``with`` but drive it manually so only commit() decides the
+        # outcome. __enter__ and commit() share one capture (an __enter__ failure
+        # is classified below, not bypassed). __exit__ gets the commit exception
+        # triple for extension rollback, but its own failure is only logged.
         success = None
         commit_exc = None
         entered = False
@@ -790,8 +788,7 @@ class FileStoreCommit:
         except Exception as e:
             commit_exc = e
         finally:
-            # Never call __exit__ without a successful __enter__ (mirrors
-            # ``with``); the outcome is still classified from commit_exc below.
+            # No __exit__ without a successful __enter__ (mirrors ``with``).
             if entered:
                 exit_exc_info = (
                     (type(commit_exc), commit_exc, commit_exc.__traceback__)

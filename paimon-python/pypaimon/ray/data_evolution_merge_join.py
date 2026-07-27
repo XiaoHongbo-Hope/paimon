@@ -33,24 +33,16 @@ from pypaimon.ray.data_evolution_merge_transform import (
 
 
 class GroupApplyError(RuntimeError):
-    """A target file group failed while applying a distributed update.
-
-    Carries the worker-side failure as text (the exception instance is not
-    transported across Ray -- see ``distributed_update_apply``). Any group that
-    succeeded has already been committed/flushed (incremental) or aborted
-    (atomic) by the time this is raised.
-    """
+    """A target file group failed while applying a distributed update. Groups
+    that succeeded are already committed/aborted by the time this is raised."""
 
 
 def _encode_group_error(exc: BaseException) -> Dict[str, str]:
-    """Turn a worker-side exception into a text-only payload.
+    """Worker-side exception as a text-only payload (type/message/traceback).
 
-    Only strings are carried (type name, message, traceback text) -- never the
-    exception instance. ``pickle.dumps(exc)`` succeeding on the worker does not
-    guarantee ``pickle.loads`` succeeds on the driver (custom exceptions with
-    required __init__ args round-trip badly), and a failed unpickle on the
-    driver would drop the groups that succeeded. A dict of strings always
-    round-trips.
+    Never carries the instance: dumps succeeding on the worker does not mean
+    loads succeeds on the driver, and a failed unpickle there would drop the
+    groups that succeeded. A dict of strings always round-trips.
     """
     import traceback as _traceback
     return {
@@ -496,11 +488,9 @@ def distributed_update_apply(
     commit completed file groups incrementally while the remaining groups run.
 
     Returns ``(msgs, num_updated, row_ids, group_error)``. ``group_error`` is
-    ``None`` on full success, otherwise a structured payload for the first
-    failed group (see ``raise_group_apply_error``). It is returned rather than
-    raised so the caller can first commit/flush the groups that succeeded
-    (incremental) or abort their files (atomic) and only then surface the
-    failure -- raising here would strand the successful groups' work.
+    ``None`` on success, else a payload for the first failed group (see
+    ``raise_group_apply_error``); returned rather than raised so the caller can
+    flush/abort the successful groups before surfacing it.
     """
     import numpy as np
     import pickle
@@ -537,9 +527,7 @@ def distributed_update_apply(
     )
     sorted_first_row_ids = list(planner.first_row_ids)
     if not sorted_first_row_ids:
-        # No target file groups (e.g. an existing but empty snapshot). Match the
-        # 4-tuple contract so callers that unpack (msgs, num, row_ids, err) --
-        # including merge_into's NOT MATCHED insert path -- don't crash.
+        # No target file groups (e.g. empty snapshot): keep the 4-tuple contract.
         return [], 0, [], None
 
     # Pin commit-time conflict check to the snapshot the join was built on,
@@ -647,17 +635,9 @@ def distributed_update_apply(
             )
             msgs = worker.update_columns(for_update, list(captured_cols))
         except Exception as group_error:
-            # Encode the failure as data instead of raising. Raising kills the
-            # whole Ray task, and a task can run several groups: Ray discards a
-            # failed task's entire output, so every sibling group that already
-            # finished in that task would be lost and never committed. (Setting
-            # partitions == group count does not avoid this -- groupby hashes
-            # keys into buckets, so distinct groups still collide onto one task.)
-            # The driver reconstructs and raises this after the groups that did
-            # succeed -- here and in other tasks -- have been committed.
-            #
-            # _encode_group_error carries only strings, never the exception
-            # instance, so the payload always round-trips through pickle.
+            # Return the failure as data, not raise: a raised error kills the
+            # whole Ray task and discards its other (completed) groups. Strings
+            # only, so the payload always unpickles on the driver.
             return _group_result(
                 b"", 0, b"", pickle.dumps(_encode_group_error(group_error)))
 
@@ -665,10 +645,8 @@ def distributed_update_apply(
             pickle.dumps(msgs), for_update.num_rows,
             pickle.dumps(row_ids), None)
 
-    # One group per target data file, bounded by num_partitions to keep the
-    # shuffle parallelism (and the number of Ray tasks) under the caller's
-    # control regardless of how many files the table has -- a sparse source over
-    # a huge table must not spawn one partition per untouched file.
+    # Bound the shuffle to num_partitions so a sparse source over a huge table
+    # does not spawn one partition per untouched file group.
     group_partitions = max(1, min(len(captured_sorted), num_partitions))
     msgs_ds = with_frid.groupby(
         frid_col, num_partitions=group_partitions
@@ -680,12 +658,8 @@ def distributed_update_apply(
     group_error_payload = None
     iter_batches_kwargs = {"batch_format": "pyarrow"}
     if on_group_result is not None:
-        # Consume each reduce task's output as soon as it lands, one group at a
-        # time, so a completed group is committed as early as possible.
-        # batch_size=1 keeps groups from different tasks out of one callback;
-        # prefetch_batches=0 keeps the driver from pulling a later block before
-        # the current group has been committed. Per-group failure isolation
-        # comes from _apply_group encoding errors as data, not from this.
+        # Deliver each group as soon as its block lands so it commits early.
+        # (Failure isolation comes from _apply_group, not from batch_size.)
         iter_batches_kwargs["batch_size"] = 1
         iter_batches_kwargs["prefetch_batches"] = 0
     for batch in msgs_ds.iter_batches(**iter_batches_kwargs):
@@ -699,9 +673,7 @@ def distributed_update_apply(
         for blob, n, err_blob, row_ids_blob in zip(
                 message_blobs, updated_counts, error_blobs, row_id_blobs):
             if err_blob is not None:
-                # Keep delivering the groups that succeeded; report the first
-                # failure to the caller only after every success is delivered so
-                # it cannot discard their work.
+                # Report the first failure only after all successes are delivered.
                 if group_error_payload is None:
                     group_error_payload = pickle.loads(err_blob)
                 continue
@@ -716,10 +688,8 @@ def distributed_update_apply(
             num_updated += n
             if collect_row_ids:
                 action_row_ids.extend(group_row_ids)
-    # Return the failure as data instead of raising here: the caller must first
-    # flush/commit the groups that succeeded (incremental) or abort their files
-    # (atomic) before surfacing the error, otherwise the successful work is lost
-    # or leaked. See raise_group_apply_error.
+    # Failure is returned, not raised: the caller flushes/aborts the successful
+    # groups first, then surfaces it. See raise_group_apply_error.
     return all_msgs, num_updated, action_row_ids, group_error_payload
 
 

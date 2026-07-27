@@ -69,13 +69,9 @@ class _ConflictEntryScope:
 
     @classmethod
     def from_ranges(cls, ranges_by_key):
-        """Build a scope from a compact ``{(partition, bucket): [Range]}`` map.
-
-        Used to protect an already-committed cumulative row-id scope without
-        keeping the committed windows' ManifestEntry/DataFileMeta resident --
-        only the merged non-contiguous ranges are retained. There are no
-        file-name-only entries (row-id file groups always carry a range).
-        """
+        """Build a scope from a compact ``{(partition, bucket): [Range]}`` map,
+        so a cumulative row-id scope can be kept as ranges only (no resident
+        ManifestEntry/DataFileMeta). No file-name-only entries."""
         scope = cls.__new__(cls)
         scope._init_from_ranges(
             {key: list(values) for key, values in ranges_by_key.items()}, {})
@@ -238,35 +234,26 @@ class CommitScanner:
 
     def read_entries_for_row_id_scope(self, latest_snapshot: Optional[Snapshot],
                                       ranges_by_key):
-        """Read live entries within a compact row-id scope.
-
-        ``ranges_by_key`` maps ``(partition_values, bucket)`` to a list of
-        merged row-id ``Range``s. Unlike :meth:`read_conflict_entries`, an empty
-        scope returns ``[]`` -- it never falls back to scanning changed
-        partitions, because an empty protected scope means "nothing to protect",
-        not "scan everything". Callers must fail closed when a window yields no
-        range rather than registering an empty scope.
+        """Read live entries within a compact row-id scope
+        (``{(partition, bucket): [Range]}``). Unlike :meth:`read_conflict_entries`,
+        an empty scope returns ``[]`` (never scans changed partitions) -- callers
+        must fail closed rather than register an empty scope.
         """
         if latest_snapshot is None:
             return []
         scope = _ConflictEntryScope.from_ranges(ranges_by_key)
         if scope.is_empty():
             return []
-        # Build the partition filter straight from the scope keys -- no synthetic
-        # ManifestEntry/DataFileMeta. Unpartitioned tables (partition == ()) get
-        # a None filter and rely on the bucket/range filters below.
+        # Partition filter straight from the scope keys (unpartitioned -> None).
         partition_filter = self._build_partition_filter_from_values(
             {key[0] for key in ranges_by_key})
         return self._read_entries_for_scope(
             latest_snapshot, scope, partition_filter)
 
     def _read_entries_for_scope(self, latest_snapshot, scope, partition_filter):
-        """Shared read path for a non-empty ``_ConflictEntryScope``.
-
-        Partitions may be over-read by the bucket-level early filters, but
-        ``scope.matches_entry`` is the final, exact ``(partition, bucket)`` +
-        range filter, so distinct partitions/buckets stay isolated.
-        """
+        """Shared read path for a non-empty scope. Early filters may over-read by
+        bucket, but ``scope.matches_entry`` is the exact (partition, bucket)+range
+        filter, so distinct partitions/buckets stay isolated."""
         manifest_files = self.manifest_list_manager.read_all(latest_snapshot)
         if scope.can_prune_manifest_files():
             manifest_files = _filter_manifest_files_by_row_ranges(

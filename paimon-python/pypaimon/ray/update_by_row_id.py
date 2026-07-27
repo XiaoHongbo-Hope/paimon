@@ -75,11 +75,10 @@ def update_by_row_id(
     window of target file groups. Incremental mode can leave earlier windows
     committed if a later window fails. The table may therefore be partially
     updated; callers must reconcile the result or rerun the intended update.
-    A failing file group cannot discard the groups that already succeeded: each
-    group's exception is returned as data rather than raised, so even groups
-    that share a Ray task with it are committed before the failure is surfaced.
-    Incremental mode stops on concurrent commits, except overwrites outside
-    the current row-ID scope.
+    A failing group cannot discard groups that already succeeded: its exception
+    is returned as data, not raised, so groups sharing its Ray task still commit
+    before the failure surfaces. Incremental mode stops on concurrent commits,
+    except overwrites outside the current row-ID scope.
     Concurrent snapshot expiration can also invalidate a committed-window
     lineage check; the operation then stops with earlier windows still visible.
 
@@ -181,10 +180,8 @@ def update_by_row_id(
             update_ds, table, update_cols, **apply_kwargs
         )
         if incremental_committer is not None:
-            # Flush the successful groups that did not fill a window: a group
-            # failure must not discard groups that already succeeded. A deferred
-            # commit error (if any) is raised here and keeps priority over the
-            # group error surfaced below.
+            # Flush successful sub-window groups; a deferred commit error raised
+            # here keeps priority over the group error surfaced below.
             incremental_committer.finish()
     except Exception as e:
         if incremental_committer is not None:
@@ -221,9 +218,8 @@ def update_by_row_id(
         if incremental_committer is not None:
             incremental_committer.close()
     if group_error_payload is not None:
-        # The groups that succeeded are now durable (incremental: committed by
-        # finish(); atomic: about to be aborted because the batch is
-        # all-or-nothing). Surface the first group failure.
+        # Successful groups are now durable (incremental) or about to be aborted
+        # (atomic, all-or-nothing). Surface the first group failure.
         if incremental_committer is None and msgs:
             _abort_pending_update_messages(table, msgs)
         raise_group_apply_error(group_error_payload)
@@ -268,8 +264,7 @@ class _IncrementalUpdateCommitter:
                 self._validate_committed_snapshot()
                 if (self._table_commit is not None
                         and self._base_snapshot_id is not None):
-                    # Final guard: catch a concurrent overwrite of any committed
-                    # window even when no further window is committed.
+                    # Final guard: catch an overwrite even if no window follows.
                     self._table_commit.validate_protected_row_id_scope()
             except Exception as error:
                 self._deferred_error = error
@@ -298,9 +293,8 @@ class _IncrementalUpdateCommitter:
         commit_identifier = self._next_commit_identifier
         try:
             self._validate_committed_snapshot()
-            # Fail fast: don't stack a new window on top of a scope that a
-            # concurrent overwrite already invalidated. (Only meaningful once a
-            # base snapshot is pinned, like _validate_committed_snapshot.)
+            # Fail fast: don't stack a window on a scope an overwrite invalidated
+            # (only meaningful once a base snapshot is pinned).
             if self._base_snapshot_id is not None:
                 self._table_commit.validate_protected_row_id_scope()
         except Exception as error:
@@ -328,9 +322,8 @@ class _IncrementalUpdateCommitter:
             self._table_commit.ignore_row_id_conflict_for_commit(
                 commit_identifier)
             self._validate_committed_snapshot()
-            # Extend the cumulative protected scope to this window and re-check
-            # that no concurrent overwrite has touched any committed window.
-            # _last_committed_snapshot is only found when a base is pinned.
+            # Extend the protected scope to this window and re-check for
+            # overwrites (_last_committed_snapshot needs a pinned base).
             if self._base_snapshot_id is not None:
                 self._table_commit.protect_committed_row_id_scope(
                     committed_messages, self._last_committed_snapshot)

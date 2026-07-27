@@ -181,17 +181,14 @@ class ConflictDetection:
         self._row_id_index_manifest_cache = {}
         self._bounded_row_id_conflict_state = False
         self.commit_scanner = commit_scanner
-        # Cumulative protection for already-committed incremental row-id windows.
-        # Kept compact -- merged full file-group ranges by (partition, bucket) --
-        # plus the identity of the last confirmed window as a checkpoint. These
-        # survive reset_row_id_history(): they guard windows that are already
-        # durable, independent of the per-window history cache.
+        # Protection for already-committed incremental windows: merged full
+        # file-group ranges by (partition, bucket) + the last confirmed window's
+        # snapshot as a checkpoint. Survives reset_row_id_history().
         self._protected_row_id_scope = {}
         self._protected_checkpoint_snapshot = None
         self._protected_checkpoint_identity = None
-        # snapshot id -> identity for the windows we committed, so validation can
-        # tell our own disjoint commits apart from an external overwrite and skip
-        # the manifest scan when nothing external landed.
+        # Our committed windows (snapshot id -> identity), to tell our own
+        # disjoint commits from an external overwrite and skip the scan.
         self._protected_own_snapshots = {}
 
     def should_be_overwrite_commit(self, append_file_entries=None, append_index_files=None):
@@ -236,33 +233,20 @@ class ConflictDetection:
             self._row_id_ignored_commit_high_watermarks[commit_user] = commit_identifier
 
     def protect_committed_row_id_scope(self, committed_snapshot, messages):
-        """Register a just-committed incremental row-id window for protection.
-
-        Must be called only after the window's commit is known to have succeeded
-        and ``committed_snapshot`` is that window's own snapshot (never on a
-        rejected or outcome-unknown commit -- that would advance the checkpoint
-        past data that may not be durable). The sequence is:
-
-          1. validate the *existing* cumulative scope against the old checkpoint
-             and the latest snapshot (catches a concurrent overwrite of an
-             earlier window before we extend the scope);
-          2. merge this window's full file-group ranges into the scope;
-          3. advance the checkpoint to this window's own snapshot;
-          4. re-validate the extended scope against the latest snapshot.
-
-        Fails closed (``RowIdPlanningConflictError``) on any anomaly.
+        """Register a just-committed window for protection: validate the current
+        scope, merge this window's full file-group ranges, advance the
+        checkpoint, then re-validate. Fails closed on any anomaly. Call only for
+        a known-committed window (never a rejected/unknown commit).
         """
-        # Record this window's own snapshot before validating so the validation
-        # recognises it as ours and does not treat our own disjoint commit as an
-        # external overwrite to re-scan.
+        # Register our own snapshot first so validation treats this commit as
+        # ours, not as an external overwrite to re-scan.
         self._protected_own_snapshots[committed_snapshot.id] = (
             self._snapshot_identity(committed_snapshot))
         self._validate_protected_scope(self.snapshot_manager.get_latest_snapshot())
 
         window_ranges = self._row_id_ranges_from_messages(messages)
         if not window_ranges:
-            # A committed window with no extractable full file-group range must
-            # not silently drop out of protection.
+            # A committed window must not silently drop out of protection.
             raise RowIdPlanningConflictError(
                 "Cannot protect a committed update_by_row_id window without "
                 "row ID ranges.")
@@ -271,8 +255,7 @@ class ConflictDetection:
         self._protected_checkpoint_snapshot = committed_snapshot
         self._protected_checkpoint_identity = self._snapshot_identity(
             committed_snapshot)
-        # Only ids greater than the checkpoint are queried again; drop the rest
-        # so this map stays bounded instead of growing with the window count.
+        # Drop ids <= checkpoint (never queried again) so the map stays bounded.
         self._protected_own_snapshots = {
             snapshot_id: identity
             for snapshot_id, identity in self._protected_own_snapshots.items()
@@ -282,12 +265,8 @@ class ConflictDetection:
         self._validate_protected_scope(self.snapshot_manager.get_latest_snapshot())
 
     def validate_protected_row_id_scope(self):
-        """Re-validate the cumulative protected scope against the latest snapshot.
-
-        Used before committing the next window and once more at finish() so a
-        concurrent overwrite of an already-committed window is caught even if no
-        further window is committed.
-        """
+        """Re-validate the protected scope against latest (used pre-commit and
+        at finish() so an overwrite is caught even if no further window commits)."""
         self._validate_protected_scope(self.snapshot_manager.get_latest_snapshot())
 
     def _validate_protected_scope(self, latest_snapshot):
@@ -298,9 +277,8 @@ class ConflictDetection:
         checkpoint = self._protected_checkpoint_snapshot
         current_checkpoint = self.snapshot_manager.get_snapshot_by_id(
             checkpoint.id)
-        # Rollback, snapshot expiration and reused-id all show up here as a
-        # missing snapshot or a changed identity at the checkpoint id -- fail
-        # closed rather than trusting a checkpoint that is no longer live.
+        # Rollback / expiration / reused-id show up as a missing or changed
+        # snapshot at the checkpoint id -- fail closed.
         if (current_checkpoint is None
                 or self._snapshot_identity(current_checkpoint)
                 != self._protected_checkpoint_identity):
@@ -315,8 +293,7 @@ class ConflictDetection:
         if not self._external_snapshot_since_checkpoint(
                 checkpoint.id, latest_snapshot):
             # Only our own disjoint APPEND windows since the checkpoint -> no
-            # protected file group can have changed. Skipping the scan keeps N
-            # windows at O(N) manifest reads instead of O(N^2).
+            # protected file group changed. Skip the scan (keeps N windows O(N)).
             return
 
         checkpoint_signatures = self._row_id_entry_signatures(
@@ -355,10 +332,8 @@ class ConflictDetection:
 
     @staticmethod
     def _row_id_ranges_from_messages(messages):
-        """Full file-group row-id ranges by (partition, bucket) from committed
-        messages. Uses each committed data file's whole range -- never a partial
-        ``row_id_update_ranges`` subset -- so protection covers the file group,
-        not only the rows that changed."""
+        """Full file-group row-id ranges by (partition, bucket): each committed
+        file's whole range (not a partial row_id_update_ranges subset)."""
         ranges = {}
         for message in messages or []:
             key = (tuple(message.partition), message.bucket)
