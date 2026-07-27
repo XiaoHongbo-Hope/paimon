@@ -391,9 +391,8 @@ class TestRESTCommit(RESTBaseTest):
                     with patch(
                             'pypaimon.api.rest_api.RESTApi.commit_snapshot',
                             side_effect=rest_error) as rest_commit:
-                        # Surfaces as a safe-to-abort rejection whose cause is
-                        # the mapped exception; the staged files are aborted by
-                        # the commit layer, so no manual abort() is needed.
+                        # Safe-to-abort rejection (cause = mapped exception);
+                        # staged files aborted by the commit layer.
                         with self.assertRaises(
                                 DeterministicCommitRejectionError) as raised:
                             table_commit.commit(commit_messages)

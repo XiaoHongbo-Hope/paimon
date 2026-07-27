@@ -106,8 +106,8 @@ class CommitOutcomeUnknownError(RuntimeError):
 
 
 class DeterministicCommitRejectionError(CommitConflictError):
-    """A deterministically rejected commit. A CommitConflictError so the
-    message-owning layer aborts the staged files; original cause preserved."""
+    """A deterministically rejected commit; a CommitConflictError so the caller
+    aborts the staged files. Original cause preserved."""
 
 
 class SuccessResult(CommitResult):
@@ -815,8 +815,7 @@ class FileStoreCommit:
                     exc_info=commit_exc,
                 )
                 clean_up_rejected_commit()
-                # Raise a CommitConflictError so the message-owning layer aborts
-                # the staged files (it only aborts on that type); keep the cause.
+                # CommitConflictError so the caller aborts the staged files.
                 raise DeterministicCommitRejectionError(
                     "Atomic commit was rejected deterministically.") from commit_exc
             # Commit exception, not sure about the situation and should not clean up the files
