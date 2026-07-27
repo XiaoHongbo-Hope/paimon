@@ -598,43 +598,32 @@ class RayUpdateByRowIdTest(unittest.TestCase):
             self._read(target).sort_by("id")["age"].to_pylist(),
         )
 
-    def test_incremental_mode_gives_each_group_its_own_partition(self):
-        # QuakeWang review: incremental commit isolates failures per Ray reduce
-        # task, not per group. When several groups share a task (num_partitions
-        # < group count) a later group's failure discards the groups that
-        # already finished in that same task, so they never reach the committer
-        # -- with num_partitions=1 the whole update is all-or-nothing. Incremental
-        # mode must therefore give every group its own reduce partition
-        # regardless of num_partitions; atomic mode keeps the num_partitions cap.
+    def test_incremental_commit_survives_a_failing_group(self):
+        # QuakeWang review: a later group's failure must not discard the groups
+        # that already succeeded in the *same* Ray task. Force both groups into
+        # one task (num_partitions=1) and make the second group fail (duplicate
+        # _ROW_ID). The first group must still be committed, and the failure
+        # must still surface. Bounding partitions to num_partitions (rather than
+        # to the file count) can co-locate groups in a task, so this is exactly
+        # the scenario that per-group exception encoding must handle.
+        target = self._create()
+        for row_id in range(1, 3):  # two data files => two groups
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["a"], "age": [0]},
+                schema=self.pa_schema))
+        row_ids = self._rowid_by_id(target)
         update_schema = pa.schema([
             ("_ROW_ID", pa.int64()),
             ("age", pa.int32()),
         ])
-
-        def _target_with_three_files():
-            target = self._create()
-            for row_id in range(1, 4):  # three data files => three groups
-                self._write(target, pa.Table.from_pydict(
-                    {"id": [row_id], "name": ["a"], "age": [0]},
-                    schema=self.pa_schema))
-            return target, self._rowid_by_id(target)
-
-        captured = []
-        original_groupby = ray.data.Dataset.groupby
-
-        def recording_groupby(dataset, *args, **kwargs):
-            captured.append(kwargs.get("num_partitions"))
-            return original_groupby(dataset, *args, **kwargs)
-
-        # Incremental mode: num_partitions=1 must NOT collapse the three groups
-        # into one task; each group gets its own partition.
-        target, row_ids = _target_with_three_files()
+        # Group for id=1 is valid; group for id=2 has a duplicate _ROW_ID and
+        # fails inside the worker.
         source = pa.table(
-            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[3]],
-             "age": [100, 200, 300]},
+            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[2]],
+             "age": [111, 222, 333]},
             schema=update_schema)
-        with mock.patch.object(
-                ray.data.Dataset, "groupby", recording_groupby):
+
+        with self.assertRaisesRegex(ValueError, "Deduplicate"):
             update_by_row_id(
                 target,
                 ray.data.from_arrow(source),
@@ -643,29 +632,54 @@ class RayUpdateByRowIdTest(unittest.TestCase):
                 num_partitions=1,
                 max_groups_per_commit=1,
             )
-        self.assertEqual([3], captured)
-        self.assertEqual(
-            [100, 200, 300],
-            self._read(target).sort_by("id")["age"].to_pylist(),
-        )
 
-        # Atomic mode keeps the num_partitions cap (all-or-nothing anyway).
-        captured.clear()
-        target2, row_ids2 = _target_with_three_files()
-        source2 = pa.table(
-            {"_ROW_ID": [row_ids2[1], row_ids2[2], row_ids2[3]],
-             "age": [1, 2, 3]},
-            schema=update_schema)
+        # The healthy group committed even though its sibling failed in the
+        # same task; the failed group left its row untouched.
+        ages = dict(zip(
+            self._read(target)["id"].to_pylist(),
+            self._read(target)["age"].to_pylist(),
+        ))
+        self.assertEqual(111, ages[1])
+        self.assertEqual(0, ages[2])
+
+    def test_sparse_source_keeps_partitions_bounded(self):
+        # QuakeWang review: partitions must follow num_partitions, not the whole
+        # table's file count -- a one-row update over many files must not plan a
+        # partition per untouched file.
+        target = self._create()
+        for row_id in range(1, 6):  # five data files
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["a"], "age": [0]},
+                schema=self.pa_schema))
+        row_ids = self._rowid_by_id(target)
+        source = pa.table(
+            {"_ROW_ID": [row_ids[1]], "age": [111]},
+            schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]))
+
+        captured = []
+        original_groupby = ray.data.Dataset.groupby
+
+        def recording_groupby(dataset, *args, **kwargs):
+            captured.append(kwargs.get("num_partitions"))
+            return original_groupby(dataset, *args, **kwargs)
+
         with mock.patch.object(
                 ray.data.Dataset, "groupby", recording_groupby):
             update_by_row_id(
-                target2,
-                ray.data.from_arrow(source2),
+                target,
+                ray.data.from_arrow(source),
                 self.catalog_options,
                 update_cols=["age"],
-                num_partitions=1,
+                num_partitions=2,
+                max_groups_per_commit=1,
             )
-        self.assertEqual([1], captured)
+        # Capped at num_partitions=2, not inflated to the five-file count.
+        self.assertEqual([2], captured)
+        self.assertEqual(
+            111,
+            dict(zip(self._read(target)["id"].to_pylist(),
+                     self._read(target)["age"].to_pylist()))[1],
+        )
 
     def test_incremental_commit_fails_after_external_rollback(self):
         target = self._create()

@@ -555,60 +555,71 @@ def distributed_update_apply(
     captured_table = table
     captured_cols = cols
 
+    def _group_result(msgs_blob, n_updated, row_ids_blob, error_blob):
+        return pa.Table.from_pydict({
+            "msgs_blob": pa.array([msgs_blob], type=pa.binary()),
+            "n_updated": pa.array([n_updated], type=pa.int64()),
+            "row_ids_blob": pa.array([row_ids_blob], type=pa.binary()),
+            "error_blob": pa.array([error_blob], type=pa.binary()),
+        })
+
     def _apply_group(group: pa.Table) -> pa.Table:
         if group.num_rows == 0:
             return pa.Table.from_pydict({
                 "msgs_blob": pa.array([], type=pa.binary()),
                 "n_updated": pa.array([], type=pa.int64()),
                 "row_ids_blob": pa.array([], type=pa.binary()),
+                "error_blob": pa.array([], type=pa.binary()),
             })
 
-        if (
-            pc.count_distinct(group.column(row_id_name)).as_py()
-            != group.num_rows
-        ):
-            raise ValueError(
-                "MERGE matched multiple source rows to the same "
-                "target _ROW_ID. Deduplicate the source before "
-                "merging."
+        try:
+            if (
+                pc.count_distinct(group.column(row_id_name)).as_py()
+                != group.num_rows
+            ):
+                raise ValueError(
+                    "MERGE matched multiple source rows to the same "
+                    "target _ROW_ID. Deduplicate the source before "
+                    "merging."
+                )
+
+            for_update = group.drop_columns([frid_col])
+            row_ids = (
+                for_update.column(row_id_name).to_pylist()
+                if collect_row_ids else []
             )
+            worker = TableUpdateByRowId(
+                captured_table,
+                "_merge_into_shard_" + uuid.uuid4().hex[:8],
+                BATCH_COMMIT_IDENTIFIER,
+                _precomputed_files_info=ray.get(precomputed_info_ref),
+            )
+            msgs = worker.update_columns(for_update, list(captured_cols))
+        except Exception as group_error:
+            # Encode the failure as data instead of raising. Raising kills the
+            # whole Ray task, and a task can run several groups: Ray discards a
+            # failed task's entire output, so every sibling group that already
+            # finished in that task would be lost and never committed. (Setting
+            # partitions == group count does not avoid this -- groupby hashes
+            # keys into buckets, so distinct groups still collide onto one task.)
+            # The driver re-raises this after the groups that did succeed --
+            # here and in other tasks -- have been committed.
+            try:
+                error_blob = pickle.dumps(group_error)
+            except Exception:
+                error_blob = pickle.dumps(RuntimeError(
+                    f"{type(group_error).__name__}: {group_error}"))
+            return _group_result(b"", 0, b"", error_blob)
 
-        for_update = group.drop_columns([frid_col])
-        row_ids = (
-            for_update.column(row_id_name).to_pylist()
-            if collect_row_ids else []
-        )
-        worker = TableUpdateByRowId(
-            captured_table,
-            "_merge_into_shard_" + uuid.uuid4().hex[:8],
-            BATCH_COMMIT_IDENTIFIER,
-            _precomputed_files_info=ray.get(precomputed_info_ref),
-        )
-        msgs = worker.update_columns(for_update, list(captured_cols))
-        return pa.Table.from_pydict({
-            "msgs_blob": [pickle.dumps(msgs)],
-            "n_updated": pa.array(
-                [for_update.num_rows], type=pa.int64()
-            ),
-            "row_ids_blob": pa.array(
-                [pickle.dumps(row_ids)], type=pa.binary()
-            ),
-        })
+        return _group_result(
+            pickle.dumps(msgs), for_update.num_rows,
+            pickle.dumps(row_ids), None)
 
-    # One group per target data file; bounded by file count and num_partitions.
-    # Fault isolation for incremental commit is per reduce task, not per group:
-    # a task that runs several groups discards *all* its outputs if any one of
-    # them raises, so the groups that already finished in that task never reach
-    # on_group_result and stay uncommitted. In incremental mode give every group
-    # its own reduce partition so a failing group can only lose itself; the
-    # groups whose tasks already streamed out are committed before it fails.
-    # (Ray still hash-partitions, so a collision can co-locate two groups; that
-    # residual is documented on update_by_row_id.) Atomic mode commits nothing
-    # until the end, so it keeps the num_partitions cap.
-    if on_group_result is not None:
-        group_partitions = max(1, len(captured_sorted))
-    else:
-        group_partitions = max(1, min(len(captured_sorted), num_partitions))
+    # One group per target data file, bounded by num_partitions to keep the
+    # shuffle parallelism (and the number of Ray tasks) under the caller's
+    # control regardless of how many files the table has -- a sparse source over
+    # a huge table must not spawn one partition per untouched file.
+    group_partitions = max(1, min(len(captured_sorted), num_partitions))
     msgs_ds = with_frid.groupby(
         frid_col, num_partitions=group_partitions
     ).map_groups(_apply_group, **map_kwargs)
@@ -616,27 +627,33 @@ def distributed_update_apply(
     all_msgs: list = []
     num_updated = 0
     action_row_ids = []
+    group_error = None
     iter_batches_kwargs = {"batch_format": "pyarrow"}
     if on_group_result is not None:
         # Consume each reduce task's output as soon as it lands, one group at a
-        # time, so a completed group is committed before a later group's task
-        # fails. batch_size=1 avoids merging groups from different tasks into one
-        # callback; prefetch_batches=0 keeps the driver from pulling a later
-        # (possibly failing) block before the current group has been committed.
-        # This does NOT by itself isolate group failures -- that comes from the
-        # one-group-per-partition split above; here it only avoids extra driver
-        # buffering on top of it.
+        # time, so a completed group is committed as early as possible.
+        # batch_size=1 keeps groups from different tasks out of one callback;
+        # prefetch_batches=0 keeps the driver from pulling a later block before
+        # the current group has been committed. Per-group failure isolation
+        # comes from _apply_group encoding errors as data, not from this.
         iter_batches_kwargs["batch_size"] = 1
         iter_batches_kwargs["prefetch_batches"] = 0
     for batch in msgs_ds.iter_batches(**iter_batches_kwargs):
         message_blobs = batch.column("msgs_blob").to_pylist()
         updated_counts = batch.column("n_updated").to_pylist()
+        error_blobs = batch.column("error_blob").to_pylist()
         row_id_blobs = (
             batch.column("row_ids_blob").to_pylist()
             if collect_row_ids else [None] * len(message_blobs)
         )
-        for blob, n, row_ids_blob in zip(
-                message_blobs, updated_counts, row_id_blobs):
+        for blob, n, err_blob, row_ids_blob in zip(
+                message_blobs, updated_counts, error_blobs, row_id_blobs):
+            if err_blob is not None:
+                # Keep committing the groups that succeeded; surface the first
+                # failure only after the loop so it cannot discard their work.
+                if group_error is None:
+                    group_error = pickle.loads(err_blob)
+                continue
             group_msgs = pickle.loads(blob)
             group_row_ids = (
                 pickle.loads(row_ids_blob) if collect_row_ids else []
@@ -648,6 +665,12 @@ def distributed_update_apply(
             num_updated += n
             if collect_row_ids:
                 action_row_ids.extend(group_row_ids)
+    if group_error is not None:
+        # Every group that succeeded has now been delivered (committed in
+        # incremental mode, or accumulated for the atomic commit that the
+        # raise below prevents). Surface the failure so the caller aborts the
+        # in-progress window / atomic batch and can rerun.
+        raise group_error
     return all_msgs, num_updated, action_row_ids
 
 
