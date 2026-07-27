@@ -78,7 +78,7 @@ class TestFileStoreCommit(unittest.TestCase):
         snapshot_commit = MagicMock()
         snapshot_commit.__enter__.return_value = snapshot_commit
         snapshot_commit.__exit__.return_value = False
-        snapshot_commit.__exit__.side_effect = close_error
+        snapshot_commit.close.side_effect = close_error
         if atomic_error is None:
             snapshot_commit.commit.return_value = True
         else:
@@ -586,12 +586,44 @@ class TestFileStoreCommit(unittest.TestCase):
         self.assertTrue(result.outcome_unknown)
         self.assertIs(transport_error, result.exception)
 
-    def test_exception_after_atomic_call_returns_remains_unknown(
+    def test_close_failure_does_not_override_successful_commit(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
+        # commit() accepted the snapshot; a later close() failure must not
+        # turn the landed commit into a retry/unknown outcome, and must not
+        # delete the just-committed files.
         close_error = TableNoPermissionException(
             Identifier.create("default", "test_table"))
         file_store_commit, _, commit_entry = self._prepare_atomic_attempt(
             close_error=close_error)
+        file_store_commit._clean_up_reuse_tmp_manifests = Mock()
+        file_store_commit._clean_up_no_reuse_tmp_manifests = Mock()
+
+        result = file_store_commit._try_commit_once(
+            retry_result=None,
+            commit_kind="APPEND",
+            commit_entries=[commit_entry],
+            changelog_entries=[],
+            commit_identifier=1,
+            latest_snapshot=None,
+        )
+
+        self.assertTrue(result.is_success())
+        file_store_commit._clean_up_reuse_tmp_manifests.assert_not_called()
+        file_store_commit._clean_up_no_reuse_tmp_manifests.assert_not_called()
+
+    def test_commit_exception_outcome_survives_deterministic_close_failure(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        # P1: commit() lost the response (non-deterministic) but close() then
+        # raised a deterministic-looking rejection. The commit may already be
+        # visible, so the outcome must stay unknown and the files must be kept.
+        atomic_error = RESTException(
+            "response lost", cause=TimeoutError("read timed out"))
+        close_error = TableNoPermissionException(
+            Identifier.create("default", "test_table"))
+        file_store_commit, _, commit_entry = self._prepare_atomic_attempt(
+            atomic_error=atomic_error, close_error=close_error)
+        file_store_commit._clean_up_reuse_tmp_manifests = Mock()
+        file_store_commit._clean_up_no_reuse_tmp_manifests = Mock()
 
         result = file_store_commit._try_commit_once(
             retry_result=None,
@@ -604,7 +636,38 @@ class TestFileStoreCommit(unittest.TestCase):
 
         self.assertFalse(result.is_success())
         self.assertTrue(result.outcome_unknown)
-        self.assertIs(close_error, result.exception)
+        self.assertIs(atomic_error, result.exception)
+        file_store_commit._clean_up_reuse_tmp_manifests.assert_not_called()
+        file_store_commit._clean_up_no_reuse_tmp_manifests.assert_not_called()
+
+    def test_deterministic_rejection_survives_ordinary_close_failure(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        # Reverse P1: commit() deterministically rejected the snapshot, and
+        # close() then raised an ordinary error. The rejection must not be
+        # downgraded to "unknown"; files must be cleaned up and the commit
+        # error re-raised.
+        atomic_error = TableNoPermissionException(
+            Identifier.create("default", "test_table"))
+        close_error = RuntimeError("close failed")
+        file_store_commit, snapshot_commit, commit_entry = (
+            self._prepare_atomic_attempt(
+                atomic_error=atomic_error, close_error=close_error))
+        file_store_commit._clean_up_reuse_tmp_manifests = Mock()
+        file_store_commit._clean_up_no_reuse_tmp_manifests = Mock()
+
+        with self.assertRaises(TableNoPermissionException) as raised:
+            file_store_commit._try_commit_once(
+                retry_result=None,
+                commit_kind="APPEND",
+                commit_entries=[commit_entry],
+                changelog_entries=[],
+                commit_identifier=1,
+                latest_snapshot=None,
+            )
+
+        self.assertIs(atomic_error, raised.exception)
+        file_store_commit._clean_up_reuse_tmp_manifests.assert_called_once()
+        file_store_commit._clean_up_no_reuse_tmp_manifests.assert_called_once()
 
     def test_false_commit_close_failure_is_deterministic(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
@@ -626,7 +689,7 @@ class TestFileStoreCommit(unittest.TestCase):
 
         self.assertFalse(result.is_success())
         self.assertFalse(result.outcome_unknown)
-        self.assertIs(close_error, result.exception)
+        self.assertIsNone(result.exception)
         file_store_commit._clean_up_reuse_tmp_manifests.assert_called_once()
         file_store_commit._clean_up_no_reuse_tmp_manifests.assert_called_once()
 

@@ -763,37 +763,42 @@ class FileStoreCommit:
                     exc_info=True,
                 )
 
+        # Keep the outcome of commit() separate from close(): only commit()
+        # decides whether the snapshot was accepted. Folding both into a single
+        # ``with`` block lets a close() exception silently replace the commit
+        # outcome (Python raises the __exit__ exception over the body's), which
+        # can turn a landed commit into a "deterministic rejection" (deleting
+        # committed files) or downgrade a real rejection to "unknown" (leaking
+        # files). close() therefore only logs; it never changes the outcome.
         success = None
-        atomic_call_returned = False
+        commit_exc = None
         try:
-            with self.snapshot_commit:
-                success = self.snapshot_commit.commit(snapshot_data, statistics)
-                atomic_call_returned = True
+            success = self.snapshot_commit.commit(snapshot_data, statistics)
         except Exception as e:
-            if (not atomic_call_returned
-                    and _is_deterministic_atomic_commit_failure(e)):
+            commit_exc = e
+        finally:
+            try:
+                self.snapshot_commit.close()
+            except Exception:
+                logger.warning(
+                    "Failed to close snapshot commit; ignoring because it must "
+                    "not override the commit outcome.",
+                    exc_info=True,
+                )
+
+        if commit_exc is not None:
+            if _is_deterministic_atomic_commit_failure(commit_exc):
                 logger.warning(
                     "Atomic commit was rejected deterministically; do not retry.",
-                    exc_info=True,
+                    exc_info=commit_exc,
                 )
                 clean_up_rejected_commit()
-                raise
-            if atomic_call_returned and success is False:
-                logger.warning(
-                    "Atomic commit was rejected, but closing failed. Try again.",
-                    exc_info=True,
-                )
-                clean_up_rejected_commit()
-                return RetryResult(
-                    latest_snapshot,
-                    e,
-                    base_data_files=base_data_files,
-                )
+                raise commit_exc
             # Commit exception, not sure about the situation and should not clean up the files
-            logger.warning("Retry commit for exception.", exc_info=True)
+            logger.warning("Retry commit for exception.", exc_info=commit_exc)
             return RetryResult(
                 latest_snapshot,
-                e,
+                commit_exc,
                 base_data_files=base_data_files,
                 outcome_unknown=True,
             )
