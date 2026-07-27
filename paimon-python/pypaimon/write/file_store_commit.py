@@ -774,39 +774,37 @@ class FileStoreCommit:
                     exc_info=True,
                 )
 
-        # Keep the outcome of commit() separate from close(): only commit()
-        # decides whether the snapshot was accepted. The context-manager
-        # lifecycle is preserved and mirrors a ``with`` block -- __enter__ runs
-        # before the body (so a failure there propagates without __exit__, as
-        # ``with`` does), and __exit__ receives the real exception triple from
-        # commit() so an extension can roll back or release a lock based on it.
-        # It is driven manually only so that __exit__'s *own* failure cannot
-        # replace the commit outcome: folding commit() and close() into one
-        # ``with`` lets a close()/__exit__ error be raised over the body's
-        # exception, which can turn a landed commit into a "deterministic
-        # rejection" (deleting committed files) or downgrade a real rejection to
-        # "unknown" (leaking files). __exit__'s exception is therefore only
-        # logged, and its return value is ignored (the outcome is commit_exc).
+        # Mirror a ``with`` block but drive it manually so only commit() decides
+        # the outcome. __enter__ and commit() share one capture, so an __enter__
+        # failure flows through the classification below instead of bypassing it.
+        # __exit__ gets the real commit exception triple (for extension rollback)
+        # but its own failure is only logged -- never allowed to override the
+        # commit outcome (a lost/landed commit must not be misclassified).
         success = None
         commit_exc = None
-        self.snapshot_commit.__enter__()
+        entered = False
         try:
+            self.snapshot_commit.__enter__()
+            entered = True
             success = self.snapshot_commit.commit(snapshot_data, statistics)
         except Exception as e:
             commit_exc = e
         finally:
-            exit_exc_info = (
-                (type(commit_exc), commit_exc, commit_exc.__traceback__)
-                if commit_exc is not None else (None, None, None)
-            )
-            try:
-                self.snapshot_commit.__exit__(*exit_exc_info)
-            except Exception:
-                logger.warning(
-                    "Failed to close snapshot commit; ignoring because it must "
-                    "not override the commit outcome.",
-                    exc_info=True,
+            # Never call __exit__ without a successful __enter__ (mirrors
+            # ``with``); the outcome is still classified from commit_exc below.
+            if entered:
+                exit_exc_info = (
+                    (type(commit_exc), commit_exc, commit_exc.__traceback__)
+                    if commit_exc is not None else (None, None, None)
                 )
+                try:
+                    self.snapshot_commit.__exit__(*exit_exc_info)
+                except Exception:
+                    logger.warning(
+                        "Failed to close snapshot commit; ignoring because it "
+                        "must not override the commit outcome.",
+                        exc_info=True,
+                    )
 
         if commit_exc is not None:
             if _is_deterministic_atomic_commit_failure(commit_exc):

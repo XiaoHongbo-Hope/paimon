@@ -633,6 +633,31 @@ class TestFileStoreCommit(unittest.TestCase):
         self.assertIs(RuntimeError, exit_args[0])
         self.assertIs(atomic_error, exit_args[1])
 
+    def test_enter_failure_is_classified_not_raised_raw(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        # A failing __enter__ (e.g. lock acquisition) must flow through the
+        # commit-outcome classification, not propagate raw. __exit__ is not
+        # called after a failed __enter__, and commit() never runs.
+        enter_error = RuntimeError("lock acquisition failed")
+        file_store_commit, snapshot_commit, commit_entry = (
+            self._prepare_atomic_attempt())
+        snapshot_commit.__enter__.side_effect = enter_error
+
+        result = file_store_commit._try_commit_once(
+            retry_result=None,
+            commit_kind="APPEND",
+            commit_entries=[commit_entry],
+            changelog_entries=[],
+            commit_identifier=1,
+            latest_snapshot=None,
+        )
+
+        self.assertFalse(result.is_success())
+        self.assertTrue(result.outcome_unknown)
+        self.assertIs(enter_error, result.exception)
+        snapshot_commit.commit.assert_not_called()
+        snapshot_commit.__exit__.assert_not_called()
+
     def test_close_failure_does_not_override_successful_commit(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
         # commit() accepted the snapshot; a later close() failure must not
