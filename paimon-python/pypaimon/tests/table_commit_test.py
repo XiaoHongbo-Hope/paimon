@@ -100,3 +100,32 @@ class TestTableCommitEmptyOverwrite(unittest.TestCase):
             commit_messages=[],
             commit_identifier=42,
         )
+
+    def test_deterministic_rejection_aborts_staged_files(self):
+        # A deterministic rejection surfaces as a CommitConflictError, so
+        # TableCommit._commit aborts the staged files -- the caller needs no
+        # manual abort(). Generic failures are left alone (uncertain outcome).
+        from pypaimon.write.file_store_commit import (
+            DeterministicCommitRejectionError)
+
+        commit, mock_fsc = self._create_commit(
+            BatchTableCommit, overwrite_partition=None)
+        messages = [CommitMessage(partition=(), bucket=0, new_files=[Mock()])]
+        mock_fsc.commit.side_effect = DeterministicCommitRejectionError(
+            "rejected")
+
+        with self.assertRaises(DeterministicCommitRejectionError):
+            commit.commit(messages)
+        mock_fsc.abort.assert_called_once_with(messages)
+
+    def test_generic_commit_failure_does_not_abort(self):
+        # A generic (uncertain) failure must not abort: the commit may have
+        # landed.
+        commit, mock_fsc = self._create_commit(
+            BatchTableCommit, overwrite_partition=None)
+        messages = [CommitMessage(partition=(), bucket=0, new_files=[Mock()])]
+        mock_fsc.commit.side_effect = RuntimeError("response lost")
+
+        with self.assertRaises(RuntimeError):
+            commit.commit(messages)
+        mock_fsc.abort.assert_not_called()

@@ -39,7 +39,10 @@ from pypaimon.common.identifier import Identifier
 from pypaimon.snapshot.snapshot import Snapshot
 from pypaimon.snapshot.snapshot_commit import PartitionStatistics
 from pypaimon.tests.rest.rest_base_test import RESTBaseTest
-from pypaimon.write.file_store_commit import CommitOutcomeUnknownError
+from pypaimon.write.file_store_commit import (
+    CommitOutcomeUnknownError,
+    DeterministicCommitRejectionError,
+)
 
 
 class TestRESTCatalogCommitSnapshot(unittest.TestCase):
@@ -388,11 +391,16 @@ class TestRESTCommit(RESTBaseTest):
                     with patch(
                             'pypaimon.api.rest_api.RESTApi.commit_snapshot',
                             side_effect=rest_error) as rest_commit:
-                        with self.assertRaises(expected_error):
+                        # Surfaces as a safe-to-abort rejection whose cause is
+                        # the mapped exception; the staged files are aborted by
+                        # the commit layer, so no manual abort() is needed.
+                        with self.assertRaises(
+                                DeterministicCommitRejectionError) as raised:
                             table_commit.commit(commit_messages)
 
+                    self.assertIsInstance(
+                        raised.exception.__cause__, expected_error)
                     rest_commit.assert_called_once()
-                    table_commit.abort(commit_messages)
                 finally:
                     table_write.close()
                     table_commit.close()

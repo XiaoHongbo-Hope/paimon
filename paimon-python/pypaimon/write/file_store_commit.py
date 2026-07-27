@@ -105,6 +105,11 @@ class CommitOutcomeUnknownError(RuntimeError):
     """The commit may already be visible."""
 
 
+class DeterministicCommitRejectionError(CommitConflictError):
+    """A deterministically rejected commit. A CommitConflictError so the
+    message-owning layer aborts the staged files; original cause preserved."""
+
+
 class SuccessResult(CommitResult):
     """Result indicating successful commit."""
 
@@ -810,7 +815,10 @@ class FileStoreCommit:
                     exc_info=commit_exc,
                 )
                 clean_up_rejected_commit()
-                raise commit_exc
+                # Raise a CommitConflictError so the message-owning layer aborts
+                # the staged files (it only aborts on that type); keep the cause.
+                raise DeterministicCommitRejectionError(
+                    "Atomic commit was rejected deterministically.") from commit_exc
             # Commit exception, not sure about the situation and should not clean up the files
             logger.warning("Retry commit for exception.", exc_info=commit_exc)
             return RetryResult(

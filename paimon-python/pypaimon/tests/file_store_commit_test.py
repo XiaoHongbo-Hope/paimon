@@ -36,6 +36,7 @@ from pypaimon.write.commit.conflict_detection import (
 from pypaimon.write.commit_message import CommitMessage
 from pypaimon.write.file_store_commit import (
     CommitOutcomeUnknownError,
+    DeterministicCommitRejectionError,
     FileStoreCommit,
     RetryResult,
     SuccessResult,
@@ -558,11 +559,16 @@ class TestFileStoreCommit(unittest.TestCase):
                 file_store_commit._clean_up_no_reuse_tmp_manifests = Mock()
                 file_store_commit.snapshot_manager.get_latest_snapshot.return_value = None
 
-                with self.assertRaises(type(atomic_error)) as raised:
+                # Surfaced as a safe-to-abort CommitConflictError (so the
+                # message-owning layer aborts the staged files), original cause
+                # preserved.
+                with self.assertRaises(
+                        DeterministicCommitRejectionError) as raised:
                     file_store_commit._try_commit(
                         "APPEND", 1, lambda _snapshot: [commit_entry])
 
-                self.assertIs(atomic_error, raised.exception)
+                self.assertIsInstance(raised.exception, CommitConflictError)
+                self.assertIs(atomic_error, raised.exception.__cause__)
                 snapshot_commit.commit.assert_called_once()
                 file_store_commit._commit_retry_wait.assert_not_called()
                 file_store_commit._clean_up_reuse_tmp_manifests.assert_called_once()
@@ -675,9 +681,9 @@ class TestFileStoreCommit(unittest.TestCase):
             atomic_error=atomic_error, close_error=close_error)
         fsc._clean_up_reuse_tmp_manifests = Mock()
         fsc._clean_up_no_reuse_tmp_manifests = Mock()
-        with self.assertRaises(TableNoPermissionException) as raised:
+        with self.assertRaises(DeterministicCommitRejectionError) as raised:
             self._commit_once(fsc, entry)
-        self.assertIs(atomic_error, raised.exception)
+        self.assertIs(atomic_error, raised.exception.__cause__)
         fsc._clean_up_reuse_tmp_manifests.assert_called_once()
         fsc._clean_up_no_reuse_tmp_manifests.assert_called_once()
 
