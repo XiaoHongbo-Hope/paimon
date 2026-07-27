@@ -175,6 +175,17 @@ class FileStoreCommit:
         table_rollback = table.catalog_environment.catalog_table_rollback()
         self.rollback = CommitRollback(table_rollback) if table_rollback is not None else None
 
+    def protect_committed_row_id_scope(self, commit_messages, committed_snapshot):
+        """Register a just-committed incremental row-id window for cumulative
+        overwrite protection (see ConflictDetection)."""
+        self.conflict_detection.protect_committed_row_id_scope(
+            committed_snapshot, commit_messages)
+
+    def validate_protected_row_id_scope(self):
+        """Re-validate that no concurrent overwrite touched an already-committed
+        incremental row-id window."""
+        self.conflict_detection.validate_protected_row_id_scope()
+
     def commit(self, commit_messages: List[CommitMessage], commit_identifier: int):
         """Commit the given commit messages in normal append mode."""
         if not commit_messages:

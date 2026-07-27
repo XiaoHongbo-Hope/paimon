@@ -27,7 +27,10 @@ from pypaimon.manifest.schema.manifest_entry import ManifestEntry
 from pypaimon.schema.data_types import AtomicType, DataField
 from pypaimon.table.row.generic_row import GenericRow
 from pypaimon.utils.range import Range
-from pypaimon.write.commit.commit_scanner import CommitScanner
+from pypaimon.write.commit.commit_scanner import (
+    CommitScanner,
+    _ConflictEntryScope,
+)
 from pypaimon.write.commit.conflict_detection import (
     ConflictDetection,
     RowIdColumnConflictChecker,
@@ -1258,6 +1261,61 @@ class TestRowIdColumnConflictChecker(unittest.TestCase):
             "c2", row_count=100, first_row_id=0,
             schema_id=1, write_cols=["col_c"])
         self.assertFalse(checker.conflicts_with(committed_diff_field))
+
+
+class TestConflictEntryScopeFromRanges(unittest.TestCase):
+    """The compact row-id scope used to protect committed incremental windows
+    must isolate by (partition, bucket) even though the early bucket filter can
+    over-read; matches_entry is the exact filter."""
+
+    def test_same_bucket_different_partition_is_isolated(self):
+        scope = _ConflictEntryScope.from_ranges({
+            (("p1",), 0): [Range(0, 99)],
+        })
+        target = _make_entry(
+            "f1", bucket=0, first_row_id=0, row_count=100, partition=["p1"])
+        other_partition = _make_entry(
+            "f2", bucket=0, first_row_id=0, row_count=100, partition=["p2"])
+        self.assertTrue(scope.matches_entry(target))
+        # Same bucket and overlapping range, but a different partition.
+        self.assertFalse(scope.matches_entry(other_partition))
+
+    def test_same_partition_different_bucket_is_isolated(self):
+        scope = _ConflictEntryScope.from_ranges({
+            (("p1",), 0): [Range(0, 99)],
+        })
+        target = _make_entry(
+            "f1", bucket=0, first_row_id=0, row_count=100, partition=["p1"])
+        other_bucket = _make_entry(
+            "f2", bucket=1, first_row_id=0, row_count=100, partition=["p1"])
+        self.assertTrue(scope.matches_entry(target))
+        self.assertFalse(scope.matches_entry(other_bucket))
+
+    def test_overlapping_and_adjacent_ranges_merge(self):
+        scope = _ConflictEntryScope.from_ranges({
+            (("p1",), 0): [Range(0, 49), Range(50, 99), Range(90, 120)],
+        })
+        # Overlapping + adjacent ranges collapse to a single [0, 120] span,
+        # giving stable, comparable signatures for checkpoint vs latest scans.
+        merged = scope._ranges[(("p1",), 0)]
+        self.assertEqual(1, len(merged))
+        self.assertEqual((0, 120), (merged[0].from_, merged[0].to))
+        inside = _make_entry(
+            "f1", bucket=0, first_row_id=100, row_count=10, partition=["p1"])
+        outside = _make_entry(
+            "f2", bucket=0, first_row_id=200, row_count=10, partition=["p1"])
+        self.assertTrue(scope.matches_entry(inside))
+        self.assertFalse(scope.matches_entry(outside))
+
+    def test_empty_scope_reads_nothing_without_partition_fallback(self):
+        # An empty protected scope must return [] -- never fall back to scanning
+        # changed partitions the way read_conflict_entries does for an empty
+        # commit window.
+        self.assertTrue(_ConflictEntryScope.from_ranges({}).is_empty())
+        scanner = CommitScanner(None, None)
+        self.assertEqual([], scanner.read_entries_for_row_id_scope(None, {}))
+        self.assertEqual(
+            [], scanner.read_entries_for_row_id_scope(object(), {}))
 
 
 if __name__ == '__main__':

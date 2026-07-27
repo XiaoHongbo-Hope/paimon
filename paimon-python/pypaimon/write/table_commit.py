@@ -115,6 +115,18 @@ class TableCommit:
     def enable_bounded_row_id_conflict_state(self) -> None:
         self.file_store_commit.conflict_detection.enable_bounded_row_id_conflict_state()
 
+    def protect_committed_row_id_scope(
+            self, commit_messages: List[CommitMessage], committed_snapshot) -> None:
+        """Protect an already-committed incremental row-id window against a
+        later concurrent overwrite of its file groups."""
+        self.file_store_commit.protect_committed_row_id_scope(
+            commit_messages, committed_snapshot)
+
+    def validate_protected_row_id_scope(self) -> None:
+        """Re-check that no concurrent overwrite touched an already-committed
+        incremental row-id window."""
+        self.file_store_commit.validate_protected_row_id_scope()
+
     def close(self):
         self.file_store_commit.close()
 

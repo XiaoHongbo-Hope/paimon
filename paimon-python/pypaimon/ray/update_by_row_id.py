@@ -266,6 +266,11 @@ class _IncrementalUpdateCommitter:
         if self._deferred_error is None:
             try:
                 self._validate_committed_snapshot()
+                if (self._table_commit is not None
+                        and self._base_snapshot_id is not None):
+                    # Final guard: catch a concurrent overwrite of any committed
+                    # window even when no further window is committed.
+                    self._table_commit.validate_protected_row_id_scope()
             except Exception as error:
                 self._deferred_error = error
         if self._deferred_error is not None:
@@ -293,6 +298,11 @@ class _IncrementalUpdateCommitter:
         commit_identifier = self._next_commit_identifier
         try:
             self._validate_committed_snapshot()
+            # Fail fast: don't stack a new window on top of a scope that a
+            # concurrent overwrite already invalidated. (Only meaningful once a
+            # base snapshot is pinned, like _validate_committed_snapshot.)
+            if self._base_snapshot_id is not None:
+                self._table_commit.validate_protected_row_id_scope()
         except Exception as error:
             self._deferred_error = error
             return
@@ -318,6 +328,12 @@ class _IncrementalUpdateCommitter:
             self._table_commit.ignore_row_id_conflict_for_commit(
                 commit_identifier)
             self._validate_committed_snapshot()
+            # Extend the cumulative protected scope to this window and re-check
+            # that no concurrent overwrite has touched any committed window.
+            # _last_committed_snapshot is only found when a base is pinned.
+            if self._base_snapshot_id is not None:
+                self._table_commit.protect_committed_row_id_scope(
+                    committed_messages, self._last_committed_snapshot)
         except Exception as error:
             self._uncertain_messages.extend(committed_messages)
             self._deferred_error = error

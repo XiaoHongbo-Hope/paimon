@@ -863,6 +863,79 @@ class RayUpdateByRowIdTest(unittest.TestCase):
             self._read(target).sort_by("id")["age"].to_pylist(),
         )
 
+    def test_incremental_commit_rejects_overwrite_of_committed_window(self):
+        # QuakeWang review #1: a concurrent overwrite of an already-committed
+        # window must be caught -- the protected cumulative scope covers earlier
+        # windows, not just the window currently being committed. Commit the
+        # first window, overwrite the table (replacing that window's file
+        # group), then let the second window proceed; it must fail closed.
+        target = self._create()
+        for row_id in range(1, 3):  # two files => two windows
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["a"], "age": [0]},
+                schema=self.pa_schema))
+        table = self.catalog.get_table(target)
+        row_ids = self._rowid_by_id(target)
+        update_schema = pa.schema([
+            ("_ROW_ID", pa.int64()),
+            ("age", pa.int32()),
+        ])
+        source = pa.table(
+            {"_ROW_ID": [row_ids[1], row_ids[2]], "age": [100, 200]},
+            schema=update_schema)
+
+        original_iter_batches = ray.data.Dataset.iter_batches
+        first_window_committed = threading.Event()
+        resume_iteration = threading.Event()
+        overwrite_error = []
+
+        def pausing_iter_batches(dataset, *args, **kwargs):
+            for batch_number, batch in enumerate(
+                    original_iter_batches(dataset, *args, **kwargs), 1):
+                yield batch
+                if batch_number == 1:
+                    first_window_committed.set()
+                    if not resume_iteration.wait(30):
+                        raise TimeoutError("timed out waiting for overwrite")
+
+        def overwrite_first_window():
+            try:
+                if not first_window_committed.wait(30):
+                    raise TimeoutError("first commit was not observed")
+                wb = table.new_batch_write_builder().overwrite()
+                w = wb.new_write()
+                w.write_arrow(pa.Table.from_pydict(
+                    {"id": [9], "name": ["z"], "age": [9]},
+                    schema=self.pa_schema))
+                wb.new_commit().commit(w.prepare_commit())
+                w.close()
+            except Exception as error:
+                overwrite_error.append(error)
+            finally:
+                resume_iteration.set()
+
+        overwrite_thread = threading.Thread(target=overwrite_first_window)
+        overwrite_thread.start()
+        try:
+            with mock.patch.object(
+                    ray.data.Dataset, "iter_batches", pausing_iter_batches):
+                with self.assertRaisesRegex(
+                        RuntimeError, "already-committed update_by_row_id"):
+                    update_by_row_id(
+                        target,
+                        ray.data.from_arrow(source),
+                        self.catalog_options,
+                        update_cols=["age"],
+                        num_partitions=1,
+                        max_groups_per_commit=1,
+                    )
+        finally:
+            resume_iteration.set()
+            overwrite_thread.join(30)
+
+        self.assertEqual([], overwrite_error)
+        self.assertFalse(overwrite_thread.is_alive())
+
     def test_incremental_committer_batches_complete_groups(self):
         import importlib
         m = importlib.import_module("pypaimon.ray.update_by_row_id")

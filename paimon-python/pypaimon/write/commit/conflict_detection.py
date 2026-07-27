@@ -181,6 +181,14 @@ class ConflictDetection:
         self._row_id_index_manifest_cache = {}
         self._bounded_row_id_conflict_state = False
         self.commit_scanner = commit_scanner
+        # Cumulative protection for already-committed incremental row-id windows.
+        # Kept compact -- merged full file-group ranges by (partition, bucket) --
+        # plus the identity of the last confirmed window as a checkpoint. These
+        # survive reset_row_id_history(): they guard windows that are already
+        # durable, independent of the per-window history cache.
+        self._protected_row_id_scope = {}
+        self._protected_checkpoint_snapshot = None
+        self._protected_checkpoint_identity = None
 
     def should_be_overwrite_commit(self, append_file_entries=None, append_index_files=None):
         for entry in append_file_entries or []:
@@ -222,6 +230,107 @@ class ConflictDetection:
         current = self._row_id_ignored_commit_high_watermarks.get(commit_user)
         if current is None or commit_identifier > current:
             self._row_id_ignored_commit_high_watermarks[commit_user] = commit_identifier
+
+    def protect_committed_row_id_scope(self, committed_snapshot, messages):
+        """Register a just-committed incremental row-id window for protection.
+
+        Must be called only after the window's commit is known to have succeeded
+        and ``committed_snapshot`` is that window's own snapshot (never on a
+        rejected or outcome-unknown commit -- that would advance the checkpoint
+        past data that may not be durable). The sequence is:
+
+          1. validate the *existing* cumulative scope against the old checkpoint
+             and the latest snapshot (catches a concurrent overwrite of an
+             earlier window before we extend the scope);
+          2. merge this window's full file-group ranges into the scope;
+          3. advance the checkpoint to this window's own snapshot;
+          4. re-validate the extended scope against the latest snapshot.
+
+        Fails closed (``RowIdPlanningConflictError``) on any anomaly.
+        """
+        self._validate_protected_scope(self.snapshot_manager.get_latest_snapshot())
+
+        window_ranges = self._row_id_ranges_from_messages(messages)
+        if not window_ranges:
+            # A committed window with no extractable full file-group range must
+            # not silently drop out of protection.
+            raise RowIdPlanningConflictError(
+                "Cannot protect a committed update_by_row_id window without "
+                "row ID ranges.")
+        self._merge_protected_ranges(window_ranges)
+
+        self._protected_checkpoint_snapshot = committed_snapshot
+        self._protected_checkpoint_identity = self._snapshot_identity(
+            committed_snapshot)
+
+        self._validate_protected_scope(self.snapshot_manager.get_latest_snapshot())
+
+    def validate_protected_row_id_scope(self):
+        """Re-validate the cumulative protected scope against the latest snapshot.
+
+        Used before committing the next window and once more at finish() so a
+        concurrent overwrite of an already-committed window is caught even if no
+        further window is committed.
+        """
+        self._validate_protected_scope(self.snapshot_manager.get_latest_snapshot())
+
+    def _validate_protected_scope(self, latest_snapshot):
+        if (not self._protected_row_id_scope
+                or self._protected_checkpoint_snapshot is None):
+            return
+
+        checkpoint = self._protected_checkpoint_snapshot
+        current_checkpoint = self.snapshot_manager.get_snapshot_by_id(
+            checkpoint.id)
+        # Rollback, snapshot expiration and reused-id all show up here as a
+        # missing snapshot or a changed identity at the checkpoint id -- fail
+        # closed rather than trusting a checkpoint that is no longer live.
+        if (current_checkpoint is None
+                or self._snapshot_identity(current_checkpoint)
+                != self._protected_checkpoint_identity):
+            raise RowIdPlanningConflictError(
+                "Protected update_by_row_id checkpoint snapshot is no longer "
+                "in the current lineage.")
+        if latest_snapshot is None or latest_snapshot.id < checkpoint.id:
+            raise RowIdPlanningConflictError(
+                "Protected update_by_row_id checkpoint snapshot is no longer "
+                "in the current lineage.")
+
+        checkpoint_signatures = self._row_id_entry_signatures(
+            self.commit_scanner.read_entries_for_row_id_scope(
+                checkpoint, self._protected_row_id_scope))
+        latest_signatures = self._row_id_entry_signatures(
+            self.commit_scanner.read_entries_for_row_id_scope(
+                latest_snapshot, self._protected_row_id_scope))
+        if checkpoint_signatures != latest_signatures:
+            raise RowIdPlanningConflictError(
+                "Concurrent overwrite changed row ID files for an "
+                "already-committed update_by_row_id window.")
+
+    def _merge_protected_ranges(self, window_ranges):
+        for key, ranges in window_ranges.items():
+            merged = self._protected_row_id_scope.get(key, []) + list(ranges)
+            self._protected_row_id_scope[key] = Range.sort_and_merge_overlap(
+                merged, True, True)
+
+    @staticmethod
+    def _row_id_ranges_from_messages(messages):
+        """Full file-group row-id ranges by (partition, bucket) from committed
+        messages. Uses each committed data file's whole range -- never a partial
+        ``row_id_update_ranges`` subset -- so protection covers the file group,
+        not only the rows that changed."""
+        ranges = {}
+        for message in messages or []:
+            key = (tuple(message.partition), message.bucket)
+            for file in message.new_files:
+                row_range = file.row_id_range()
+                if row_range is None:
+                    continue
+                ranges.setdefault(key, []).append(row_range)
+        return {
+            key: Range.sort_and_merge_overlap(values, True, True)
+            for key, values in ranges.items()
+        }
 
     def read_row_id_base_entries(self, latest_snapshot, commit_entries,
                                  index_entries=None, planned_base_entries=None,
