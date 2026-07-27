@@ -107,7 +107,7 @@ class TableMergeIntoTest(BatchModeMixin, DataEvolutionTestBase, unittest.TestCas
         with patch.object(
                 ray_merge,
                 "distributed_update_apply",
-                return_value=([update_msg], 1, [7])
+                return_value=([update_msg], 1, [7], None)
         ), patch.object(
                 ray_merge,
                 "distributed_delete_apply",
@@ -137,7 +137,7 @@ class TableMergeIntoTest(BatchModeMixin, DataEvolutionTestBase, unittest.TestCas
         with patch.object(
                 ray_merge,
                 "distributed_update_apply",
-                return_value=([update_msg], 1, [])
+                return_value=([update_msg], 1, [], None)
         ), patch.object(
                 ray_merge,
                 "distributed_delete_apply",
@@ -168,7 +168,7 @@ class TableMergeIntoTest(BatchModeMixin, DataEvolutionTestBase, unittest.TestCas
         with patch.object(
                 ray_merge,
                 "distributed_update_apply",
-                return_value=([update_msg], 1, [])
+                return_value=([update_msg], 1, [], None)
         ), patch.object(
                 ray_merge,
                 "distributed_write_collect_msgs",
@@ -200,7 +200,7 @@ class TableMergeIntoTest(BatchModeMixin, DataEvolutionTestBase, unittest.TestCas
         with patch.object(
                 ray_merge,
                 "distributed_update_apply",
-                return_value=([update_msg], 1, [])
+                return_value=([update_msg], 1, [], None)
         ):
             with self.assertRaisesRegex(RuntimeError, "commit failed"):
                 ray_merge._execute_and_commit(

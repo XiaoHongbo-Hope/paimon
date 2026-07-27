@@ -32,6 +32,47 @@ from pypaimon.ray.data_evolution_merge_transform import (
 )
 
 
+class GroupApplyError(RuntimeError):
+    """A target file group failed while applying a distributed update.
+
+    Carries the worker-side failure as text (the exception instance is not
+    transported across Ray -- see ``distributed_update_apply``). Any group that
+    succeeded has already been committed/flushed (incremental) or aborted
+    (atomic) by the time this is raised.
+    """
+
+
+def _encode_group_error(exc: BaseException) -> Dict[str, str]:
+    """Turn a worker-side exception into a text-only payload.
+
+    Only strings are carried (type name, message, traceback text) -- never the
+    exception instance. ``pickle.dumps(exc)`` succeeding on the worker does not
+    guarantee ``pickle.loads`` succeeds on the driver (custom exceptions with
+    required __init__ args round-trip badly), and a failed unpickle on the
+    driver would drop the groups that succeeded. A dict of strings always
+    round-trips.
+    """
+    import traceback as _traceback
+    return {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "traceback": "".join(_traceback.format_exception(
+            type(exc), exc, exc.__traceback__)),
+    }
+
+
+def raise_group_apply_error(payload: Dict[str, Any]) -> None:
+    """Reconstruct and raise the failure carried by a ``group_error`` payload."""
+    raise GroupApplyError(
+        "update_by_row_id file group failed: "
+        "{type}: {message}\n{traceback}".format(
+            type=payload.get("type", "Exception"),
+            message=payload.get("message", ""),
+            traceback=payload.get("traceback", ""),
+        )
+    )
+
+
 def _map_kwargs(
     ray_remote_args: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
@@ -446,13 +487,20 @@ def distributed_update_apply(
     base_snapshot_id: Optional[int] = None,
     collect_row_ids: bool = False,
     on_group_result: Optional[Callable[[list, int, list], None]] = None,
-) -> Tuple[list, int, list]:
+) -> Tuple[list, int, list, Optional[dict]]:
     """Apply updates grouped by target file and collect their commit messages.
 
     When ``on_group_result`` is set, it is called on the driver once for every
     completed ``_FIRST_ROW_ID`` group. Commit messages are delivered to the
     callback instead of being retained in the returned list, which lets callers
     commit completed file groups incrementally while the remaining groups run.
+
+    Returns ``(msgs, num_updated, row_ids, group_error)``. ``group_error`` is
+    ``None`` on full success, otherwise a structured payload for the first
+    failed group (see ``raise_group_apply_error``). It is returned rather than
+    raised so the caller can first commit/flush the groups that succeeded
+    (incremental) or abort their files (atomic) and only then surface the
+    failure -- raising here would strand the successful groups' work.
     """
     import numpy as np
     import pickle
@@ -602,14 +650,13 @@ def distributed_update_apply(
             # finished in that task would be lost and never committed. (Setting
             # partitions == group count does not avoid this -- groupby hashes
             # keys into buckets, so distinct groups still collide onto one task.)
-            # The driver re-raises this after the groups that did succeed --
-            # here and in other tasks -- have been committed.
-            try:
-                error_blob = pickle.dumps(group_error)
-            except Exception:
-                error_blob = pickle.dumps(RuntimeError(
-                    f"{type(group_error).__name__}: {group_error}"))
-            return _group_result(b"", 0, b"", error_blob)
+            # The driver reconstructs and raises this after the groups that did
+            # succeed -- here and in other tasks -- have been committed.
+            #
+            # _encode_group_error carries only strings, never the exception
+            # instance, so the payload always round-trips through pickle.
+            return _group_result(
+                b"", 0, b"", pickle.dumps(_encode_group_error(group_error)))
 
         return _group_result(
             pickle.dumps(msgs), for_update.num_rows,
@@ -627,7 +674,7 @@ def distributed_update_apply(
     all_msgs: list = []
     num_updated = 0
     action_row_ids = []
-    group_error = None
+    group_error_payload = None
     iter_batches_kwargs = {"batch_format": "pyarrow"}
     if on_group_result is not None:
         # Consume each reduce task's output as soon as it lands, one group at a
@@ -649,10 +696,11 @@ def distributed_update_apply(
         for blob, n, err_blob, row_ids_blob in zip(
                 message_blobs, updated_counts, error_blobs, row_id_blobs):
             if err_blob is not None:
-                # Keep committing the groups that succeeded; surface the first
-                # failure only after the loop so it cannot discard their work.
-                if group_error is None:
-                    group_error = pickle.loads(err_blob)
+                # Keep delivering the groups that succeeded; report the first
+                # failure to the caller only after every success is delivered so
+                # it cannot discard their work.
+                if group_error_payload is None:
+                    group_error_payload = pickle.loads(err_blob)
                 continue
             group_msgs = pickle.loads(blob)
             group_row_ids = (
@@ -665,13 +713,11 @@ def distributed_update_apply(
             num_updated += n
             if collect_row_ids:
                 action_row_ids.extend(group_row_ids)
-    if group_error is not None:
-        # Every group that succeeded has now been delivered (committed in
-        # incremental mode, or accumulated for the atomic commit that the
-        # raise below prevents). Surface the failure so the caller aborts the
-        # in-progress window / atomic batch and can rerun.
-        raise group_error
-    return all_msgs, num_updated, action_row_ids
+    # Return the failure as data instead of raising here: the caller must first
+    # flush/commit the groups that succeeded (incremental) or abort their files
+    # (atomic) before surfacing the error, otherwise the successful work is lost
+    # or leaked. See raise_group_apply_error.
+    return all_msgs, num_updated, action_row_ids, group_error_payload
 
 
 def _read_output_schema(table, read_cols: Sequence[str]) -> "pa.Schema":

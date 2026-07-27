@@ -35,6 +35,7 @@ from pypaimon.ray.data_evolution_merge_join import (
     distributed_delete_apply,
     distributed_update_apply,
     distributed_write_collect_msgs,
+    raise_group_apply_error,
 )
 from pypaimon.ray.data_evolution_merge_transform import (
     LiteralValue,
@@ -388,7 +389,8 @@ def _execute_and_commit(
 
     try:
         if update_ds is not None:
-            update_msgs, num_updated, update_row_ids = distributed_update_apply(
+            (update_msgs, num_updated, update_row_ids,
+             update_group_error) = distributed_update_apply(
                 update_ds, table, update_cols_union,
                 num_partitions=num_partitions,
                 ray_remote_args=ray_remote_args,
@@ -398,7 +400,12 @@ def _execute_and_commit(
                 ),
                 collect_row_ids=collect_action_row_ids,
             )
+            # Keep the successful groups' files in pending_msgs so the except
+            # below aborts them: merge_into commits atomically, so a failed
+            # group must abort the whole batch rather than commit part of it.
             pending_msgs.extend(update_msgs)
+            if update_group_error is not None:
+                raise_group_apply_error(update_group_error)
 
         if delete_ds is not None:
             delete_msgs, num_deleted, delete_row_ids = distributed_delete_apply(

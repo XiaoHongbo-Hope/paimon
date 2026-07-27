@@ -623,7 +623,9 @@ class RayUpdateByRowIdTest(unittest.TestCase):
              "age": [111, 222, 333]},
             schema=update_schema)
 
-        with self.assertRaisesRegex(ValueError, "Deduplicate"):
+        # The worker exception is reconstructed on the driver as a
+        # GroupApplyError (a RuntimeError) carrying the original message.
+        with self.assertRaisesRegex(RuntimeError, "Deduplicate"):
             update_by_row_id(
                 target,
                 ray.data.from_arrow(source),
@@ -641,6 +643,111 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         ))
         self.assertEqual(111, ages[1])
         self.assertEqual(0, ages[2])
+
+    def test_incremental_commit_flushes_successes_when_group_fails(self):
+        # max_groups_per_commit > 1: a successful group that has not yet filled
+        # a window must still be committed when a later group fails, instead of
+        # being aborted with the failed one.
+        target = self._create()
+        for row_id in range(1, 3):  # two data files => two groups
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["a"], "age": [0]},
+                schema=self.pa_schema))
+        row_ids = self._rowid_by_id(target)
+        update_schema = pa.schema([
+            ("_ROW_ID", pa.int64()),
+            ("age", pa.int32()),
+        ])
+        source = pa.table(
+            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[2]],
+             "age": [111, 222, 333]},
+            schema=update_schema)
+
+        with self.assertRaisesRegex(RuntimeError, "Deduplicate"):
+            update_by_row_id(
+                target,
+                ray.data.from_arrow(source),
+                self.catalog_options,
+                update_cols=["age"],
+                num_partitions=1,
+                max_groups_per_commit=5,  # window never fills before the failure
+            )
+
+        ages = dict(zip(
+            self._read(target)["id"].to_pylist(),
+            self._read(target)["age"].to_pylist(),
+        ))
+        self.assertEqual(111, ages[1])
+        self.assertEqual(0, ages[2])
+
+    def test_atomic_group_failure_commits_nothing(self):
+        # Atomic mode (no max_groups_per_commit) is all-or-nothing: a group
+        # failure must abort the successful group's files, not commit them.
+        target = self._create()
+        for row_id in range(1, 3):
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["a"], "age": [0]},
+                schema=self.pa_schema))
+        row_ids = self._rowid_by_id(target)
+        base_snapshot_id = (
+            self.catalog.get_table(target)
+            .snapshot_manager().get_latest_snapshot().id)
+        update_schema = pa.schema([
+            ("_ROW_ID", pa.int64()),
+            ("age", pa.int32()),
+        ])
+        source = pa.table(
+            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[2]],
+             "age": [111, 222, 333]},
+            schema=update_schema)
+
+        with self.assertRaisesRegex(RuntimeError, "Deduplicate"):
+            update_by_row_id(
+                target,
+                ray.data.from_arrow(source),
+                self.catalog_options,
+                update_cols=["age"],
+            )
+
+        # Nothing committed: no new snapshot, both rows unchanged.
+        self.assertEqual(
+            base_snapshot_id,
+            self.catalog.get_table(target)
+            .snapshot_manager().get_latest_snapshot().id)
+        self.assertEqual(
+            [0, 0],
+            self._read(target).sort_by("id")["age"].to_pylist())
+
+    def test_group_error_channel_is_string_only_and_round_trips(self):
+        # The worker->driver error channel must not carry the exception
+        # instance: a custom exception whose __init__ takes extra required args
+        # can pickle-dump on the worker yet fail to load on the driver, which
+        # would drop the groups that succeeded. Encoding must be strings only,
+        # and must round-trip through pickle for any exception.
+        import importlib
+        import pickle
+        m = importlib.import_module(
+            "pypaimon.ray.data_evolution_merge_join")
+
+        class _Undeserializable(Exception):
+            def __init__(self, a, b):  # two required args; bad pickle round-trip
+                super().__init__(f"unpicklable boom {a}/{b}")
+                self.a, self.b = a, b
+
+        try:
+            raise _Undeserializable("x", "y")
+        except _Undeserializable as exc:
+            payload = m._encode_group_error(exc)
+
+        # Directly loading the instance would fail; the payload must not.
+        with self.assertRaises(Exception):
+            pickle.loads(pickle.dumps(exc))
+        self.assertEqual(payload, pickle.loads(pickle.dumps(payload)))
+        self.assertTrue(all(isinstance(v, str) for v in payload.values()))
+        self.assertEqual("_Undeserializable", payload["type"])
+
+        with self.assertRaisesRegex(m.GroupApplyError, "unpicklable boom"):
+            m.raise_group_apply_error(payload)
 
     def test_sparse_source_keeps_partitions_bounded(self):
         # QuakeWang review: partitions must follow num_partitions, not the whole
@@ -1134,7 +1241,7 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         def fake_apply(update_ds, table, cols, *, num_partitions,
                        ray_remote_args=None, base_snapshot_id=None):
             captured["base_snapshot_id"] = base_snapshot_id
-            return [], 0, []
+            return [], 0, [], None
 
         with mock.patch.object(m, "distributed_update_apply", fake_apply):
             update_by_row_id(target, src, self.catalog_options, update_cols=["age"])
@@ -1455,7 +1562,7 @@ class RayUpdateByRowIdTest(unittest.TestCase):
                                ("age", pa.int32()),
                            ])), \
                 mock.patch.object(m, "distributed_update_apply",
-                                  return_value=(recorder["msgs"], 3, [])):
+                                  return_value=(recorder["msgs"], 3, [], None)):
             recorder["result"] = m.update_by_row_id(
                 "default.fake",
                 FakeSource(),

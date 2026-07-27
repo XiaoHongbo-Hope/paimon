@@ -34,7 +34,10 @@ from pypaimon.ray.data_evolution_merge_into import (
     _require_ray_join,
     _resolve_num_partitions,
 )
-from pypaimon.ray.data_evolution_merge_join import distributed_update_apply
+from pypaimon.ray.data_evolution_merge_join import (
+    distributed_update_apply,
+    raise_group_apply_error,
+)
 from pypaimon.ray.data_evolution_merge_transform import build_update_schema
 from pypaimon.schema.data_types import is_blob_file_field
 from pypaimon.write.file_store_commit import CommitOutcomeUnknownError
@@ -165,6 +168,7 @@ def update_by_row_id(
         )
         if max_groups_per_commit is not None else None
     )
+    group_error_payload = None
     try:
         apply_kwargs = {
             "num_partitions": num_partitions,
@@ -173,10 +177,14 @@ def update_by_row_id(
         }
         if incremental_committer is not None:
             apply_kwargs["on_group_result"] = incremental_committer.add_group
-        msgs, num_updated, _ = distributed_update_apply(
+        msgs, num_updated, _, group_error_payload = distributed_update_apply(
             update_ds, table, update_cols, **apply_kwargs
         )
         if incremental_committer is not None:
+            # Flush the successful groups that did not fill a window: a group
+            # failure must not discard groups that already succeeded. A deferred
+            # commit error (if any) is raised here and keeps priority over the
+            # group error surfaced below.
             incremental_committer.finish()
     except Exception as e:
         if incremental_committer is not None:
@@ -212,6 +220,13 @@ def update_by_row_id(
     finally:
         if incremental_committer is not None:
             incremental_committer.close()
+    if group_error_payload is not None:
+        # The groups that succeeded are now durable (incremental: committed by
+        # finish(); atomic: about to be aborted because the batch is
+        # all-or-nothing). Surface the first group failure.
+        if incremental_committer is None and msgs:
+            _abort_pending_update_messages(table, msgs)
+        raise_group_apply_error(group_error_payload)
     if incremental_committer is None and msgs:
         _commit_update_messages(table, msgs)
     return {"num_updated": num_updated}
