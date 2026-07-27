@@ -271,6 +271,13 @@ class ConflictDetection:
         self._protected_checkpoint_snapshot = committed_snapshot
         self._protected_checkpoint_identity = self._snapshot_identity(
             committed_snapshot)
+        # Only ids greater than the checkpoint are queried again; drop the rest
+        # so this map stays bounded instead of growing with the window count.
+        self._protected_own_snapshots = {
+            snapshot_id: identity
+            for snapshot_id, identity in self._protected_own_snapshots.items()
+            if snapshot_id > committed_snapshot.id
+        }
 
         self._validate_protected_scope(self.snapshot_manager.get_latest_snapshot())
 

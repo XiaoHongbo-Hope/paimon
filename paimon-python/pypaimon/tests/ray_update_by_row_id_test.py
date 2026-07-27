@@ -979,6 +979,47 @@ class RayUpdateByRowIdTest(unittest.TestCase):
             [100, 200, 300],
             self._read(target).sort_by("id")["age"].to_pylist())
 
+    def test_own_snapshots_state_stays_bounded_across_windows(self):
+        # _protected_own_snapshots is pruned as the checkpoint advances, so it
+        # stays bounded regardless of how many windows commit.
+        import importlib
+        uix = importlib.import_module("pypaimon.ray.update_by_row_id")
+        target = self._create()
+        for row_id in range(1, 6):  # five windows
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["a"], "age": [0]},
+                schema=self.pa_schema))
+        row_ids = self._rowid_by_id(target)
+        source = pa.table(
+            {"_ROW_ID": [row_ids[i] for i in range(1, 6)],
+             "age": [100, 200, 300, 400, 500]},
+            schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]))
+
+        committers = []
+        original_init = uix._IncrementalUpdateCommitter.__init__
+
+        def recording_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            committers.append(self)
+
+        with mock.patch.object(
+                uix._IncrementalUpdateCommitter, "__init__", recording_init):
+            update_by_row_id(
+                target,
+                ray.data.from_arrow(source),
+                self.catalog_options,
+                update_cols=["age"],
+                num_partitions=1,
+                max_groups_per_commit=1,
+            )
+
+        conflict_detection = (
+            committers[0]._table_commit.file_store_commit.conflict_detection)
+        self.assertLessEqual(len(conflict_detection._protected_own_snapshots), 1)
+        self.assertEqual(
+            [100, 200, 300, 400, 500],
+            self._read(target).sort_by("id")["age"].to_pylist())
+
     def test_incremental_committer_batches_complete_groups(self):
         import importlib
         m = importlib.import_module("pypaimon.ray.update_by_row_id")
