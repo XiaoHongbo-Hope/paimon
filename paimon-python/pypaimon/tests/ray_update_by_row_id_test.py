@@ -34,6 +34,13 @@ from pypaimon import CatalogFactory, Schema
 from pypaimon.ray import update_by_row_id
 
 
+class _UndeserializableError(Exception):
+    # Module-level so pickle.dumps succeeds; two required args make loads fail.
+    def __init__(self, a, b):
+        super().__init__(f"unpicklable boom {a}/{b}")
+        self.a, self.b = a, b
+
+
 class RayUpdateByRowIdTest(unittest.TestCase):
     """Distributed row-id update: rewrite only the files owning the given row ids,
     without reading or joining the whole target (unlike merge_into(on=_ROW_ID))."""
@@ -729,22 +736,20 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         m = importlib.import_module(
             "pypaimon.ray.data_evolution_merge_join")
 
-        class _Undeserializable(Exception):
-            def __init__(self, a, b):  # two required args; bad pickle round-trip
-                super().__init__(f"unpicklable boom {a}/{b}")
-                self.a, self.b = a, b
-
         try:
-            raise _Undeserializable("x", "y")
-        except _Undeserializable as exc:
+            raise _UndeserializableError("x", "y")
+        except _UndeserializableError as exc:
             payload = m._encode_group_error(exc)
+            # Capture the dumped bytes here: `exc` is cleared after the block,
+            # and dumps (not loads) is where a local class would have failed.
+            dumped_instance = pickle.dumps(exc)
 
-        # Directly loading the instance would fail; the payload must not.
+        # The instance dumps fine but fails at load time; the payload must not.
         with self.assertRaises(Exception):
-            pickle.loads(pickle.dumps(exc))
+            pickle.loads(dumped_instance)
         self.assertEqual(payload, pickle.loads(pickle.dumps(payload)))
         self.assertTrue(all(isinstance(v, str) for v in payload.values()))
-        self.assertEqual("_Undeserializable", payload["type"])
+        self.assertEqual("_UndeserializableError", payload["type"])
 
         with self.assertRaisesRegex(m.GroupApplyError, "unpicklable boom"):
             m.raise_group_apply_error(payload)
@@ -935,6 +940,44 @@ class RayUpdateByRowIdTest(unittest.TestCase):
 
         self.assertEqual([], overwrite_error)
         self.assertFalse(overwrite_thread.is_alive())
+
+    def test_protected_scope_not_rescanned_without_external_writer(self):
+        # Without a concurrent writer, every window's protected-scope check must
+        # short-circuit: no manifest scan (keeps N windows O(N), not O(N^2)).
+        import pypaimon.write.commit.commit_scanner as cs
+        target = self._create()
+        for row_id in range(1, 4):  # three windows
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["a"], "age": [0]},
+                schema=self.pa_schema))
+        row_ids = self._rowid_by_id(target)
+        source = pa.table(
+            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[3]],
+             "age": [100, 200, 300]},
+            schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]))
+
+        scan_calls = []
+        original = cs.CommitScanner.read_entries_for_row_id_scope
+
+        def spy(self, *args, **kwargs):
+            scan_calls.append(1)
+            return original(self, *args, **kwargs)
+
+        with mock.patch.object(
+                cs.CommitScanner, "read_entries_for_row_id_scope", spy):
+            update_by_row_id(
+                target,
+                ray.data.from_arrow(source),
+                self.catalog_options,
+                update_cols=["age"],
+                num_partitions=1,
+                max_groups_per_commit=1,
+            )
+
+        self.assertEqual(0, len(scan_calls))
+        self.assertEqual(
+            [100, 200, 300],
+            self._read(target).sort_by("id")["age"].to_pylist())
 
     def test_incremental_committer_batches_complete_groups(self):
         import importlib

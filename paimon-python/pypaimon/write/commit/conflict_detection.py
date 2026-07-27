@@ -189,6 +189,10 @@ class ConflictDetection:
         self._protected_row_id_scope = {}
         self._protected_checkpoint_snapshot = None
         self._protected_checkpoint_identity = None
+        # snapshot id -> identity for the windows we committed, so validation can
+        # tell our own disjoint commits apart from an external overwrite and skip
+        # the manifest scan when nothing external landed.
+        self._protected_own_snapshots = {}
 
     def should_be_overwrite_commit(self, append_file_entries=None, append_index_files=None):
         for entry in append_file_entries or []:
@@ -248,6 +252,11 @@ class ConflictDetection:
 
         Fails closed (``RowIdPlanningConflictError``) on any anomaly.
         """
+        # Record this window's own snapshot before validating so the validation
+        # recognises it as ours and does not treat our own disjoint commit as an
+        # external overwrite to re-scan.
+        self._protected_own_snapshots[committed_snapshot.id] = (
+            self._snapshot_identity(committed_snapshot))
         self._validate_protected_scope(self.snapshot_manager.get_latest_snapshot())
 
         window_ranges = self._row_id_ranges_from_messages(messages)
@@ -296,6 +305,13 @@ class ConflictDetection:
                 "Protected update_by_row_id checkpoint snapshot is no longer "
                 "in the current lineage.")
 
+        if not self._external_snapshot_since_checkpoint(
+                checkpoint.id, latest_snapshot):
+            # Only our own disjoint APPEND windows since the checkpoint -> no
+            # protected file group can have changed. Skipping the scan keeps N
+            # windows at O(N) manifest reads instead of O(N^2).
+            return
+
         checkpoint_signatures = self._row_id_entry_signatures(
             self.commit_scanner.read_entries_for_row_id_scope(
                 checkpoint, self._protected_row_id_scope))
@@ -306,6 +322,23 @@ class ConflictDetection:
             raise RowIdPlanningConflictError(
                 "Concurrent overwrite changed row ID files for an "
                 "already-committed update_by_row_id window.")
+
+    def _external_snapshot_since_checkpoint(self, checkpoint_id, latest_snapshot):
+        """Whether any snapshot in ``(checkpoint_id, latest_snapshot]`` is not
+        one of our own committed windows. A missing (expired) snapshot in the
+        range counts as external so we fall back to the full scan rather than
+        assume it was ours."""
+        for snapshot_id in range(checkpoint_id + 1, latest_snapshot.id + 1):
+            if snapshot_id == latest_snapshot.id:
+                snapshot = latest_snapshot
+            else:
+                snapshot = self.snapshot_manager.get_snapshot_by_id(snapshot_id)
+            own_identity = self._protected_own_snapshots.get(snapshot_id)
+            if (snapshot is None
+                    or own_identity is None
+                    or self._snapshot_identity(snapshot) != own_identity):
+                return True
+        return False
 
     def _merge_protected_ranges(self, window_ranges):
         for key, ranges in window_ranges.items():
