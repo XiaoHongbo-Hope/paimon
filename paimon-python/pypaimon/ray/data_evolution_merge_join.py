@@ -596,9 +596,19 @@ def distributed_update_apply(
         })
 
     # One group per target data file; bounded by file count and num_partitions.
-    group_partitions = max(
-        1, min(len(captured_sorted), num_partitions)
-    )
+    # Fault isolation for incremental commit is per reduce task, not per group:
+    # a task that runs several groups discards *all* its outputs if any one of
+    # them raises, so the groups that already finished in that task never reach
+    # on_group_result and stay uncommitted. In incremental mode give every group
+    # its own reduce partition so a failing group can only lose itself; the
+    # groups whose tasks already streamed out are committed before it fails.
+    # (Ray still hash-partitions, so a collision can co-locate two groups; that
+    # residual is documented on update_by_row_id.) Atomic mode commits nothing
+    # until the end, so it keeps the num_partitions cap.
+    if on_group_result is not None:
+        group_partitions = max(1, len(captured_sorted))
+    else:
+        group_partitions = max(1, min(len(captured_sorted), num_partitions))
     msgs_ds = with_frid.groupby(
         frid_col, num_partitions=group_partitions
     ).map_groups(_apply_group, **map_kwargs)
@@ -608,7 +618,14 @@ def distributed_update_apply(
     action_row_ids = []
     iter_batches_kwargs = {"batch_format": "pyarrow"}
     if on_group_result is not None:
-        # Yield each group immediately.
+        # Consume each reduce task's output as soon as it lands, one group at a
+        # time, so a completed group is committed before a later group's task
+        # fails. batch_size=1 avoids merging groups from different tasks into one
+        # callback; prefetch_batches=0 keeps the driver from pulling a later
+        # (possibly failing) block before the current group has been committed.
+        # This does NOT by itself isolate group failures -- that comes from the
+        # one-group-per-partition split above; here it only avoids extra driver
+        # buffering on top of it.
         iter_batches_kwargs["batch_size"] = 1
         iter_batches_kwargs["prefetch_batches"] = 0
     for batch in msgs_ds.iter_batches(**iter_batches_kwargs):

@@ -598,6 +598,75 @@ class RayUpdateByRowIdTest(unittest.TestCase):
             self._read(target).sort_by("id")["age"].to_pylist(),
         )
 
+    def test_incremental_mode_gives_each_group_its_own_partition(self):
+        # QuakeWang review: incremental commit isolates failures per Ray reduce
+        # task, not per group. When several groups share a task (num_partitions
+        # < group count) a later group's failure discards the groups that
+        # already finished in that same task, so they never reach the committer
+        # -- with num_partitions=1 the whole update is all-or-nothing. Incremental
+        # mode must therefore give every group its own reduce partition
+        # regardless of num_partitions; atomic mode keeps the num_partitions cap.
+        update_schema = pa.schema([
+            ("_ROW_ID", pa.int64()),
+            ("age", pa.int32()),
+        ])
+
+        def _target_with_three_files():
+            target = self._create()
+            for row_id in range(1, 4):  # three data files => three groups
+                self._write(target, pa.Table.from_pydict(
+                    {"id": [row_id], "name": ["a"], "age": [0]},
+                    schema=self.pa_schema))
+            return target, self._rowid_by_id(target)
+
+        captured = []
+        original_groupby = ray.data.Dataset.groupby
+
+        def recording_groupby(dataset, *args, **kwargs):
+            captured.append(kwargs.get("num_partitions"))
+            return original_groupby(dataset, *args, **kwargs)
+
+        # Incremental mode: num_partitions=1 must NOT collapse the three groups
+        # into one task; each group gets its own partition.
+        target, row_ids = _target_with_three_files()
+        source = pa.table(
+            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[3]],
+             "age": [100, 200, 300]},
+            schema=update_schema)
+        with mock.patch.object(
+                ray.data.Dataset, "groupby", recording_groupby):
+            update_by_row_id(
+                target,
+                ray.data.from_arrow(source),
+                self.catalog_options,
+                update_cols=["age"],
+                num_partitions=1,
+                max_groups_per_commit=1,
+            )
+        self.assertEqual([3], captured)
+        self.assertEqual(
+            [100, 200, 300],
+            self._read(target).sort_by("id")["age"].to_pylist(),
+        )
+
+        # Atomic mode keeps the num_partitions cap (all-or-nothing anyway).
+        captured.clear()
+        target2, row_ids2 = _target_with_three_files()
+        source2 = pa.table(
+            {"_ROW_ID": [row_ids2[1], row_ids2[2], row_ids2[3]],
+             "age": [1, 2, 3]},
+            schema=update_schema)
+        with mock.patch.object(
+                ray.data.Dataset, "groupby", recording_groupby):
+            update_by_row_id(
+                target2,
+                ray.data.from_arrow(source2),
+                self.catalog_options,
+                update_cols=["age"],
+                num_partitions=1,
+            )
+        self.assertEqual([1], captured)
+
     def test_incremental_commit_fails_after_external_rollback(self):
         target = self._create()
         for row_id in range(1, 3):

@@ -72,6 +72,10 @@ def update_by_row_id(
     window of target file groups. Incremental mode can leave earlier windows
     committed if a later window fails. The table may therefore be partially
     updated; callers must reconcile the result or rerun the intended update.
+    Each file group is applied in its own Ray task so a failing group does not
+    discard groups that already finished; the residual exception is that Ray
+    hash-partitions the groups, so a collision can still co-locate two groups in
+    one task and lose the earlier one if the task fails permanently.
     Incremental mode stops on concurrent commits, except overwrites outside
     the current row-ID scope.
     Concurrent snapshot expiration can also invalidate a committed-window
