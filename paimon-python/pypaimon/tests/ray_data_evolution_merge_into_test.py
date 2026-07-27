@@ -505,6 +505,37 @@ class RayDataEvolutionMergeIntoTest(unittest.TestCase):
         self.assertEqual(out['name'], ['a', 'b', 'c'])
         self.assertEqual(out['age'], [10, 20, 30])
 
+    def test_update_and_insert_into_existing_empty_snapshot(self):
+        # Existing but empty snapshot: the planner finds no target file groups,
+        # so distributed_update_apply must return the 4-tuple. NOT MATCHED
+        # inserts must still land instead of crashing on tuple unpacking.
+        target = self._create_table()
+        self._write(target, self._source(ids=(1,)))
+        wb = self.catalog.get_table(target).new_batch_write_builder().overwrite()
+        w = wb.new_write()
+        w.write_arrow(pa.Table.from_pydict(
+            {'id': pa.array([], type=pa.int32()),
+             'name': pa.array([], type=pa.string()),
+             'age': pa.array([], type=pa.int32())},
+            schema=self.pa_schema))
+        wb.new_commit().commit(w.prepare_commit())
+        w.close()
+
+        metrics = merge_into(
+            target=target,
+            source=self._source(ids=(1, 2)),
+            catalog_options=self.catalog_options,
+            on=['id'],
+            when_matched=[WhenMatched.update('*')],
+            when_not_matched=[WhenNotMatched(insert='*')],
+            num_partitions=_TEST_NUM_PARTITIONS,
+        )
+
+        out = self._read_sorted(target)
+        self.assertEqual(out['id'], [1, 2])
+        self.assertEqual(metrics,
+                         {'num_matched': 0, 'num_inserted': 2, 'num_unchanged': 0})
+
     def test_multi_source_match_raises_by_default(self):
         # One target row matched by several source rows: the winning value is
         # undefined (Spark DE's checkCardinality=false), so we refuse by default.

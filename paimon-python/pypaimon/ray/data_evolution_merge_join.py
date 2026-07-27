@@ -537,7 +537,10 @@ def distributed_update_apply(
     )
     sorted_first_row_ids = list(planner.first_row_ids)
     if not sorted_first_row_ids:
-        return [], 0, []
+        # No target file groups (e.g. an existing but empty snapshot). Match the
+        # 4-tuple contract so callers that unpack (msgs, num, row_ids, err) --
+        # including merge_into's NOT MATCHED insert path -- don't crash.
+        return [], 0, [], None
 
     # Pin commit-time conflict check to the snapshot the join was built on,
     # so concurrent commits between read and planner are detected.
