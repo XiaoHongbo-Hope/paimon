@@ -779,10 +779,9 @@ class FileStoreCommit:
                     exc_info=True,
                 )
 
-        # Mirror ``with`` but drive it manually so only commit() decides the
-        # outcome. __enter__ and commit() share one capture (an __enter__ failure
-        # is classified below, not bypassed). __exit__ gets the commit exception
-        # triple for extension rollback, but its own failure is only logged.
+        # Mirror ``with`` manually so only commit() decides the outcome: an
+        # __enter__ failure is classified below (not bypassed), and __exit__'s
+        # own failure is only logged.
         success = None
         commit_exc = None
         entered = False

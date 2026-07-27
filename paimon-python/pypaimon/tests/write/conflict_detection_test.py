@@ -1268,28 +1268,20 @@ class TestConflictEntryScopeFromRanges(unittest.TestCase):
     must isolate by (partition, bucket) even though the early bucket filter can
     over-read; matches_entry is the exact filter."""
 
-    def test_same_bucket_different_partition_is_isolated(self):
-        scope = _ConflictEntryScope.from_ranges({
-            (("p1",), 0): [Range(0, 99)],
-        })
+    def test_scope_isolates_by_partition_and_bucket(self):
+        # Overlapping range but a different partition or bucket must not match.
+        scope = _ConflictEntryScope.from_ranges({(("p1",), 0): [Range(0, 99)]})
         target = _make_entry(
             "f1", bucket=0, first_row_id=0, row_count=100, partition=["p1"])
-        other_partition = _make_entry(
-            "f2", bucket=0, first_row_id=0, row_count=100, partition=["p2"])
         self.assertTrue(scope.matches_entry(target))
-        # Same bucket and overlapping range, but a different partition.
-        self.assertFalse(scope.matches_entry(other_partition))
-
-    def test_same_partition_different_bucket_is_isolated(self):
-        scope = _ConflictEntryScope.from_ranges({
-            (("p1",), 0): [Range(0, 99)],
-        })
-        target = _make_entry(
-            "f1", bucket=0, first_row_id=0, row_count=100, partition=["p1"])
-        other_bucket = _make_entry(
-            "f2", bucket=1, first_row_id=0, row_count=100, partition=["p1"])
-        self.assertTrue(scope.matches_entry(target))
-        self.assertFalse(scope.matches_entry(other_bucket))
+        for label, entry in [
+            ("different partition", _make_entry(
+                "f2", bucket=0, first_row_id=0, row_count=100, partition=["p2"])),
+            ("different bucket", _make_entry(
+                "f3", bucket=1, first_row_id=0, row_count=100, partition=["p1"])),
+        ]:
+            with self.subTest(label):
+                self.assertFalse(scope.matches_entry(entry))
 
     def test_overlapping_and_adjacent_ranges_merge(self):
         scope = _ConflictEntryScope.from_ranges({
