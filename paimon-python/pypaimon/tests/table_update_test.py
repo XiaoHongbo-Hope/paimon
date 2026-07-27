@@ -25,6 +25,7 @@ from unittest import mock
 import pyarrow as pa
 
 from pypaimon.catalog.catalog_exception import TableNoPermissionException
+from pypaimon.write.file_store_commit import DeterministicCommitRejectionError
 from pypaimon.common.identifier import Identifier
 from pypaimon.tests.data_evolution_test_helpers import (
     BatchModeMixin,
@@ -871,9 +872,13 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         with mock.patch.object(
                 commit.file_store_commit.snapshot_commit,
                 'commit', side_effect=error):
-            with self.assertRaises(TableNoPermissionException):
+            # Surfaced as a safe-to-abort rejection; the commit layer aborts the
+            # staged files, so no manual abort() is needed here.
+            with self.assertRaises(
+                    DeterministicCommitRejectionError) as raised:
                 self._apply_commit(commit, messages, commit_id)
-        commit.abort(messages)
+        self.assertIsInstance(
+            raised.exception.__cause__, TableNoPermissionException)
         commit.close()
 
         self.assertEqual(before_files, self._list_table_files(table))
