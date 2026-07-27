@@ -607,6 +607,31 @@ class TestFileStoreCommit(unittest.TestCase):
         self.assertTrue(result.is_success())
         snapshot_commit.__enter__.assert_called_once()
         snapshot_commit.__exit__.assert_called_once()
+        # No commit exception -> __exit__ sees the empty triple.
+        self.assertEqual(
+            (None, None, None), snapshot_commit.__exit__.call_args.args)
+
+    def test_commit_exception_is_passed_to_exit(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        # An extension's __exit__ must see the commit failure so it can roll
+        # back or release a lock based on the real exception triple.
+        atomic_error = RuntimeError("atomic commit failed")
+        file_store_commit, snapshot_commit, commit_entry = (
+            self._prepare_atomic_attempt(atomic_error=atomic_error))
+
+        result = file_store_commit._try_commit_once(
+            retry_result=None,
+            commit_kind="APPEND",
+            commit_entries=[commit_entry],
+            changelog_entries=[],
+            commit_identifier=1,
+            latest_snapshot=None,
+        )
+
+        self.assertFalse(result.is_success())
+        exit_args = snapshot_commit.__exit__.call_args.args
+        self.assertIs(RuntimeError, exit_args[0])
+        self.assertIs(atomic_error, exit_args[1])
 
     def test_close_failure_does_not_override_successful_commit(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
