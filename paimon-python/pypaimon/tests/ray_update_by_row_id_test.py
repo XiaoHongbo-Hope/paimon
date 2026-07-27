@@ -96,6 +96,36 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         tab = self._read(target, ["_ROW_ID", "id"])
         return dict(zip(tab.column("id").to_pylist(), tab.column("_ROW_ID").to_pylist()))
 
+    _UPDATE_SCHEMA = pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())])
+
+    def _de_table_with_files(self, n):
+        """A DE table with n single-row files (one file group each)."""
+        target = self._create()
+        for row_id in range(1, n + 1):
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["a"], "age": [0]},
+                schema=self.pa_schema))
+        return target, self._rowid_by_id(target)
+
+    def _dup_source(self, row_ids):
+        """Source where id=1's group is valid and id=2's has a duplicate
+        _ROW_ID, so that group fails inside the worker."""
+        return pa.table(
+            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[2]],
+             "age": [111, 222, 333]},
+            schema=self._UPDATE_SCHEMA)
+
+    def _ages(self, target):
+        return dict(zip(self._read(target)["id"].to_pylist(),
+                        self._read(target)["age"].to_pylist()))
+
+    def _full_source(self, row_ids, n):
+        """Update ids 1..n to age i*100."""
+        return pa.table(
+            {"_ROW_ID": [row_ids[i] for i in range(1, n + 1)],
+             "age": [i * 100 for i in range(1, n + 1)]},
+            schema=self._UPDATE_SCHEMA)
+
     def test_update_by_row_id_basic(self):
         target = self._create()
         self._write(target, pa.Table.from_pydict(
@@ -605,168 +635,63 @@ class RayUpdateByRowIdTest(unittest.TestCase):
             self._read(target).sort_by("id")["age"].to_pylist(),
         )
 
-    def test_incremental_commit_survives_a_failing_group(self):
-        # QuakeWang review: a later group's failure must not discard the groups
-        # that already succeeded in the *same* Ray task. Force both groups into
-        # one task (num_partitions=1) and make the second group fail (duplicate
-        # _ROW_ID). The first group must still be committed, and the failure
-        # must still surface. Bounding partitions to num_partitions (rather than
-        # to the file count) can co-locate groups in a task, so this is exactly
-        # the scenario that per-group exception encoding must handle.
-        target = self._create()
-        for row_id in range(1, 3):  # two data files => two groups
-            self._write(target, pa.Table.from_pydict(
-                {"id": [row_id], "name": ["a"], "age": [0]},
-                schema=self.pa_schema))
-        row_ids = self._rowid_by_id(target)
-        update_schema = pa.schema([
-            ("_ROW_ID", pa.int64()),
-            ("age", pa.int32()),
-        ])
-        # Group for id=1 is valid; group for id=2 has a duplicate _ROW_ID and
-        # fails inside the worker.
-        source = pa.table(
-            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[2]],
-             "age": [111, 222, 333]},
-            schema=update_schema)
-
-        # The worker exception is reconstructed on the driver as a
-        # GroupApplyError (a RuntimeError) carrying the original message.
-        with self.assertRaisesRegex(RuntimeError, "Deduplicate"):
-            update_by_row_id(
-                target,
-                ray.data.from_arrow(source),
-                self.catalog_options,
-                update_cols=["age"],
-                num_partitions=1,
-                max_groups_per_commit=1,
-            )
-
-        # The healthy group committed even though its sibling failed in the
-        # same task; the failed group left its row untouched.
-        ages = dict(zip(
-            self._read(target)["id"].to_pylist(),
-            self._read(target)["age"].to_pylist(),
-        ))
-        self.assertEqual(111, ages[1])
-        self.assertEqual(0, ages[2])
-
-    def test_incremental_commit_flushes_successes_when_group_fails(self):
-        # max_groups_per_commit > 1: a successful group that has not yet filled
-        # a window must still be committed when a later group fails, instead of
-        # being aborted with the failed one.
-        target = self._create()
-        for row_id in range(1, 3):  # two data files => two groups
-            self._write(target, pa.Table.from_pydict(
-                {"id": [row_id], "name": ["a"], "age": [0]},
-                schema=self.pa_schema))
-        row_ids = self._rowid_by_id(target)
-        update_schema = pa.schema([
-            ("_ROW_ID", pa.int64()),
-            ("age", pa.int32()),
-        ])
-        source = pa.table(
-            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[2]],
-             "age": [111, 222, 333]},
-            schema=update_schema)
-
-        with self.assertRaisesRegex(RuntimeError, "Deduplicate"):
-            update_by_row_id(
-                target,
-                ray.data.from_arrow(source),
-                self.catalog_options,
-                update_cols=["age"],
-                num_partitions=1,
-                max_groups_per_commit=5,  # window never fills before the failure
-            )
-
-        ages = dict(zip(
-            self._read(target)["id"].to_pylist(),
-            self._read(target)["age"].to_pylist(),
-        ))
-        self.assertEqual(111, ages[1])
-        self.assertEqual(0, ages[2])
+    def test_group_failure_preserves_earlier_successes(self):
+        # A failing group (duplicate _ROW_ID) sharing a Ray task (num_partitions=1)
+        # must not discard the healthy group, and the error must still surface.
+        # max_groups_per_commit=1 is a full window; =5 is a not-yet-flushed one.
+        for max_groups in (1, 5):
+            with self.subTest(max_groups_per_commit=max_groups):
+                target, row_ids = self._de_table_with_files(2)
+                with self.assertRaisesRegex(RuntimeError, "Deduplicate"):
+                    update_by_row_id(
+                        target, ray.data.from_arrow(self._dup_source(row_ids)),
+                        self.catalog_options, update_cols=["age"],
+                        num_partitions=1, max_groups_per_commit=max_groups)
+                ages = self._ages(target)
+                self.assertEqual(111, ages[1])  # healthy group committed
+                self.assertEqual(0, ages[2])    # failed group untouched
 
     def test_atomic_group_failure_commits_nothing(self):
-        # Atomic mode (no max_groups_per_commit) is all-or-nothing: a group
-        # failure must abort the successful group's files, not commit them.
-        target = self._create()
-        for row_id in range(1, 3):
-            self._write(target, pa.Table.from_pydict(
-                {"id": [row_id], "name": ["a"], "age": [0]},
-                schema=self.pa_schema))
-        row_ids = self._rowid_by_id(target)
-        base_snapshot_id = (
-            self.catalog.get_table(target)
-            .snapshot_manager().get_latest_snapshot().id)
-        update_schema = pa.schema([
-            ("_ROW_ID", pa.int64()),
-            ("age", pa.int32()),
-        ])
-        source = pa.table(
-            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[2]],
-             "age": [111, 222, 333]},
-            schema=update_schema)
-
+        # Atomic mode is all-or-nothing: a group failure aborts the healthy files.
+        target, row_ids = self._de_table_with_files(2)
+        base = self.catalog.get_table(
+            target).snapshot_manager().get_latest_snapshot().id
         with self.assertRaisesRegex(RuntimeError, "Deduplicate"):
             update_by_row_id(
-                target,
-                ray.data.from_arrow(source),
-                self.catalog_options,
-                update_cols=["age"],
-            )
-
-        # Nothing committed: no new snapshot, both rows unchanged.
+                target, ray.data.from_arrow(self._dup_source(row_ids)),
+                self.catalog_options, update_cols=["age"])
+        self.assertEqual(base, self.catalog.get_table(
+            target).snapshot_manager().get_latest_snapshot().id)
         self.assertEqual(
-            base_snapshot_id,
-            self.catalog.get_table(target)
-            .snapshot_manager().get_latest_snapshot().id)
-        self.assertEqual(
-            [0, 0],
-            self._read(target).sort_by("id")["age"].to_pylist())
+            [0, 0], self._read(target).sort_by("id")["age"].to_pylist())
 
     def test_group_error_channel_is_string_only_and_round_trips(self):
-        # The worker->driver error channel must not carry the exception
-        # instance: a custom exception whose __init__ takes extra required args
-        # can pickle-dump on the worker yet fail to load on the driver, which
-        # would drop the groups that succeeded. Encoding must be strings only,
-        # and must round-trip through pickle for any exception.
+        # The worker->driver channel carries strings only: an exception whose
+        # __init__ needs extra args can dump on the worker yet fail to load on
+        # the driver, which would drop the successful groups.
         import importlib
         import pickle
-        m = importlib.import_module(
-            "pypaimon.ray.data_evolution_merge_join")
+        m = importlib.import_module("pypaimon.ray.data_evolution_merge_join")
 
         try:
             raise _UndeserializableError("x", "y")
         except _UndeserializableError as exc:
             payload = m._encode_group_error(exc)
-            # Capture the dumped bytes here: `exc` is cleared after the block,
-            # and dumps (not loads) is where a local class would have failed.
-            dumped_instance = pickle.dumps(exc)
+            dumped_instance = pickle.dumps(exc)  # exc is cleared after the block
 
-        # The instance dumps fine but fails at load time; the payload must not.
-        with self.assertRaises(Exception):
+        with self.assertRaises(Exception):  # instance fails at load time
             pickle.loads(dumped_instance)
         self.assertEqual(payload, pickle.loads(pickle.dumps(payload)))
         self.assertTrue(all(isinstance(v, str) for v in payload.values()))
         self.assertEqual("_UndeserializableError", payload["type"])
-
         with self.assertRaisesRegex(m.GroupApplyError, "unpicklable boom"):
             m.raise_group_apply_error(payload)
 
     def test_sparse_source_keeps_partitions_bounded(self):
-        # QuakeWang review: partitions must follow num_partitions, not the whole
-        # table's file count -- a one-row update over many files must not plan a
-        # partition per untouched file.
-        target = self._create()
-        for row_id in range(1, 6):  # five data files
-            self._write(target, pa.Table.from_pydict(
-                {"id": [row_id], "name": ["a"], "age": [0]},
-                schema=self.pa_schema))
-        row_ids = self._rowid_by_id(target)
+        # Partitions follow num_partitions, not the table's file count.
+        target, row_ids = self._de_table_with_files(5)
         source = pa.table(
-            {"_ROW_ID": [row_ids[1]], "age": [111]},
-            schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]))
+            {"_ROW_ID": [row_ids[1]], "age": [111]}, schema=self._UPDATE_SCHEMA)
 
         captured = []
         original_groupby = ray.data.Dataset.groupby
@@ -778,20 +703,10 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         with mock.patch.object(
                 ray.data.Dataset, "groupby", recording_groupby):
             update_by_row_id(
-                target,
-                ray.data.from_arrow(source),
-                self.catalog_options,
-                update_cols=["age"],
-                num_partitions=2,
-                max_groups_per_commit=1,
-            )
-        # Capped at num_partitions=2, not inflated to the five-file count.
-        self.assertEqual([2], captured)
-        self.assertEqual(
-            111,
-            dict(zip(self._read(target)["id"].to_pylist(),
-                     self._read(target)["age"].to_pylist()))[1],
-        )
+                target, ray.data.from_arrow(source), self.catalog_options,
+                update_cols=["age"], num_partitions=2, max_groups_per_commit=1)
+        self.assertEqual([2], captured)  # capped at 2, not the five-file count
+        self.assertEqual(111, self._ages(target)[1])
 
     def test_incremental_commit_fails_after_external_rollback(self):
         target = self._create()
@@ -869,25 +784,12 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         )
 
     def test_incremental_commit_rejects_overwrite_of_committed_window(self):
-        # QuakeWang review #1: a concurrent overwrite of an already-committed
-        # window must be caught -- the protected cumulative scope covers earlier
-        # windows, not just the window currently being committed. Commit the
-        # first window, overwrite the table (replacing that window's file
-        # group), then let the second window proceed; it must fail closed.
-        target = self._create()
-        for row_id in range(1, 3):  # two files => two windows
-            self._write(target, pa.Table.from_pydict(
-                {"id": [row_id], "name": ["a"], "age": [0]},
-                schema=self.pa_schema))
+        # A concurrent overwrite of an already-committed window must be caught:
+        # the protected scope covers earlier windows, not just the current one.
+        # Commit window 1, overwrite the table, then let window 2 fail closed.
+        target, row_ids = self._de_table_with_files(2)
         table = self.catalog.get_table(target)
-        row_ids = self._rowid_by_id(target)
-        update_schema = pa.schema([
-            ("_ROW_ID", pa.int64()),
-            ("age", pa.int32()),
-        ])
-        source = pa.table(
-            {"_ROW_ID": [row_ids[1], row_ids[2]], "age": [100, 200]},
-            schema=update_schema)
+        source = self._full_source(row_ids, 2)
 
         original_iter_batches = ray.data.Dataset.iter_batches
         first_window_committed = threading.Event()
@@ -942,19 +844,11 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         self.assertFalse(overwrite_thread.is_alive())
 
     def test_protected_scope_not_rescanned_without_external_writer(self):
-        # Without a concurrent writer, every window's protected-scope check must
-        # short-circuit: no manifest scan (keeps N windows O(N), not O(N^2)).
+        # Without a concurrent writer, the protected-scope check short-circuits:
+        # no manifest scan (keeps N windows O(N), not O(N^2)).
         import pypaimon.write.commit.commit_scanner as cs
-        target = self._create()
-        for row_id in range(1, 4):  # three windows
-            self._write(target, pa.Table.from_pydict(
-                {"id": [row_id], "name": ["a"], "age": [0]},
-                schema=self.pa_schema))
-        row_ids = self._rowid_by_id(target)
-        source = pa.table(
-            {"_ROW_ID": [row_ids[1], row_ids[2], row_ids[3]],
-             "age": [100, 200, 300]},
-            schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]))
+        target, row_ids = self._de_table_with_files(3)
+        source = self._full_source(row_ids, 3)
 
         scan_calls = []
         original = cs.CommitScanner.read_entries_for_row_id_scope
@@ -966,13 +860,8 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         with mock.patch.object(
                 cs.CommitScanner, "read_entries_for_row_id_scope", spy):
             update_by_row_id(
-                target,
-                ray.data.from_arrow(source),
-                self.catalog_options,
-                update_cols=["age"],
-                num_partitions=1,
-                max_groups_per_commit=1,
-            )
+                target, ray.data.from_arrow(source), self.catalog_options,
+                update_cols=["age"], num_partitions=1, max_groups_per_commit=1)
 
         self.assertEqual(0, len(scan_calls))
         self.assertEqual(
@@ -984,16 +873,8 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         # stays bounded regardless of how many windows commit.
         import importlib
         uix = importlib.import_module("pypaimon.ray.update_by_row_id")
-        target = self._create()
-        for row_id in range(1, 6):  # five windows
-            self._write(target, pa.Table.from_pydict(
-                {"id": [row_id], "name": ["a"], "age": [0]},
-                schema=self.pa_schema))
-        row_ids = self._rowid_by_id(target)
-        source = pa.table(
-            {"_ROW_ID": [row_ids[i] for i in range(1, 6)],
-             "age": [100, 200, 300, 400, 500]},
-            schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]))
+        target, row_ids = self._de_table_with_files(5)
+        source = self._full_source(row_ids, 5)
 
         committers = []
         original_init = uix._IncrementalUpdateCommitter.__init__
@@ -1005,13 +886,8 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         with mock.patch.object(
                 uix._IncrementalUpdateCommitter, "__init__", recording_init):
             update_by_row_id(
-                target,
-                ray.data.from_arrow(source),
-                self.catalog_options,
-                update_cols=["age"],
-                num_partitions=1,
-                max_groups_per_commit=1,
-            )
+                target, ray.data.from_arrow(source), self.catalog_options,
+                update_cols=["age"], num_partitions=1, max_groups_per_commit=1)
 
         conflict_detection = (
             committers[0]._table_commit.file_store_commit.conflict_detection)
