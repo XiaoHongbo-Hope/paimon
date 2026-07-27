@@ -623,52 +623,41 @@ class TestFileStoreCommit(unittest.TestCase):
         self.assertIs(RuntimeError, exit_args[0])
         self.assertIs(atomic_error, exit_args[1])
 
-    def test_enter_failure_is_classified_not_raised_raw(
+    def test_enter_or_close_failure_never_overrides_outcome(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
-        # A failing __enter__ is classified (not raised raw); __exit__ and
-        # commit() do not run.
+        # __enter__/__exit__ failures never override commit()'s outcome, and a
+        # non-success never cleans up the (possibly-committed) files.
+        identifier = Identifier.create("default", "test_table")
         enter_error = RuntimeError("lock acquisition failed")
-        fsc, snapshot_commit, entry = self._prepare_atomic_attempt()
-        snapshot_commit.__enter__.side_effect = enter_error
-        result = self._commit_once(fsc, entry)
-        self.assertFalse(result.is_success())
-        self.assertTrue(result.outcome_unknown)
-        self.assertIs(enter_error, result.exception)
-        snapshot_commit.commit.assert_not_called()
-        snapshot_commit.__exit__.assert_not_called()
-
-    def test_close_failure_does_not_override_successful_commit(
-            self, mock_manifest_list_manager, mock_manifest_file_manager):
-        # commit() succeeded; a close() failure must not force retry/unknown or
-        # delete the committed files.
-        close_error = TableNoPermissionException(
-            Identifier.create("default", "test_table"))
-        fsc, _, entry = self._prepare_atomic_attempt(close_error=close_error)
-        fsc._clean_up_reuse_tmp_manifests = Mock()
-        fsc._clean_up_no_reuse_tmp_manifests = Mock()
-        result = self._commit_once(fsc, entry)
-        self.assertTrue(result.is_success())
-        fsc._clean_up_reuse_tmp_manifests.assert_not_called()
-        fsc._clean_up_no_reuse_tmp_manifests.assert_not_called()
-
-    def test_commit_exception_outcome_survives_deterministic_close_failure(
-            self, mock_manifest_list_manager, mock_manifest_file_manager):
-        # commit() lost the response (non-deterministic) but close() raised a
-        # deterministic-looking error: outcome stays unknown, files kept.
-        atomic_error = RESTException(
+        close_error = TableNoPermissionException(identifier)
+        lost_error = RESTException(
             "response lost", cause=TimeoutError("read timed out"))
-        close_error = TableNoPermissionException(
-            Identifier.create("default", "test_table"))
-        fsc, _, entry = self._prepare_atomic_attempt(
-            atomic_error=atomic_error, close_error=close_error)
-        fsc._clean_up_reuse_tmp_manifests = Mock()
-        fsc._clean_up_no_reuse_tmp_manifests = Mock()
-        result = self._commit_once(fsc, entry)
-        self.assertFalse(result.is_success())
-        self.assertTrue(result.outcome_unknown)
-        self.assertIs(atomic_error, result.exception)
-        fsc._clean_up_reuse_tmp_manifests.assert_not_called()
-        fsc._clean_up_no_reuse_tmp_manifests.assert_not_called()
+        cases = [
+            # label, atomic_error, enter_error, close_error, success, exception
+            ("enter_failure", None, enter_error, None, False, enter_error),
+            ("close_after_success", None, None, close_error, True, None),
+            ("lost_response_then_close", lost_error, None, close_error,
+             False, lost_error),
+        ]
+        for label, atomic_error, enter_err, close_err, success, exc in cases:
+            with self.subTest(label):
+                fsc, snapshot_commit, entry = self._prepare_atomic_attempt(
+                    atomic_error=atomic_error, close_error=close_err)
+                if enter_err is not None:
+                    snapshot_commit.__enter__.side_effect = enter_err
+                fsc._clean_up_reuse_tmp_manifests = Mock()
+                fsc._clean_up_no_reuse_tmp_manifests = Mock()
+                result = self._commit_once(fsc, entry)
+                self.assertEqual(success, result.is_success())
+                if exc is not None:
+                    self.assertIs(exc, result.exception)
+                    self.assertTrue(result.outcome_unknown)
+                if enter_err is not None:
+                    # A failed __enter__ skips commit() and __exit__.
+                    snapshot_commit.commit.assert_not_called()
+                    snapshot_commit.__exit__.assert_not_called()
+                fsc._clean_up_reuse_tmp_manifests.assert_not_called()
+                fsc._clean_up_no_reuse_tmp_manifests.assert_not_called()
 
     def test_deterministic_rejection_survives_ordinary_close_failure(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
