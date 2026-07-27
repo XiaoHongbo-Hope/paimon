@@ -78,7 +78,9 @@ class TestFileStoreCommit(unittest.TestCase):
         snapshot_commit = MagicMock()
         snapshot_commit.__enter__.return_value = snapshot_commit
         snapshot_commit.__exit__.return_value = False
-        snapshot_commit.close.side_effect = close_error
+        # close() is driven through __exit__ so the lifecycle contract is kept;
+        # simulate a close failure on __exit__ (its base impl calls close()).
+        snapshot_commit.__exit__.side_effect = close_error
         if atomic_error is None:
             snapshot_commit.commit.return_value = True
         else:
@@ -585,6 +587,26 @@ class TestFileStoreCommit(unittest.TestCase):
         self.assertFalse(result.is_success())
         self.assertTrue(result.outcome_unknown)
         self.assertIs(transport_error, result.exception)
+
+    def test_snapshot_commit_lifecycle_is_preserved(
+            self, mock_manifest_list_manager, mock_manifest_file_manager):
+        # The context-manager contract must be honored so an extension relying
+        # on __enter__/__exit__ (e.g. to acquire and release a lock) still runs.
+        file_store_commit, snapshot_commit, commit_entry = (
+            self._prepare_atomic_attempt())
+
+        result = file_store_commit._try_commit_once(
+            retry_result=None,
+            commit_kind="APPEND",
+            commit_entries=[commit_entry],
+            changelog_entries=[],
+            commit_identifier=1,
+            latest_snapshot=None,
+        )
+
+        self.assertTrue(result.is_success())
+        snapshot_commit.__enter__.assert_called_once()
+        snapshot_commit.__exit__.assert_called_once()
 
     def test_close_failure_does_not_override_successful_commit(
             self, mock_manifest_list_manager, mock_manifest_file_manager):

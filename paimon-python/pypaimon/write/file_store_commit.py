@@ -764,21 +764,26 @@ class FileStoreCommit:
                 )
 
         # Keep the outcome of commit() separate from close(): only commit()
-        # decides whether the snapshot was accepted. Folding both into a single
-        # ``with`` block lets a close() exception silently replace the commit
-        # outcome (Python raises the __exit__ exception over the body's), which
-        # can turn a landed commit into a "deterministic rejection" (deleting
-        # committed files) or downgrade a real rejection to "unknown" (leaking
-        # files). close() therefore only logs; it never changes the outcome.
+        # decides whether the snapshot was accepted. The context-manager
+        # lifecycle is preserved (__enter__/__exit__ still run, so an extension
+        # that acquires a lock or sets up resources in __enter__ and releases
+        # them in __exit__ keeps working), but it is driven manually rather than
+        # with a ``with`` block: folding commit() and close() into one ``with``
+        # lets a close()/__exit__ failure silently replace the commit outcome
+        # (Python raises the __exit__ exception over the body's), which can turn
+        # a landed commit into a "deterministic rejection" (deleting committed
+        # files) or downgrade a real rejection to "unknown" (leaking files).
+        # __exit__ therefore only logs on failure; it never changes the outcome.
         success = None
         commit_exc = None
+        self.snapshot_commit.__enter__()
         try:
             success = self.snapshot_commit.commit(snapshot_data, statistics)
         except Exception as e:
             commit_exc = e
         finally:
             try:
-                self.snapshot_commit.close()
+                self.snapshot_commit.__exit__(None, None, None)
             except Exception:
                 logger.warning(
                     "Failed to close snapshot commit; ignoring because it must "
