@@ -22,6 +22,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import pyarrow as pa
 
@@ -147,6 +148,86 @@ class FilesTableTest(unittest.TestCase):
             self.assertTrue(fmt)
         for level in arrow_table.column("level").to_pylist():
             self.assertGreaterEqual(level, 0)
+
+    def test_scan_plan_does_not_materialize_manifest_entries(self):
+        self._create_partitioned_table()
+        self._write_two_partitions()
+        table = self.catalog.get_table("db.t$files")
+
+        with mock.patch.object(
+            table,
+            "read_entries",
+            side_effect=AssertionError(
+                "scan planning must stay metadata-only"),
+        ):
+            splits = table.new_read_builder().new_scan().plan().splits()
+
+        self.assertEqual(1, len(splits))
+        self.assertGreater(splits[0].row_count, 0)
+
+    def test_projection_skips_unrequested_stats_rendering(self):
+        self._create_partitioned_table()
+        self._write_two_partitions()
+        table = self.catalog.get_table("db.t$files")
+        builder = table.new_read_builder().with_projection(
+            ["record_count", "file_size_in_bytes"])
+
+        with mock.patch(
+            "pypaimon.table.system.files_table._render_stats_map",
+            side_effect=AssertionError(
+                "unrequested value stats must not be rendered"),
+        ), mock.patch(
+            "pypaimon.table.system.files_table._render_null_counts",
+            side_effect=AssertionError(
+                "unrequested null stats must not be rendered"),
+        ):
+            result = builder.new_read().to_arrow(
+                builder.new_scan().plan().splits())
+
+        self.assertEqual(
+            ["record_count", "file_size_in_bytes"], result.schema.names)
+        self.assertGreater(result.num_rows, 0)
+
+    def test_limit_applies_before_arrow_conversion(self):
+        self._create_partitioned_table()
+        self._write_two_partitions()
+        table = self.catalog.get_table("db.t$files")
+        builder = (
+            table.new_read_builder()
+            .with_projection(["file_path"])
+            .with_limit(1)
+        )
+
+        original = table.entries_to_record_batch
+        converted_sizes = []
+
+        def track_conversion(entries, projected_names):
+            converted_sizes.append(len(entries))
+            return original(entries, projected_names)
+
+        with mock.patch.object(
+            table, "entries_to_record_batch", side_effect=track_conversion
+        ):
+            result = builder.new_read().to_arrow(
+                builder.new_scan().plan().splits())
+
+        self.assertEqual(1, result.num_rows)
+        self.assertEqual([1], converted_sizes)
+
+    def test_record_batch_iterator_does_not_build_one_giant_batch(self):
+        self._create_partitioned_table()
+        self._write_two_partitions()
+        table = self.catalog.get_table("db.t$files")
+        builder = table.new_read_builder().with_projection(["file_path"])
+
+        with mock.patch(
+            "pypaimon.table.system.files_table_read._BATCH_SIZE", 1
+        ):
+            batches = list(builder.new_read().to_record_batch_iterator(
+                builder.new_scan().plan().splits()))
+
+        self.assertGreater(len(batches), 1)
+        self.assertTrue(all(batch.num_rows == 1 for batch in batches))
 
 
 if __name__ == "__main__":

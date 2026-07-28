@@ -65,6 +65,12 @@ read builder works with `to_pandas`, `to_arrow`, `to_iterator`,
 `to_record_batch_iterator`, and `to_duckdb`. Writes raise
 `NotImplementedError` — system tables are read-only.
 
+`$files` defers manifest-entry decoding until the read starts and applies
+projection and limit before converting rows to Arrow. Prefer
+`to_record_batch_iterator` or `to_iterator` for large tables so the projected
+result is not collected into one in-memory Arrow table. Resolving the active
+file set still requires reading the latest snapshot's manifests.
+
 ## Available Tables
 
 Each system table is listed below with its column layout (including
