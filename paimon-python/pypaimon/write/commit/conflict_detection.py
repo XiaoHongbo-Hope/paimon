@@ -180,7 +180,54 @@ class ConflictDetection:
         self.manifest_list_manager = manifest_list_manager
         self.table = table
         self._row_id_check_from_snapshot = None
+        self._rewrite_checkpoint = None
+        self._rewrite_commit_user = None
         self.commit_scanner = commit_scanner
+
+    def protect_from_external_rewrites(
+            self, checkpoint_snapshot, commit_user):
+        self._rewrite_checkpoint = checkpoint_snapshot
+        self._rewrite_commit_user = commit_user
+
+    def check_external_rewrites(self, latest_snapshot):
+        checkpoint = self._rewrite_checkpoint
+        if checkpoint is None:
+            return None
+        if latest_snapshot is None or latest_snapshot.id < checkpoint.id:
+            return RuntimeError(
+                "Rewrite checkpoint is no longer in the snapshot lineage.")
+        if latest_snapshot.id == checkpoint.id:
+            if self._same_snapshot(checkpoint, latest_snapshot):
+                return None
+            return RuntimeError("Rewrite checkpoint snapshot was replaced.")
+
+        snapshot_manager = self.table.snapshot_manager()
+        for snapshot_id in range(checkpoint.id + 1, latest_snapshot.id + 1):
+            snapshot = snapshot_manager.get_snapshot_by_id(snapshot_id)
+            if snapshot is None:
+                return RuntimeError(
+                    "Cannot validate external rewrites because snapshot "
+                    "{} expired.".format(snapshot_id))
+            if snapshot.commit_user == self._rewrite_commit_user:
+                continue
+            if snapshot.schema_id != checkpoint.schema_id:
+                return RuntimeError(
+                    "Target schema changed during the incremental update.")
+            if snapshot.commit_kind == "COMPACT":
+                continue
+            if (snapshot.commit_kind == "OVERWRITE"
+                    or self.commit_scanner.snapshot_deletes_files(snapshot)):
+                return RuntimeError(
+                    "Concurrent rewrite landed during the incremental update.")
+        return None
+
+    @staticmethod
+    def _same_snapshot(left, right):
+        if left is None or right is None:
+            return left is right
+        if left.uuid is not None or right.uuid is not None:
+            return left.id == right.id and left.uuid == right.uuid
+        return left == right
 
     def should_be_overwrite_commit(self, append_file_entries=None, append_index_files=None):
         for entry in append_file_entries or []:

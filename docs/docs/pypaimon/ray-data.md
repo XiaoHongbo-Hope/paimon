@@ -597,6 +597,7 @@ metrics = update_by_row_id(
   in its data file, so it can't be told apart from a live row without reading the target.
 - Incremental commits are not atomic across the whole operation. Commits completed
   before a later failure remain visible.
+- Concurrent target rewrites fail the incremental update.
 - A duplicate `_ROW_ID` within a target file group is a deterministic validation
   error. In incremental mode it is reported as a result so successful groups can
   finish and be committed before the error is raised.

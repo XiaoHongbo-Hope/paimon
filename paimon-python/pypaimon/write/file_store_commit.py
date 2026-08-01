@@ -143,6 +143,11 @@ class FileStoreCommit:
         table_rollback = table.catalog_environment.catalog_table_rollback()
         self.rollback = CommitRollback(table_rollback) if table_rollback is not None else None
 
+    def protect_from_external_rewrites(
+            self, checkpoint_snapshot, commit_user):
+        self.conflict_detection.protect_from_external_rewrites(
+            checkpoint_snapshot, commit_user)
+
     def commit(self, commit_messages: List[CommitMessage], commit_identifier: int):
         """Commit the given commit messages in normal append mode."""
         if not commit_messages:
@@ -479,6 +484,14 @@ class FileStoreCommit:
         start_millis = int(time.time() * 1000)
         if self._is_duplicate_commit(retry_result, latest_snapshot, commit_identifier, commit_kind):
             return SuccessResult()
+
+        rewrite_conflict = (
+            self.conflict_detection.check_external_rewrites(latest_snapshot))
+        if rewrite_conflict is not None:
+            if retry_result is None or retry_result.exception is None:
+                raise CommitConflictError(
+                    str(rewrite_conflict)) from rewrite_conflict
+            raise rewrite_conflict
 
         latest_snapshot_id = latest_snapshot.id if latest_snapshot else 0
         if (

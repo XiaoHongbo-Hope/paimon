@@ -76,7 +76,8 @@ def update_by_row_id(
     commits made before a later failure remain visible. Deterministic duplicate
     ``_ROW_ID`` errors are returned as group results so completed groups can be
     flushed first. Other application errors propagate to Ray and remain subject
-    to the retry options in ``ray_remote_args``.
+    to the retry options in ``ray_remote_args``. Concurrent target rewrites fail
+    the incremental update.
 
     Returns ``{"num_updated": <rows>}``.
     """
@@ -166,7 +167,7 @@ def update_by_row_id(
                 f"target '{target}' has no rows; every _ROW_ID in the source is foreign.")
         return {"num_updated": 0}
     incremental_committer = (
-        _IncrementalUpdateCommitter(table, max_groups_per_commit)
+        _IncrementalUpdateCommitter(table, max_groups_per_commit, base)
         if commit_mode == "incremental" else None
     )
     try:
@@ -208,12 +209,15 @@ def update_by_row_id(
 
 class _IncrementalUpdateCommitter:
 
-    def __init__(self, table, max_groups_per_commit: int):
+    def __init__(
+            self, table, max_groups_per_commit: int, base_snapshot=None):
         self._table = table
         self._max_groups_per_commit = max_groups_per_commit
         self._pending_messages: list = []
         self._pending_groups = 0
         self._table_commit = None
+        self._commit_user = None
+        self._checkpoint_snapshot = base_snapshot
         self._next_commit_identifier = 1
         self._commit_failed = False
         self._deferred_commit_error = None
@@ -244,15 +248,29 @@ class _IncrementalUpdateCommitter:
 
         try:
             if self._table_commit is None:
-                self._table_commit = (
-                    self._table.new_stream_write_builder().new_commit()
-                )
+                builder = self._table.new_stream_write_builder()
+                if self._checkpoint_snapshot is not None:
+                    self._commit_user = builder.commit_user
+                self._table_commit = builder.new_commit()
 
             messages = self._pending_messages
             self._pending_messages = []
             self._pending_groups = 0
             commit_identifier = self._next_commit_identifier
+            if self._checkpoint_snapshot is not None:
+                self._table_commit.protect_from_external_rewrites(
+                    self._checkpoint_snapshot, self._commit_user)
             self._table_commit.commit(messages, commit_identifier)
+            if self._checkpoint_snapshot is not None:
+                self._checkpoint_snapshot = _find_committed_snapshot(
+                    self._table,
+                    self._commit_user,
+                    commit_identifier,
+                    self._checkpoint_snapshot.id,
+                )
+                if self._checkpoint_snapshot is None:
+                    raise RuntimeError(
+                        "Committed incremental update snapshot cannot be found.")
         except Exception:
             self._commit_failed = True
             raise
@@ -277,6 +295,21 @@ class _IncrementalUpdateCommitter:
                 close_error,
                 exc_info=close_error,
             )
+
+
+def _find_committed_snapshot(
+        table, commit_user, commit_identifier, after_snapshot_id):
+    snapshot_manager = table.snapshot_manager()
+    latest = snapshot_manager.get_latest_snapshot()
+    if latest is None:
+        return None
+    for snapshot_id in range(latest.id, after_snapshot_id, -1):
+        snapshot = snapshot_manager.get_snapshot_by_id(snapshot_id)
+        if (snapshot is not None
+                and snapshot.commit_user == commit_user
+                and snapshot.commit_identifier == commit_identifier):
+            return snapshot
+    return None
 
 
 def _commit_update_messages(table, commit_messages) -> None:
