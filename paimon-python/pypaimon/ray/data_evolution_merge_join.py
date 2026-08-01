@@ -59,6 +59,16 @@ def _map_kwargs(
     return kwargs
 
 
+def _sorted_range_membership(values, starts, ends):
+    import numpy as np
+
+    indices = np.searchsorted(ends, values, side="left")
+    matches = np.zeros(len(values), dtype=bool)
+    positions = np.flatnonzero(indices < len(starts))
+    matches[positions] = starts[indices[positions]] <= values[positions]
+    return matches
+
+
 def _resolve_source_projection(
     clauses: List[_NormalizedClause],
     source_on: Sequence[str],
@@ -460,7 +470,7 @@ def distributed_update_apply(
     ray_remote_args: Optional[Dict[str, Any]] = None,
     base_snapshot_id: Optional[int] = None,
     collect_row_ids: bool = False,
-    on_group_result: Optional[Callable[[list, int, list], None]] = None,
+    on_group_result: Optional[Callable[[list, int, list, list], None]] = None,
 ) -> Tuple[list, int, list]:
     import numpy as np
     import pickle
@@ -471,6 +481,9 @@ def distributed_update_apply(
 
     from pypaimon.snapshot.snapshot import BATCH_COMMIT_IDENTIFIER
     from pypaimon.table.special_fields import SpecialFields
+    from pypaimon.write.commit.conflict_detection import (
+        row_id_file_signature,
+    )
     from pypaimon.write.table_update_by_row_id import TableUpdateByRowId
 
     row_id_name = SpecialFields.ROW_ID.name
@@ -537,10 +550,8 @@ def distributed_update_apply(
                 "or matched rows come from a different table."
             )
         rids = rid_col.to_numpy(zero_copy_only=False)
-        # Check each row_id belongs to a valid range (vectorized).
-        in_range = np.zeros(len(rids), dtype=bool)
-        for s, e in zip(range_starts, range_ends):
-            in_range |= (rids >= s) & (rids <= e)
+        in_range = _sorted_range_membership(
+            rids, range_starts, range_ends)
         if not in_range.all():
             bad = rids[~in_range][0]
             raise ValueError(
@@ -562,13 +573,20 @@ def distributed_update_apply(
 
     captured_table = table
     captured_cols = cols
-    capture_group_validation_errors = on_group_result is not None
+    capture_group_errors = on_group_result is not None
 
-    def _group_result(msgs_blob, n_updated, row_ids_blob, error):
+    def _group_result(
+            msgs_blob,
+            n_updated,
+            row_ids_blob,
+            planned_files_blob,
+            error):
         return pa.Table.from_pydict({
             "msgs_blob": pa.array([msgs_blob], type=pa.binary()),
             "n_updated": pa.array([n_updated], type=pa.int64()),
             "row_ids_blob": pa.array([row_ids_blob], type=pa.binary()),
+            "planned_files_blob": pa.array(
+                [planned_files_blob], type=pa.binary()),
             "error": pa.array([error], type=pa.string()),
         })
 
@@ -578,39 +596,52 @@ def distributed_update_apply(
                 "msgs_blob": pa.array([], type=pa.binary()),
                 "n_updated": pa.array([], type=pa.int64()),
                 "row_ids_blob": pa.array([], type=pa.binary()),
+                "planned_files_blob": pa.array([], type=pa.binary()),
                 "error": pa.array([], type=pa.string()),
             })
 
-        if (
-            pc.count_distinct(group.column(row_id_name)).as_py()
-            != group.num_rows
-        ):
-            error = ValueError(
-                "MERGE matched multiple source rows to the same "
-                "target _ROW_ID. Deduplicate the source before "
-                "merging."
-            )
-            if not capture_group_validation_errors:
-                raise error
-            return _group_result(b"", 0, b"", _group_error_text(error))
+        try:
+            if (
+                pc.count_distinct(group.column(row_id_name)).as_py()
+                != group.num_rows
+            ):
+                raise ValueError(
+                    "MERGE matched multiple source rows to the same "
+                    "target _ROW_ID. Deduplicate the source before "
+                    "merging."
+                )
 
-        for_update = group.drop_columns([frid_col])
-        row_ids = (
-            for_update.column(row_id_name).to_pylist()
-            if collect_row_ids else []
-        )
-        worker = TableUpdateByRowId(
-            captured_table,
-            "_merge_into_shard_" + uuid.uuid4().hex[:8],
-            BATCH_COMMIT_IDENTIFIER,
-            _precomputed_files_info=ray.get(precomputed_info_ref),
-        )
-        msgs = worker.update_columns(for_update, list(captured_cols))
+            for_update = group.drop_columns([frid_col])
+            row_ids = (
+                for_update.column(row_id_name).to_pylist()
+                if collect_row_ids else []
+            )
+            files_info = ray.get(precomputed_info_ref)
+            first_row_id = group.column(frid_col)[0].as_py()
+            split, target_files = files_info.first_row_id_index[first_row_id]
+            planned_file_signatures = [
+                row_id_file_signature(
+                    split.partition, split.bucket, data_file)
+                for data_file in target_files
+            ]
+            worker = TableUpdateByRowId(
+                captured_table,
+                "_merge_into_shard_" + uuid.uuid4().hex[:8],
+                BATCH_COMMIT_IDENTIFIER,
+                _precomputed_files_info=files_info,
+            )
+            msgs = worker.update_columns(for_update, list(captured_cols))
+        except Exception as error:
+            if not capture_group_errors:
+                raise
+            return _group_result(
+                b"", 0, b"", b"", _group_error_text(error))
 
         return _group_result(
             pickle.dumps(msgs),
             for_update.num_rows,
             pickle.dumps(row_ids),
+            pickle.dumps(planned_file_signatures),
             None,
         )
 
@@ -638,11 +669,18 @@ def distributed_update_apply(
                 pickle.loads(result["row_ids_blob"])
                 if collect_row_ids else []
             )
+            planned_file_signatures = pickle.loads(
+                result["planned_files_blob"])
             n = result["n_updated"]
             if on_group_result is None:
                 all_msgs.extend(group_msgs)
             else:
-                on_group_result(group_msgs, n, group_row_ids)
+                on_group_result(
+                    group_msgs,
+                    n,
+                    group_row_ids,
+                    planned_file_signatures,
+                )
             num_updated += n
             action_row_ids.extend(group_row_ids)
     if group_error is not None:
