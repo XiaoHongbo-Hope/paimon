@@ -70,14 +70,9 @@ def update_by_row_id(
     the target is never fully read and there is no join against it. Requires
     ``ray >= 2.50`` and a target with ``data-evolution.enabled`` + ``row-tracking.enabled``.
 
-    By default, all file groups are committed atomically. Set
-    ``commit_mode="incremental"`` together with ``max_groups_per_commit`` to
-    commit completed groups in smaller windows. Incremental mode is not atomic:
-    commits made before a later failure remain visible. Deterministic duplicate
-    ``_ROW_ID`` errors are returned as group results so completed groups can be
-    flushed first. Other application errors propagate to Ray and remain subject
-    to the retry options in ``ray_remote_args``. Concurrent target rewrites fail
-    the incremental update.
+    By default, all file groups are committed atomically. Incremental mode
+    commits every ``max_groups_per_commit`` groups; earlier commits remain
+    visible after a later failure, and concurrent target rewrites are rejected.
 
     Returns ``{"num_updated": <rows>}``.
     """
@@ -236,8 +231,7 @@ class _IncrementalUpdateCommitter:
             try:
                 self._commit_pending()
             except Exception as error:
-                # Keep draining materialized Ray results so their staged files
-                # are known to the driver and can be aborted by the caller.
+                # Drain Ray results so their staged files can be aborted.
                 self._deferred_commit_error = error
 
     def finish(self) -> None:

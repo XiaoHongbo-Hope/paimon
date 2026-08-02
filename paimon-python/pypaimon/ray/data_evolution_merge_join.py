@@ -627,32 +627,24 @@ def distributed_update_apply(
     action_row_ids = []
     group_error = None
     for batch in msgs_ds.iter_batches(batch_format="pyarrow"):
-        message_blobs = batch.column("msgs_blob").to_pylist()
-        updated_counts = batch.column("n_updated").to_pylist()
-        errors = batch.column("error").to_pylist()
-        row_id_blobs = (
-            batch.column("row_ids_blob").to_pylist()
-            if collect_row_ids else [None] * len(message_blobs)
-        )
-        for blob, n, row_ids_blob, error in zip(
-                message_blobs, updated_counts, row_id_blobs, errors):
+        for result in batch.to_pylist():
+            error = result["error"]
             if error is not None:
-                # Keep the first failure as the primary error, but continue
-                # draining results so successful groups can still be committed.
                 if group_error is None:
                     group_error = error
                 continue
-            group_msgs = pickle.loads(blob)
+            group_msgs = pickle.loads(result["msgs_blob"])
             group_row_ids = (
-                pickle.loads(row_ids_blob) if collect_row_ids else []
+                pickle.loads(result["row_ids_blob"])
+                if collect_row_ids else []
             )
+            n = result["n_updated"]
             if on_group_result is None:
                 all_msgs.extend(group_msgs)
             else:
                 on_group_result(group_msgs, n, group_row_ids)
             num_updated += n
-            if collect_row_ids:
-                action_row_ids.extend(group_row_ids)
+            action_row_ids.extend(group_row_ids)
     if group_error is not None:
         raise GroupApplyError(group_error)
     return all_msgs, num_updated, action_row_ids

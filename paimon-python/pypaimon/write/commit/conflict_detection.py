@@ -208,9 +208,8 @@ class ConflictDetection:
                 return None
             return RuntimeError("Rewrite checkpoint snapshot was replaced.")
 
-        snapshot_manager = self.table.snapshot_manager()
         for snapshot_id in range(checkpoint.id + 1, latest_snapshot.id + 1):
-            snapshot = snapshot_manager.get_snapshot_by_id(snapshot_id)
+            snapshot = self.snapshot_manager.get_snapshot_by_id(snapshot_id)
             if snapshot is None:
                 return RuntimeError(
                     "Cannot validate external rewrites because snapshot "
