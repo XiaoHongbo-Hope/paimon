@@ -85,6 +85,11 @@ class _FakeSchemaManager:
     def get_schema(self, schema_id):
         return self._schemas.get(schema_id)
 
+    def latest(self):
+        if not self._schemas:
+            return None
+        return self._schemas[max(self._schemas)]
+
 
 _DEFAULT_SCHEMA = _FakeSchema(
     id=0,
@@ -434,14 +439,15 @@ class TestCheckRowIdFromSnapshot(unittest.TestCase):
 class TestIncrementalRowIdCommitGuards(unittest.TestCase):
 
     @staticmethod
-    def _detection(snapshots, scanner):
+    def _detection(snapshots, scanner, schemas=None):
         snapshot_manager = _FakeSnapshotManager(snapshots)
         return ConflictDetection(
             data_evolution_enabled=True,
             snapshot_manager=snapshot_manager,
             manifest_list_manager=None,
             table=_FakeTable(
-                _FakeSchemaManager([_DEFAULT_SCHEMA]), snapshot_manager),
+                _FakeSchemaManager(schemas or [_DEFAULT_SCHEMA]),
+                snapshot_manager),
             commit_scanner=scanner,
         )
 
@@ -452,7 +458,7 @@ class TestIncrementalRowIdCommitGuards(unittest.TestCase):
         detection = self._detection(
             [checkpoint, overwrite], _FakeCommitScanner({}))
         detection.protect_from_external_rewrites(
-            checkpoint, "operation")
+            checkpoint, "operation", 0)
 
         result = detection.check_external_rewrites(overwrite)
 
@@ -468,7 +474,7 @@ class TestIncrementalRowIdCommitGuards(unittest.TestCase):
             _FakeCommitScanner({}, deleting_snapshot_ids={2}),
         )
         detection.protect_from_external_rewrites(
-            checkpoint, "operation")
+            checkpoint, "operation", 0)
 
         result = detection.check_external_rewrites(rewrite)
 
@@ -484,9 +490,35 @@ class TestIncrementalRowIdCommitGuards(unittest.TestCase):
         detection = self._detection(
             [checkpoint, own, append], _FakeCommitScanner({}))
         detection.protect_from_external_rewrites(
-            checkpoint, "operation")
+            checkpoint, "operation", 0)
 
         self.assertIsNone(detection.check_external_rewrites(append))
+
+    def test_uses_planned_schema_instead_of_checkpoint_schema(self):
+        schema1 = _FakeSchema(1, _DEFAULT_SCHEMA.fields)
+        checkpoint = _FakeSnapshot(
+            1, "APPEND", commit_user="operation", schema_id=0)
+        append = _FakeSnapshot(2, "APPEND", schema_id=1)
+        detection = self._detection(
+            [checkpoint, append], _FakeCommitScanner({}), [schema1])
+        detection.protect_from_external_rewrites(
+            checkpoint, "operation", 1)
+
+        self.assertIsNone(detection.check_external_rewrites(append))
+
+    def test_rejects_schema_change_without_new_snapshot(self):
+        schema1 = _FakeSchema(1, _DEFAULT_SCHEMA.fields)
+        checkpoint = _FakeSnapshot(
+            1, "APPEND", commit_user="operation", schema_id=0)
+        detection = self._detection(
+            [checkpoint], _FakeCommitScanner({}), [schema1])
+        detection.protect_from_external_rewrites(
+            checkpoint, "operation", 0)
+
+        result = detection.check_external_rewrites(checkpoint)
+
+        self.assertIsNotNone(result)
+        self.assertIn("Target schema changed", str(result))
 
 
 class TestRowIdColumnConflictChecker(unittest.TestCase):

@@ -144,9 +144,9 @@ class FileStoreCommit:
         self.rollback = CommitRollback(table_rollback) if table_rollback is not None else None
 
     def protect_from_external_rewrites(
-            self, checkpoint_snapshot, commit_user):
+            self, checkpoint_snapshot, commit_user, schema_id):
         self.conflict_detection.protect_from_external_rewrites(
-            checkpoint_snapshot, commit_user)
+            checkpoint_snapshot, commit_user, schema_id)
 
     def commit(self, commit_messages: List[CommitMessage], commit_identifier: int):
         """Commit the given commit messages in normal append mode."""

@@ -182,17 +182,24 @@ class ConflictDetection:
         self._row_id_check_from_snapshot = None
         self._rewrite_checkpoint = None
         self._rewrite_commit_user = None
+        self._rewrite_schema_id = None
         self.commit_scanner = commit_scanner
 
     def protect_from_external_rewrites(
-            self, checkpoint_snapshot, commit_user):
+            self, checkpoint_snapshot, commit_user, schema_id):
         self._rewrite_checkpoint = checkpoint_snapshot
         self._rewrite_commit_user = commit_user
+        self._rewrite_schema_id = schema_id
 
     def check_external_rewrites(self, latest_snapshot):
         checkpoint = self._rewrite_checkpoint
         if checkpoint is None:
             return None
+        latest_schema = self.table.schema_manager.latest()
+        if (latest_schema is None
+                or latest_schema.id != self._rewrite_schema_id):
+            return RuntimeError(
+                "Target schema changed during the incremental update.")
         if latest_snapshot is None or latest_snapshot.id < checkpoint.id:
             return RuntimeError(
                 "Rewrite checkpoint is no longer in the snapshot lineage.")
@@ -208,11 +215,11 @@ class ConflictDetection:
                 return RuntimeError(
                     "Cannot validate external rewrites because snapshot "
                     "{} expired.".format(snapshot_id))
-            if snapshot.commit_user == self._rewrite_commit_user:
-                continue
-            if snapshot.schema_id != checkpoint.schema_id:
+            if snapshot.schema_id != self._rewrite_schema_id:
                 return RuntimeError(
                     "Target schema changed during the incremental update.")
+            if snapshot.commit_user == self._rewrite_commit_user:
+                continue
             if snapshot.commit_kind == "COMPACT":
                 continue
             if (snapshot.commit_kind == "OVERWRITE"

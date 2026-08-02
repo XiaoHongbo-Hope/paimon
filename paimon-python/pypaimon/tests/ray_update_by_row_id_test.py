@@ -261,6 +261,122 @@ class RayUpdateByRowIdTest(unittest.TestCase):
         self.assertEqual(["external"] * 3, result["name"])
         self.assertEqual([999] * 3, result["age"])
 
+    def test_incremental_update_allows_append_after_prior_schema_change(self):
+        from pypaimon.schema.data_types import AtomicType
+        from pypaimon.schema.schema_change import SchemaChange
+        from pypaimon.write.table_commit import StreamTableCommit
+
+        target = self._create()
+        for row_id in range(1, 4):
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["x"], "age": [0]},
+                schema=self.pa_schema,
+            ))
+        row_ids = self._rowid_by_id(target)
+        self.catalog.alter_table(
+            target,
+            [SchemaChange.add_column("extra", AtomicType("INT"))],
+            False,
+        )
+        source = pa.table(
+            {
+                "_ROW_ID": [row_ids[row_id] for row_id in range(1, 4)],
+                "age": [100, 200, 300],
+            },
+            schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]),
+        )
+        append_schema = self.pa_schema.append(pa.field("extra", pa.int32()))
+        append = pa.Table.from_pydict(
+            {"id": [4], "name": ["external"], "age": [0], "extra": [1]},
+            schema=append_schema,
+        )
+        original_commit = StreamTableCommit.commit
+        append_landed = False
+
+        def commit_then_append(
+                stream_commit, messages, commit_identifier):
+            nonlocal append_landed
+            result = original_commit(
+                stream_commit, messages, commit_identifier)
+            if not append_landed:
+                append_landed = True
+                self._write(target, append)
+            return result
+
+        with mock.patch.object(
+                StreamTableCommit, "commit", commit_then_append):
+            result = update_by_row_id(
+                target,
+                ray.data.from_arrow(source),
+                self.catalog_options,
+                update_cols=["age"],
+                num_partitions=1,
+                commit_mode="incremental",
+                max_groups_per_commit=1,
+            )
+
+        self.assertEqual({"num_updated": 3}, result)
+        rows = self._read(target).sort_by("id").to_pydict()
+        self.assertEqual([100, 200, 300, 0], rows["age"])
+
+    def test_incremental_update_rejects_schema_only_change(self):
+        from pypaimon.schema.schema_change import SchemaChange
+        from pypaimon.write.commit.conflict_detection import (
+            CommitConflictError,
+        )
+        from pypaimon.write.table_commit import StreamTableCommit
+
+        target = self._create()
+        for row_id in range(1, 4):
+            self._write(target, pa.Table.from_pydict(
+                {"id": [row_id], "name": ["x"], "age": [0]},
+                schema=self.pa_schema,
+            ))
+        row_ids = self._rowid_by_id(target)
+        source = pa.table(
+            {
+                "_ROW_ID": [row_ids[1]],
+                "age": [100],
+            },
+            schema=pa.schema([("_ROW_ID", pa.int64()), ("age", pa.int32())]),
+        )
+        original_commit = StreamTableCommit.commit
+        snapshot_after_first_commit = None
+
+        def commit_then_drop_column(
+                stream_commit, messages, commit_identifier):
+            nonlocal snapshot_after_first_commit
+            result = original_commit(
+                stream_commit, messages, commit_identifier)
+            if snapshot_after_first_commit is None:
+                table = self.catalog.get_table(target)
+                snapshot_after_first_commit = (
+                    table.snapshot_manager().get_latest_snapshot().id)
+                self.catalog.alter_table(
+                    target, [SchemaChange.drop_column("age")], False)
+            return result
+
+        with mock.patch.object(
+                StreamTableCommit, "commit", commit_then_drop_column):
+            with self.assertRaisesRegex(
+                    CommitConflictError, "Target schema changed"):
+                update_by_row_id(
+                    target,
+                    ray.data.from_arrow(source),
+                    self.catalog_options,
+                    update_cols=["age"],
+                    num_partitions=1,
+                    commit_mode="incremental",
+                    max_groups_per_commit=1,
+                )
+
+        table = self.catalog.get_table(target)
+        self.assertEqual(
+            snapshot_after_first_commit,
+            table.snapshot_manager().get_latest_snapshot().id,
+        )
+        self.assertNotIn("age", table.field_names)
+
     def test_group_failure_preserves_completed_groups(self):
         for max_groups, expected_snapshots in [(1, 2), (5, 1)]:
             with self.subTest(max_groups_per_commit=max_groups):
@@ -779,7 +895,8 @@ class RayUpdateByRowIdTest(unittest.TestCase):
                 return False
 
         class FakeCommit:
-            def protect_from_external_rewrites(self, snapshot, commit_user):
+            def protect_from_external_rewrites(
+                    self, snapshot, commit_user, schema_id):
                 pass
 
             def commit(self, msgs, *args):
@@ -810,12 +927,15 @@ class RayUpdateByRowIdTest(unittest.TestCase):
             field_names = ["age"]
             partition_keys = []
             options = FakeOptions()
-            table_schema = types.SimpleNamespace(fields=[
-                types.SimpleNamespace(
-                    name="age",
-                    type=types.SimpleNamespace(type="INT"),
-                )
-            ])
+            table_schema = types.SimpleNamespace(
+                id=0,
+                fields=[
+                    types.SimpleNamespace(
+                        name="age",
+                        type=types.SimpleNamespace(type="INT"),
+                    )
+                ],
+            )
 
             def snapshot_manager(self):
                 return types.SimpleNamespace(get_latest_snapshot=lambda: types.SimpleNamespace(

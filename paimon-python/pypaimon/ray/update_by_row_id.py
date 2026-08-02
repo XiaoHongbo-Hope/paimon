@@ -167,7 +167,8 @@ def update_by_row_id(
                 f"target '{target}' has no rows; every _ROW_ID in the source is foreign.")
         return {"num_updated": 0}
     incremental_committer = (
-        _IncrementalUpdateCommitter(table, max_groups_per_commit, base)
+        _IncrementalUpdateCommitter(
+            table, max_groups_per_commit, base, table.table_schema.id)
         if commit_mode == "incremental" else None
     )
     try:
@@ -210,7 +211,11 @@ def update_by_row_id(
 class _IncrementalUpdateCommitter:
 
     def __init__(
-            self, table, max_groups_per_commit: int, base_snapshot=None):
+            self,
+            table,
+            max_groups_per_commit: int,
+            base_snapshot=None,
+            planned_schema_id=None):
         self._table = table
         self._max_groups_per_commit = max_groups_per_commit
         self._pending_messages: list = []
@@ -218,6 +223,7 @@ class _IncrementalUpdateCommitter:
         self._table_commit = None
         self._commit_user = None
         self._checkpoint_snapshot = base_snapshot
+        self._planned_schema_id = planned_schema_id
         self._next_commit_identifier = 1
         self._commit_failed = False
         self._deferred_commit_error = None
@@ -259,7 +265,10 @@ class _IncrementalUpdateCommitter:
             commit_identifier = self._next_commit_identifier
             if self._checkpoint_snapshot is not None:
                 self._table_commit.protect_from_external_rewrites(
-                    self._checkpoint_snapshot, self._commit_user)
+                    self._checkpoint_snapshot,
+                    self._commit_user,
+                    self._planned_schema_id,
+                )
             self._table_commit.commit(messages, commit_identifier)
             if self._checkpoint_snapshot is not None:
                 self._checkpoint_snapshot = _find_committed_snapshot(
@@ -271,6 +280,16 @@ class _IncrementalUpdateCommitter:
                 if self._checkpoint_snapshot is None:
                     raise RuntimeError(
                         "Committed incremental update snapshot cannot be found.")
+                latest_schema = self._table.schema_manager.latest()
+                if (self._checkpoint_snapshot.schema_id
+                        != self._planned_schema_id
+                        or latest_schema is None
+                        or latest_schema.id != self._planned_schema_id):
+                    from pypaimon.write.commit.conflict_detection import (
+                        CommitConflictError,
+                    )
+                    raise CommitConflictError(
+                        "Target schema changed during the incremental update.")
         except Exception:
             self._commit_failed = True
             raise
