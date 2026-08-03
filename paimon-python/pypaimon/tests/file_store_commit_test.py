@@ -81,7 +81,7 @@ class TestFileStoreCommit(unittest.TestCase):
         file_store_commit.protect_planned_row_id_files(
             [Range(0, 9)], {"file"})
         file_store_commit.protect_from_external_rewrites(
-            checkpoint, "operation")
+            checkpoint, "operation", 0)
 
         result = Mock()
         result.is_success.return_value = True
@@ -104,6 +104,8 @@ class TestFileStoreCommit(unittest.TestCase):
             file_store_commit.conflict_detection._rewrite_checkpoint)
         self.assertIsNone(
             file_store_commit.conflict_detection._rewrite_commit_user)
+        self.assertIsNone(
+            file_store_commit.conflict_detection._rewrite_schema_id)
 
     def test_generate_partition_statistics_single_partition_single_file(
             self, mock_manifest_list_manager, mock_manifest_file_manager):
