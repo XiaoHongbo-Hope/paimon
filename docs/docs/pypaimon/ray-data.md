@@ -703,14 +703,13 @@ not add or change them.
   )
   ```
 
-## Upsert By Primary Key
+## Incremental Write
 
-`upsert_by_primary_key` applies a replayable Paimon source to a fixed-bucket
-primary-key table. It uses the table primary key instead of `_ROW_ID` and
-resumes committed windows with `operation_id`.
+`write_paimon` can commit a replayable source incrementally to a fixed-bucket
+primary-key table and resume committed windows with `operation_id`.
 
 ```python
-from pypaimon.ray import PaimonOffsetSource, upsert_by_primary_key
+from pypaimon.ray import PaimonOffsetSource, write_paimon
 
 source = PaimonOffsetSource(
     "database_name.updates",
@@ -719,10 +718,11 @@ source = PaimonOffsetSource(
     units_per_checkpoint=1,
 )
 
-metrics = upsert_by_primary_key(
-    target="database_name.target",
-    source=source,
-    catalog_options={"warehouse": "/path/to/warehouse"},
+metrics = write_paimon(
+    source,
+    "database_name.target",
+    {"warehouse": "/path/to/warehouse"},
+    commit_mode="incremental",
     update_cols=["feature"],
     operation_id="feature-backfill-2026-07",
 )
@@ -736,7 +736,7 @@ values; those columns must be nullable. Missing keys are inserted. Each
 task's memory. A `NULL` update value means no change. Sequence fields are not
 yet supported. Do not run another writer on the target during the operation;
 concurrent target writes fail rather than silently changing merge order.
-After success, call `delete_upsert_by_primary_key_checkpoint` with the same
+After success, call `delete_write_paimon_checkpoint` with the same
 target and `operation_id` to release the retained source snapshot.
 
 ## Read By Row Id

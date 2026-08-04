@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Resumable Ray upserts for fixed-bucket primary-key tables."""
+"""Resumable Ray writes for fixed-bucket primary-key tables."""
 
 from typing import Any, Dict, List, Optional
 
@@ -35,21 +35,20 @@ from pypaimon.ray.update_by_row_id import (
 )
 
 __all__ = [
-    "delete_upsert_by_primary_key_checkpoint",
-    "upsert_by_primary_key",
+    "delete_write_paimon_checkpoint",
 ]
 
-_CHECKPOINT_PROPERTY = "primary-key.upsert.checkpoint"
+_CHECKPOINT_PROPERTY = "primary-key.write.checkpoint"
 _CHECKPOINT_MODE = "primary-key-source-offset"
 
 
-def upsert_by_primary_key(
+def _write_paimon_incremental(
     target: str,
     source: Any,
     catalog_options: Dict[str, str],
     *,
-    update_cols: List[str],
-    operation_id: str,
+    update_cols: Optional[List[str]],
+    operation_id: Optional[str],
     concurrency: Optional[int] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
@@ -67,10 +66,12 @@ def upsert_by_primary_key(
     from pypaimon.write.ray_datasink import _prepare_primary_key_groups
 
     if not isinstance(source, PaimonOffsetSource):
-        raise ValueError("upsert_by_primary_key requires a PaimonOffsetSource.")
+        raise ValueError(
+            "Incremental write_paimon requires a PaimonOffsetSource.")
     if getattr(source, "_needs_target_read_plan", False):
         raise ValueError(
-            "upsert_by_primary_key does not accept a co-bucketed join source.")
+            "Incremental write_paimon does not accept a co-bucketed join "
+            "source.")
     if not isinstance(operation_id, str) or not operation_id.strip():
         raise ValueError("operation_id must be a non-empty string.")
     if len(operation_id) > 256:
@@ -82,16 +83,18 @@ def upsert_by_primary_key(
     catalog = CatalogFactory.create(catalog_options)
     table = catalog.get_table(target)
     if not table.is_primary_key_table:
-        raise ValueError("upsert_by_primary_key requires a primary-key target.")
+        raise ValueError(
+            "Incremental write_paimon requires a primary-key target.")
     if table.bucket_mode() != BucketMode.HASH_FIXED:
         raise ValueError(
-            "upsert_by_primary_key currently requires a fixed-bucket target.")
+            "Incremental write_paimon requires a fixed-bucket target.")
     if table.options.merge_engine() != MergeEngine.PARTIAL_UPDATE:
         raise ValueError(
-            "upsert_by_primary_key requires 'merge-engine'='partial-update'.")
+            "Incremental write_paimon requires "
+            "'merge-engine'='partial-update'.")
     if table.options.sequence_field():
         raise ValueError(
-            "upsert_by_primary_key does not support sequence fields yet.")
+            "Incremental write_paimon does not support sequence fields yet.")
 
     primary_keys = list(table.primary_keys)
     invalid = [col for col in update_cols if col not in table.field_names]
@@ -198,12 +201,12 @@ def upsert_by_primary_key(
             )
             committer.commit_window(messages, num_rows, end, set())
         committer.finish()
-        return {"num_upserted": committer.num_updated}
+        return {"num_written": committer.num_updated}
     finally:
         committer.close()
 
 
-def delete_upsert_by_primary_key_checkpoint(
+def delete_write_paimon_checkpoint(
     target: str,
     catalog_options: Dict[str, str],
     operation_id: str,

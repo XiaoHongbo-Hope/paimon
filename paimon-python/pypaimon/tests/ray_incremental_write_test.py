@@ -30,12 +30,12 @@ ray = pytest.importorskip("ray")
 from pypaimon import CatalogFactory, Schema
 from pypaimon.ray import (
     PaimonOffsetSource,
-    delete_upsert_by_primary_key_checkpoint,
-    upsert_by_primary_key,
+    delete_write_paimon_checkpoint,
+    write_paimon,
 )
 
 
-class RayUpsertByPrimaryKeyTest(unittest.TestCase):
+class RayIncrementalWriteTest(unittest.TestCase):
 
     target_schema = pa.schema([
         pa.field("id", pa.int64(), nullable=False),
@@ -140,10 +140,11 @@ class RayUpsertByPrimaryKeyTest(unittest.TestCase):
                 side_effect=fail_second_window):
             with self.assertRaisesRegex(
                     RuntimeError, "injected driver failure"):
-                upsert_by_primary_key(
-                    target,
+                write_paimon(
                     source,
+                    target,
                     self.catalog_options,
+                    commit_mode="incremental",
                     update_cols=["feature"],
                     operation_id=operation_id,
                 )
@@ -155,15 +156,16 @@ class RayUpsertByPrimaryKeyTest(unittest.TestCase):
             ([101, 20, 30], [10, 20, 303]),
         )
 
-        result = upsert_by_primary_key(
-            target,
+        result = write_paimon(
             source,
+            target,
             self.catalog_options,
+            commit_mode="incremental",
             update_cols=["feature"],
             operation_id=operation_id,
         )
 
-        self.assertEqual({"num_upserted": 2}, result)
+        self.assertEqual({"num_written": 2}, result)
         self.assertEqual({
             "id": [1, 2, 3],
             "payload": ["a", "b", "c"],
@@ -189,10 +191,11 @@ class RayUpsertByPrimaryKeyTest(unittest.TestCase):
             False,
         )
         with self.assertRaisesRegex(ValueError, "partial-update"):
-            upsert_by_primary_key(
-                target,
+            write_paimon(
                 PaimonOffsetSource(source),
+                target,
                 self.catalog_options,
+                commit_mode="incremental",
                 update_cols=["feature"],
                 operation_id="reject-dedupe-{}".format(suffix),
             )
@@ -225,10 +228,11 @@ class RayUpsertByPrimaryKeyTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "payload.*nullable"):
-            upsert_by_primary_key(
-                target,
+            write_paimon(
                 PaimonOffsetSource(source),
+                target,
                 self.catalog_options,
+                commit_mode="incremental",
                 update_cols=["feature"],
                 operation_id="reject-not-null-{}".format(suffix),
             )
@@ -260,27 +264,28 @@ class RayUpsertByPrimaryKeyTest(unittest.TestCase):
         }, schema=self.source_schema))
 
         operation_id = "insert-empty-{}".format(suffix)
-        result = upsert_by_primary_key(
-            target,
+        result = write_paimon(
             PaimonOffsetSource(
                 source_table,
                 rows_per_unit=1,
                 units_per_checkpoint=1,
             ),
+            target,
             self.catalog_options,
+            commit_mode="incremental",
             update_cols=["feature"],
             operation_id=operation_id,
         )
 
-        self.assertEqual({"num_upserted": 2}, result)
+        self.assertEqual({"num_written": 2}, result)
         self.assertEqual({
             "id": [4, 5],
             "payload": [None, None],
             "feature": [404, 505],
         }, self._read(target).to_pydict())
-        self.assertTrue(delete_upsert_by_primary_key_checkpoint(
+        self.assertTrue(delete_write_paimon_checkpoint(
             target, self.catalog_options, operation_id))
-        self.assertFalse(delete_upsert_by_primary_key_checkpoint(
+        self.assertFalse(delete_write_paimon_checkpoint(
             target, self.catalog_options, operation_id))
 
     def test_rejects_concurrent_target_write(self):
@@ -309,10 +314,11 @@ class RayUpsertByPrimaryKeyTest(unittest.TestCase):
                 side_effect=write_concurrently):
             with self.assertRaisesRegex(
                     RuntimeError, "Concurrent target commit"):
-                upsert_by_primary_key(
-                    target,
+                write_paimon(
                     source,
+                    target,
                     self.catalog_options,
+                    commit_mode="incremental",
                     update_cols=["feature"],
                     operation_id="concurrent-{}".format(uuid.uuid4().hex),
                 )

@@ -280,7 +280,7 @@ def _looks_like_blob_descriptor(column):
 
 
 def write_paimon(
-    dataset: "ray.data.Dataset",
+    dataset: Any,
     table_identifier: str,
     catalog_options: Dict[str, str],
     *,
@@ -288,7 +288,10 @@ def write_paimon(
     concurrency: Optional[int] = None,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     hash_fixed_precluster: str = "auto",
-) -> None:
+    commit_mode: str = "atomic",
+    operation_id: Optional[str] = None,
+    update_cols: Optional[List[str]] = None,
+) -> Optional[Dict[str, int]]:
     """Write a Ray Dataset to a Paimon table.
 
     HASH_FIXED rows are assigned to the correct bucket by the Paimon
@@ -300,7 +303,8 @@ def write_paimon(
     Paimon writers.
 
     Args:
-        dataset: The Ray Dataset to write.
+        dataset: A Ray Dataset, or a ``PaimonOffsetSource`` for an
+            incremental write.
         table_identifier: Full table name, e.g. ``"db_name.table_name"``.
         catalog_options: Options passed to ``CatalogFactory.create()``.
         overwrite: If ``True``, overwrite existing data in the table.
@@ -311,8 +315,37 @@ def write_paimon(
             and reject HASH_FIXED primary-key tables. ``"map_groups"``
             writes each HASH_FIXED primary-key group in one task and
             preserves the legacy single-group memory bound.
+        commit_mode: ``"atomic"`` or ``"incremental"``. Incremental writes
+            require a replayable ``PaimonOffsetSource``.
+        operation_id: Stable identifier used to resume an incremental write.
+        update_cols: Columns updated by an incremental primary-key write.
     """
     _require_ray_data()
+
+    if commit_mode not in ("atomic", "incremental"):
+        raise ValueError("commit_mode must be 'atomic' or 'incremental'.")
+    if commit_mode == "incremental":
+        if overwrite:
+            raise ValueError("Incremental write does not support overwrite.")
+        if hash_fixed_precluster != "auto":
+            raise ValueError(
+                "hash_fixed_precluster is not used by incremental writes.")
+        from pypaimon.ray.incremental_write import (
+            _write_paimon_incremental,
+        )
+
+        return _write_paimon_incremental(
+            table_identifier,
+            dataset,
+            catalog_options,
+            update_cols=update_cols,
+            operation_id=operation_id,
+            concurrency=concurrency,
+            ray_remote_args=ray_remote_args,
+        )
+    if operation_id is not None or update_cols is not None:
+        raise ValueError(
+            "operation_id and update_cols require commit_mode='incremental'.")
 
     from pypaimon.catalog.catalog_factory import CatalogFactory
     from pypaimon.write.ray_datasink import write_paimon_dataset
@@ -328,3 +361,4 @@ def write_paimon(
         ray_remote_args=ray_remote_args,
         hash_fixed_precluster=hash_fixed_precluster,
     )
+    return None

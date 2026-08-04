@@ -32,9 +32,8 @@ from pypaimon.ray.update_by_row_id import (
     delete_update_by_row_id_checkpoint,
     update_by_row_id,
 )
-from pypaimon.ray.upsert_by_primary_key import (
-    delete_upsert_by_primary_key_checkpoint,
-    upsert_by_primary_key,
+from pypaimon.ray.incremental_write import (
+    delete_write_paimon_checkpoint,
 )
 from pypaimon.ray.offset_source import (
     PaimonCoBucketedJoinOffsetSource,
@@ -50,8 +49,7 @@ __all__ = [
     "range_join",
     "merge_into",
     "update_by_row_id",
-    "upsert_by_primary_key",
-    "delete_upsert_by_primary_key_checkpoint",
+    "delete_write_paimon_checkpoint",
     "PaimonCoBucketedJoinOffsetSource",
     "PaimonOffsetSource",
     "delete_update_by_row_id_checkpoint",
