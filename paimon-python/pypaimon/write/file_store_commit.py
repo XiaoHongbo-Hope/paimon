@@ -153,9 +153,11 @@ class FileStoreCommit:
             row_id_ranges, file_signatures)
 
     def protect_from_external_rewrites(
-            self, checkpoint_snapshot, commit_user, schema_id):
+            self, checkpoint_snapshot, commit_user, schema_id,
+            reject_external_appends=False):
         self.conflict_detection.protect_from_external_rewrites(
-            checkpoint_snapshot, commit_user, schema_id)
+            checkpoint_snapshot, commit_user, schema_id,
+            reject_external_appends)
 
     def clear_commit_context(self):
         self.snapshot_properties = {}

@@ -703,6 +703,42 @@ not add or change them.
   )
   ```
 
+## Upsert By Primary Key
+
+`upsert_by_primary_key` applies a replayable Paimon source to a fixed-bucket
+primary-key table. It uses the table primary key instead of `_ROW_ID` and
+resumes committed windows with `operation_id`.
+
+```python
+from pypaimon.ray import PaimonOffsetSource, upsert_by_primary_key
+
+source = PaimonOffsetSource(
+    "database_name.updates",
+    projection=["id", "feature"],
+    rows_per_unit=1_000_000,
+    units_per_checkpoint=1,
+)
+
+metrics = upsert_by_primary_key(
+    target="database_name.target",
+    source=source,
+    catalog_options={"warehouse": "/path/to/warehouse"},
+    update_cols=["feature"],
+    operation_id="feature-backfill-2026-07",
+)
+```
+
+The target must use fixed buckets and `merge-engine=partial-update`. Source
+rows must contain the target primary key and every `update_cols` column. Other
+columns are written as `NULL`, so partial-update preserves their existing
+values; those columns must be nullable. Missing keys are inserted. Each
+`(partition, bucket)` group is handled by one Ray task and must fit in that
+task's memory. A `NULL` update value means no change. Sequence fields are not
+yet supported. Do not run another writer on the target during the operation;
+concurrent target writes fail rather than silently changing merge order.
+After success, call `delete_upsert_by_primary_key_checkpoint` with the same
+target and `operation_id` to release the retained source snapshot.
+
 ## Read By Row Id
 
 `read_by_row_id` is the read-side mirror of `update_by_row_id`: it reads columns

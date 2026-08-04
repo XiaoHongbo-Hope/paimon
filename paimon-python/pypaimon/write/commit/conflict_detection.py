@@ -206,13 +206,16 @@ class ConflictDetection:
         self._rewrite_checkpoint = None
         self._rewrite_commit_user = None
         self._rewrite_schema_id = None
+        self._reject_external_appends = False
         self.commit_scanner = commit_scanner
 
     def protect_from_external_rewrites(
-            self, checkpoint_snapshot, commit_user, schema_id):
+            self, checkpoint_snapshot, commit_user, schema_id,
+            reject_external_appends=False):
         self._rewrite_checkpoint = checkpoint_snapshot
         self._rewrite_commit_user = commit_user
         self._rewrite_schema_id = schema_id
+        self._reject_external_appends = reject_external_appends
 
     def check_external_rewrites(self, latest_snapshot):
         checkpoint = self._rewrite_checkpoint
@@ -244,6 +247,9 @@ class ConflictDetection:
                 continue
             if snapshot.commit_kind == "COMPACT":
                 continue
+            if self._reject_external_appends:
+                return RuntimeError(
+                    "Concurrent target commit landed during the incremental update.")
             if (snapshot.commit_kind == "OVERWRITE"
                     or self.commit_scanner.snapshot_deletes_files(snapshot)):
                 return RuntimeError(
@@ -265,6 +271,7 @@ class ConflictDetection:
         self._rewrite_checkpoint = None
         self._rewrite_commit_user = None
         self._rewrite_schema_id = None
+        self._reject_external_appends = False
 
     def refresh_planned_row_id_files(self, latest_snapshot):
         if self._planned_row_id_ranges:

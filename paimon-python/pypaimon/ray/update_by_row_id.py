@@ -807,7 +807,11 @@ class _OffsetUpdateCommitter:
             update_cols,
             source_plan,
             initial_snapshot,
-            checkpoint):
+            checkpoint,
+            checkpoint_property=_CHECKPOINT_PROPERTY,
+            checkpoint_mode=_OFFSET_CHECKPOINT_MODE,
+            protect_row_ids=True,
+            reject_external_appends=False):
         self._table = table
         self._catalog = catalog
         self._target = target
@@ -817,6 +821,10 @@ class _OffsetUpdateCommitter:
         self._planned_schema_id = table.table_schema.id
         self._commit_user = _operation_commit_user(operation_id)
         self._checkpoint_tags = _operation_checkpoint_tags(operation_id)
+        self._checkpoint_property = checkpoint_property
+        self._checkpoint_mode = checkpoint_mode
+        self._protect_row_ids = protect_row_ids
+        self._reject_external_appends = reject_external_appends
         self._table_commit = None
 
         initialize = checkpoint is None
@@ -923,16 +931,24 @@ class _OffsetUpdateCommitter:
             next_offset,
             num_updated,
             complete,
+            checkpoint_property=self._checkpoint_property,
+            checkpoint_mode=self._checkpoint_mode,
         )
         commit_identifier = self._next_commit_identifier
-        ranges = _row_id_ranges_from_messages(messages)
-        self._table_commit.protect_from_external_rewrites(
+        rewrite_args = (
             self._checkpoint_snapshot,
             self._commit_user,
             self._planned_schema_id,
         )
-        self._table_commit.protect_planned_row_id_files(
-            ranges, planned_file_signatures)
+        if self._reject_external_appends and not complete:
+            self._table_commit.protect_from_external_rewrites(
+                *rewrite_args, reject_external_appends=True)
+        else:
+            self._table_commit.protect_from_external_rewrites(*rewrite_args)
+        if self._protect_row_ids:
+            ranges = _row_id_ranges_from_messages(messages)
+            self._table_commit.protect_planned_row_id_files(
+                ranges, planned_file_signatures)
         self._table_commit.with_snapshot_properties(properties)
         if messages:
             self._table_commit.commit(messages, commit_identifier)
@@ -942,7 +958,10 @@ class _OffsetUpdateCommitter:
             self._table,
             self._commit_user,
             commit_identifier,
-            self._checkpoint_snapshot.id,
+            (self._checkpoint_snapshot.id
+             if self._checkpoint_snapshot is not None else 0),
+            checkpoint_property=self._checkpoint_property,
+            checkpoint_mode=self._checkpoint_mode,
         )
         if snapshot is None:
             raise RuntimeError(
@@ -1220,10 +1239,12 @@ def _offset_checkpoint_properties(
         source_plan,
         next_offset,
         num_updated,
-        complete):
+        complete,
+        checkpoint_property=_CHECKPOINT_PROPERTY,
+        checkpoint_mode=_OFFSET_CHECKPOINT_MODE):
     state = {
         "version": _OFFSET_CHECKPOINT_VERSION,
-        "mode": _OFFSET_CHECKPOINT_MODE,
+        "mode": checkpoint_mode,
         "operation_id": operation_id,
         "schema_id": schema_id,
         "update_cols": list(update_cols),
@@ -1233,13 +1254,16 @@ def _offset_checkpoint_properties(
         "complete": complete,
     }
     return {
-        _CHECKPOINT_PROPERTY: json.dumps(
+        checkpoint_property: json.dumps(
             state, sort_keys=True, separators=(",", ":"))
     }
 
 
-def _offset_checkpoint_state(snapshot):
-    encoded = (snapshot.properties or {}).get(_CHECKPOINT_PROPERTY)
+def _offset_checkpoint_state(
+        snapshot,
+        checkpoint_property=_CHECKPOINT_PROPERTY,
+        checkpoint_mode=_OFFSET_CHECKPOINT_MODE):
+    encoded = (snapshot.properties or {}).get(checkpoint_property)
     if encoded is None:
         return None
     try:
@@ -1248,7 +1272,7 @@ def _offset_checkpoint_state(snapshot):
         raise RuntimeError(
             "Invalid source-offset checkpoint JSON.") from error
     if (state.get("version") != _OFFSET_CHECKPOINT_VERSION
-            or state.get("mode") != _OFFSET_CHECKPOINT_MODE):
+            or state.get("mode") != checkpoint_mode):
         raise RuntimeError(
             "operation_id belongs to a different checkpoint mode.")
     required = {
@@ -1381,7 +1405,9 @@ def _load_offset_operation_checkpoint(
         operation_id,
         update_cols,
         commit_user,
-        checkpoint_tags):
+        checkpoint_tags,
+        checkpoint_property=_CHECKPOINT_PROPERTY,
+        checkpoint_mode=_OFFSET_CHECKPOINT_MODE):
     snapshot_manager = table.snapshot_manager()
     latest = snapshot_manager.get_latest_snapshot()
     tagged_snapshots = []
@@ -1403,13 +1429,15 @@ def _load_offset_operation_checkpoint(
             snapshot = snapshot_manager.get_snapshot_by_id(snapshot_id)
             if (snapshot is not None
                     and snapshot.commit_user == commit_user
-                    and _has_offset_checkpoint_state(snapshot)):
+                    and _has_offset_checkpoint_state(
+                        snapshot, checkpoint_property, checkpoint_mode)):
                 checkpoint_snapshot = snapshot
                 break
 
     if checkpoint_snapshot is None:
         return None
-    state = _offset_checkpoint_state(checkpoint_snapshot)
+    state = _offset_checkpoint_state(
+        checkpoint_snapshot, checkpoint_property, checkpoint_mode)
     if state is None:
         return checkpoint_snapshot, None
     if checkpoint_snapshot.commit_user != commit_user:
@@ -1431,7 +1459,9 @@ def _find_offset_operation_snapshot(
         table,
         commit_user,
         commit_identifier,
-        after_snapshot_id):
+        after_snapshot_id,
+        checkpoint_property=_CHECKPOINT_PROPERTY,
+        checkpoint_mode=_OFFSET_CHECKPOINT_MODE):
     snapshot_manager = table.snapshot_manager()
     latest = snapshot_manager.get_latest_snapshot()
     if latest is None or latest.id <= after_snapshot_id:
@@ -1442,7 +1472,8 @@ def _find_offset_operation_snapshot(
         if (snapshot is not None
                 and snapshot.commit_user == commit_user
                 and snapshot.commit_identifier == commit_identifier
-                and _has_offset_checkpoint_state(snapshot)):
+                and _has_offset_checkpoint_state(
+                    snapshot, checkpoint_property, checkpoint_mode)):
             return snapshot
     return None
 
@@ -1512,17 +1543,20 @@ def _delete_checkpoint_tag(
         return False
 
 
-def _has_offset_checkpoint_state(snapshot):
-    if _CHECKPOINT_PROPERTY not in (snapshot.properties or {}):
+def _has_offset_checkpoint_state(
+        snapshot,
+        checkpoint_property=_CHECKPOINT_PROPERTY,
+        checkpoint_mode=_OFFSET_CHECKPOINT_MODE):
+    if checkpoint_property not in (snapshot.properties or {}):
         return False
     try:
         state = json.loads(
-            snapshot.properties[_CHECKPOINT_PROPERTY])
+            snapshot.properties[checkpoint_property])
     except Exception:
         return False
     return (
         state.get("version") == _OFFSET_CHECKPOINT_VERSION
-        and state.get("mode") == _OFFSET_CHECKPOINT_MODE
+        and state.get("mode") == checkpoint_mode
     )
 
 

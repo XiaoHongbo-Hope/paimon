@@ -500,6 +500,20 @@ class TestIncrementalRowIdCommitGuards(unittest.TestCase):
 
         self.assertIsNone(detection.check_external_rewrites(append))
 
+    def test_can_reject_external_appends(self):
+        checkpoint = _FakeSnapshot(
+            1, "APPEND", commit_user="operation")
+        append = _FakeSnapshot(2, "APPEND")
+        detection = self._detection(
+            [checkpoint, append], _FakeCommitScanner({}))
+        detection.protect_from_external_rewrites(
+            checkpoint, "operation", 0, reject_external_appends=True)
+
+        result = detection.check_external_rewrites(append)
+
+        self.assertIsNotNone(result)
+        self.assertIn("Concurrent target commit", str(result))
+
     def test_uses_planned_schema_instead_of_checkpoint_schema(self):
         schema1 = _FakeSchema(1, _DEFAULT_SCHEMA.fields)
         checkpoint = _FakeSnapshot(

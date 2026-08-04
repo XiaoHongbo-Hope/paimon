@@ -72,9 +72,11 @@ class TableCommit:
         return self
 
     def protect_from_external_rewrites(
-            self, checkpoint_snapshot, commit_user, schema_id):
+            self, checkpoint_snapshot, commit_user, schema_id,
+            reject_external_appends=False):
         self.file_store_commit.protect_from_external_rewrites(
-            checkpoint_snapshot, commit_user, schema_id)
+            checkpoint_snapshot, commit_user, schema_id,
+            reject_external_appends)
         return self
 
     def _commit(self, commit_messages: List[CommitMessage], commit_identifier: int = BATCH_COMMIT_IDENTIFIER):
