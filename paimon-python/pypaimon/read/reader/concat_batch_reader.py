@@ -49,6 +49,8 @@ class _BlobFileState:
         self.selected_range_index = 0
         self.selected_position_base = 0
 
+_MIN_BATCH_SIZE_TO_REFILL = 1024
+
 
 class ConcatBatchReader(RecordBatchReader):
 
