@@ -109,6 +109,7 @@ class FileStoreCommit:
         self.table: FileStoreTable = table
         self.commit_user = commit_user
         self.commit_callbacks: List[CommitCallback] = commit_callbacks if commit_callbacks is not None else []
+        self.snapshot_properties = {}
 
         self.snapshot_manager = table.snapshot_manager()
         self.manifest_file_manager = ManifestFileManager(table)
@@ -143,9 +144,37 @@ class FileStoreCommit:
         table_rollback = table.catalog_environment.catalog_table_rollback()
         self.rollback = CommitRollback(table_rollback) if table_rollback is not None else None
 
+    def with_snapshot_properties(self, properties):
+        self.snapshot_properties = dict(properties or {})
+
+    def protect_planned_row_id_files(
+            self, row_id_ranges, file_signatures):
+        self.conflict_detection.protect_planned_row_id_files(
+            row_id_ranges, file_signatures)
+
+    def protect_from_external_rewrites(
+            self, checkpoint_snapshot, commit_user, schema_id,
+            reject_external_appends=False):
+        self.conflict_detection.protect_from_external_rewrites(
+            checkpoint_snapshot, commit_user, schema_id,
+            reject_external_appends)
+
+    def clear_commit_context(self):
+        self.snapshot_properties = {}
+        self.conflict_detection.clear_resumable_commit_guards()
+
+    def commit_metadata(self, commit_identifier: int):
+        self._try_commit(
+            commit_kind="APPEND",
+            commit_identifier=commit_identifier,
+            commit_entries_plan=lambda _snapshot: [],
+            allow_empty=True,
+        )
+
     def commit(self, commit_messages: List[CommitMessage], commit_identifier: int):
         """Commit the given commit messages in normal append mode."""
         if not commit_messages:
+            self.clear_commit_context()
             return
 
         # Extract the minimum check_from_snapshot from commit messages
@@ -269,6 +298,8 @@ class FileStoreCommit:
                 index_adds=index_adds,
                 hash_index_base_snapshot=hash_index_base_snapshot,
             )
+        else:
+            self.clear_commit_context()
 
     @staticmethod
     def _hash_index_base_snapshot(
@@ -373,7 +404,7 @@ class FileStoreCommit:
     def _try_commit(self, commit_kind, commit_identifier, commit_entries_plan,
                     detect_conflicts=False, allow_rollback=False, index_deletes=None,
                     index_adds=None, changelog_entries=None,
-                    hash_index_base_snapshot=None):
+                    hash_index_base_snapshot=None, allow_empty=False):
 
         retry_count = 0
         retry_result = None
@@ -389,7 +420,11 @@ class FileStoreCommit:
 
             # No entries to commit (e.g. drop_partitions with no matching data): skip commit
             # to avoid creating manifest/snapshot with empty partition_stats (causes read errors).
-            if not commit_entries and not index_deletes and not index_adds:
+            if (not allow_empty
+                    and not commit_entries
+                    and not index_deletes
+                    and not index_adds):
+                self.clear_commit_context()
                 break
 
             result = self._try_commit_once(
@@ -411,6 +446,8 @@ class FileStoreCommit:
                 self.conflict_detection._row_id_check_from_snapshot = (
                     latest_snapshot.id
                 )
+                self.conflict_detection.refresh_planned_row_id_files(
+                    latest_snapshot)
                 # No snapshot commit was attempted for the conflicting files,
                 # so the rewritten attempt is still deterministic.
                 retry_result = None
@@ -435,6 +472,7 @@ class FileStoreCommit:
                         self.table.identifier,
                         commit_duration_ms,
                     )
+                self.clear_commit_context()
                 break
             else:
                 retry_result = result
@@ -479,6 +517,14 @@ class FileStoreCommit:
         start_millis = int(time.time() * 1000)
         if self._is_duplicate_commit(retry_result, latest_snapshot, commit_identifier, commit_kind):
             return SuccessResult()
+
+        rewrite_conflict = (
+            self.conflict_detection.check_external_rewrites(latest_snapshot))
+        if rewrite_conflict is not None:
+            if retry_result is None or retry_result.exception is None:
+                raise CommitConflictError(
+                    str(rewrite_conflict)) from rewrite_conflict
+            raise rewrite_conflict
 
         latest_snapshot_id = latest_snapshot.id if latest_snapshot else 0
         if (
@@ -568,6 +614,15 @@ class FileStoreCommit:
                 # callers do not delete files which a snapshot may reference.
                 raise conflict_exception
 
+        planned_conflict = (
+            self.conflict_detection.check_planned_row_id_files(
+                latest_snapshot))
+        if planned_conflict is not None:
+            if retry_result is None or retry_result.exception is None:
+                raise CommitConflictError(
+                    str(planned_conflict)) from planned_conflict
+            raise planned_conflict
+
         # Apply row tracking logic after conflict detection (matches Java ordering)
         row_tracking_enabled = self.table.options.row_tracking_enabled()
         next_row_id = None
@@ -646,6 +701,7 @@ class FileStoreCommit:
                 time_millis=int(time.time() * 1000),
                 next_row_id=next_row_id,
                 index_manifest=index_manifest,
+                properties=self.snapshot_properties,
             )
             # Generate partition statistics for the commit
             statistics = self._generate_partition_statistics(commit_entries)

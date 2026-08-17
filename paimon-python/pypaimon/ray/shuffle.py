@@ -126,6 +126,7 @@ def maybe_apply_repartition(
 def _group_by_partition_bucket(
         dataset: "ray.data.Dataset",
         table: "Table",
+        num_partitions=None,
 ):
     partition_keys = list(table.table_schema.partition_keys or [])
     extractor = table.create_row_key_extractor()
@@ -137,7 +138,8 @@ def _group_by_partition_bucket(
         bucket_udf, batch_format="pyarrow", zero_copy_batch=True,
     )
     group_keys: List[str] = partition_keys + [bucket_col]
-    return ds_with_bucket.groupby(group_keys), bucket_col
+    return ds_with_bucket.groupby(
+        group_keys, num_partitions=num_partitions), bucket_col
 
 
 def _identity_batch(batch: pa.Table) -> pa.Table:

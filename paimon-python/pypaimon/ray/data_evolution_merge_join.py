@@ -16,7 +16,7 @@
 # limitations under the License.
 ################################################################################
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pyarrow as pa
 
@@ -32,6 +32,21 @@ from pypaimon.ray.data_evolution_merge_transform import (
 )
 
 
+class GroupApplyError(RuntimeError):
+    """A file group failed after other groups may have completed."""
+
+
+def _group_error_text(error: BaseException) -> str:
+    import traceback
+
+    return "update_by_row_id file group failed: {}: {}\n{}".format(
+        type(error).__name__,
+        str(error),
+        "".join(traceback.format_exception(
+            type(error), error, error.__traceback__)),
+    )
+
+
 def _map_kwargs(
     ray_remote_args: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
@@ -42,6 +57,16 @@ def _map_kwargs(
     if ray_remote_args:
         kwargs.update(ray_remote_args)
     return kwargs
+
+
+def _sorted_range_membership(values, starts, ends):
+    import numpy as np
+
+    indices = np.searchsorted(ends, values, side="left")
+    matches = np.zeros(len(values), dtype=bool)
+    positions = np.flatnonzero(indices < len(starts))
+    matches[positions] = starts[indices[positions]] <= values[positions]
+    return matches
 
 
 def _resolve_source_projection(
@@ -445,6 +470,9 @@ def distributed_update_apply(
     ray_remote_args: Optional[Dict[str, Any]] = None,
     base_snapshot_id: Optional[int] = None,
     collect_row_ids: bool = False,
+    on_group_result: Optional[Callable[[list, int, list, list], None]] = None,
+    precomputed_files_info=None,
+    precomputed_info_ref=None,
 ) -> Tuple[list, int, list]:
     import numpy as np
     import pickle
@@ -455,6 +483,10 @@ def distributed_update_apply(
 
     from pypaimon.snapshot.snapshot import BATCH_COMMIT_IDENTIFIER
     from pypaimon.table.special_fields import SpecialFields
+    from pypaimon.utils.range import Range
+    from pypaimon.write.commit.conflict_detection import (
+        row_id_file_signature,
+    )
     from pypaimon.write.table_update_by_row_id import TableUpdateByRowId
 
     row_id_name = SpecialFields.ROW_ID.name
@@ -474,12 +506,16 @@ def distributed_update_apply(
         table.copy({CoreOptions.SCAN_SNAPSHOT_ID.key(): str(base_snapshot_id)})
         if base_snapshot_id is not None else table
     )
-    planner = TableUpdateByRowId(
-        scan_table,
-        "_merge_into_planner_" + uuid.uuid4().hex[:8],
-        BATCH_COMMIT_IDENTIFIER,
-    )
-    sorted_first_row_ids = list(planner.first_row_ids)
+    if precomputed_files_info is None:
+        planner = TableUpdateByRowId(
+            scan_table,
+            "_merge_into_planner_" + uuid.uuid4().hex[:8],
+            BATCH_COMMIT_IDENTIFIER,
+        )
+        files_info = planner._snapshot_files_info()
+    else:
+        files_info = precomputed_files_info
+    sorted_first_row_ids = list(files_info.first_row_ids)
     if not sorted_first_row_ids:
         return [], 0, []
 
@@ -487,7 +523,7 @@ def distributed_update_apply(
     # so concurrent commits between read and planner are detected.
     check_from_snapshot = (
         base_snapshot_id if base_snapshot_id is not None
-        else planner.snapshot_id
+        else files_info.snapshot_id
     )
 
     # Put file metadata into Ray's object store and pass a single ref to
@@ -496,16 +532,16 @@ def distributed_update_apply(
     # snapshot_id with the join's base snapshot so commit-time conflict
     # detection covers the read→planner window.
     from dataclasses import replace
-    files_info = replace(
-        planner._snapshot_files_info(),
-        snapshot_id=check_from_snapshot,
-    )
-    precomputed_info_ref = ray.put(files_info)
-
+    if precomputed_info_ref is None:
+        files_info = replace(
+            files_info,
+            snapshot_id=check_from_snapshot,
+        )
+        precomputed_info_ref = ray.put(files_info)
     frid_col = "_FIRST_ROW_ID"
     captured_sorted = sorted_first_row_ids
     captured_sorted_arr = np.asarray(captured_sorted, dtype=np.int64)
-    valid_ranges = planner.valid_row_id_ranges
+    valid_ranges = files_info.valid_row_id_ranges
     range_starts = np.asarray([r.from_ for r in valid_ranges], dtype=np.int64)
     range_ends = np.asarray([r.to for r in valid_ranges], dtype=np.int64)
 
@@ -521,10 +557,8 @@ def distributed_update_apply(
                 "or matched rows come from a different table."
             )
         rids = rid_col.to_numpy(zero_copy_only=False)
-        # Check each row_id belongs to a valid range (vectorized).
-        in_range = np.zeros(len(rids), dtype=bool)
-        for s, e in zip(range_starts, range_ends):
-            in_range |= (rids >= s) & (rids <= e)
+        in_range = _sorted_range_membership(
+            rids, range_starts, range_ends)
         if not in_range.all():
             bad = rids[~in_range][0]
             raise ValueError(
@@ -546,6 +580,22 @@ def distributed_update_apply(
 
     captured_table = table
     captured_cols = cols
+    capture_group_errors = on_group_result is not None
+
+    def _group_result(
+            msgs_blob,
+            n_updated,
+            row_ids_blob,
+            planned_files_blob,
+            error):
+        return pa.Table.from_pydict({
+            "msgs_blob": pa.array([msgs_blob], type=pa.binary()),
+            "n_updated": pa.array([n_updated], type=pa.int64()),
+            "row_ids_blob": pa.array([row_ids_blob], type=pa.binary()),
+            "planned_files_blob": pa.array(
+                [planned_files_blob], type=pa.binary()),
+            "error": pa.array([error], type=pa.string()),
+        })
 
     def _apply_group(group: pa.Table) -> pa.Table:
         if group.num_rows == 0:
@@ -553,39 +603,66 @@ def distributed_update_apply(
                 "msgs_blob": pa.array([], type=pa.binary()),
                 "n_updated": pa.array([], type=pa.int64()),
                 "row_ids_blob": pa.array([], type=pa.binary()),
+                "planned_files_blob": pa.array([], type=pa.binary()),
+                "error": pa.array([], type=pa.string()),
             })
 
-        if (
-            pc.count_distinct(group.column(row_id_name)).as_py()
-            != group.num_rows
-        ):
-            raise ValueError(
-                "MERGE matched multiple source rows to the same "
-                "target _ROW_ID. Deduplicate the source before "
-                "merging."
-            )
+        try:
+            if (
+                pc.count_distinct(group.column(row_id_name)).as_py()
+                != group.num_rows
+            ):
+                raise ValueError(
+                    "MERGE matched multiple source rows to the same "
+                    "target _ROW_ID. Deduplicate the source before "
+                    "merging."
+                )
 
-        for_update = group.drop_columns([frid_col])
-        row_ids = (
-            for_update.column(row_id_name).to_pylist()
-            if collect_row_ids else []
+            for_update = group.drop_columns([frid_col])
+            row_ids = (
+                for_update.column(row_id_name).to_pylist()
+                if collect_row_ids else []
+            )
+            first_row_id = group.column(frid_col)[0].as_py()
+            files_info = ray.get(precomputed_info_ref)
+            entry = files_info.first_row_id_index[first_row_id]
+            split, target_files = entry
+            planned_file_signatures = [
+                row_id_file_signature(
+                    split.partition, split.bucket, data_file)
+                for data_file in target_files
+            ]
+            group_ranges = Range.sort_and_merge_overlap([
+                data_file.row_id_range()
+                for data_file in target_files
+                if data_file.first_row_id is not None
+            ], True, True)
+            group_info = type(files_info)(
+                snapshot_id=check_from_snapshot,
+                first_row_ids=[first_row_id],
+                first_row_id_index={first_row_id: entry},
+                valid_row_id_ranges=group_ranges,
+            )
+            worker = TableUpdateByRowId(
+                captured_table,
+                "_merge_into_shard_" + uuid.uuid4().hex[:8],
+                BATCH_COMMIT_IDENTIFIER,
+                _precomputed_files_info=group_info,
+            )
+            msgs = worker.update_columns(for_update, list(captured_cols))
+        except Exception as error:
+            if not capture_group_errors:
+                raise
+            return _group_result(
+                b"", 0, b"", b"", _group_error_text(error))
+
+        return _group_result(
+            pickle.dumps(msgs),
+            for_update.num_rows,
+            pickle.dumps(row_ids),
+            pickle.dumps(planned_file_signatures),
+            None,
         )
-        worker = TableUpdateByRowId(
-            captured_table,
-            "_merge_into_shard_" + uuid.uuid4().hex[:8],
-            BATCH_COMMIT_IDENTIFIER,
-            _precomputed_files_info=ray.get(precomputed_info_ref),
-        )
-        msgs = worker.update_columns(for_update, list(captured_cols))
-        return pa.Table.from_pydict({
-            "msgs_blob": [pickle.dumps(msgs)],
-            "n_updated": pa.array(
-                [for_update.num_rows], type=pa.int64()
-            ),
-            "row_ids_blob": pa.array(
-                [pickle.dumps(row_ids)], type=pa.binary()
-            ),
-        })
 
     # One group per target data file; bounded by file count and num_partitions.
     group_partitions = max(
@@ -598,14 +675,35 @@ def distributed_update_apply(
     all_msgs: list = []
     num_updated = 0
     action_row_ids = []
+    group_error = None
     for batch in msgs_ds.iter_batches(batch_format="pyarrow"):
-        for blob in batch.column("msgs_blob").to_pylist():
-            all_msgs.extend(pickle.loads(blob))
-        for n in batch.column("n_updated").to_pylist():
+        for result in batch.to_pylist():
+            error = result["error"]
+            if error is not None:
+                if group_error is None:
+                    group_error = error
+                continue
+            group_msgs = pickle.loads(result["msgs_blob"])
+            group_row_ids = (
+                pickle.loads(result["row_ids_blob"])
+                if collect_row_ids else []
+            )
+            planned_file_signatures = pickle.loads(
+                result["planned_files_blob"])
+            n = result["n_updated"]
+            if on_group_result is None:
+                all_msgs.extend(group_msgs)
+            else:
+                on_group_result(
+                    group_msgs,
+                    n,
+                    group_row_ids,
+                    planned_file_signatures,
+                )
             num_updated += n
-        if collect_row_ids:
-            for blob in batch.column("row_ids_blob").to_pylist():
-                action_row_ids.extend(pickle.loads(blob))
+            action_row_ids.extend(group_row_ids)
+    if group_error is not None:
+        raise GroupApplyError(group_error)
     return all_msgs, num_updated, action_row_ids
 
 
@@ -632,6 +730,8 @@ def distributed_read_by_row_id(
     num_partitions: int,
     ray_remote_args: Optional[Dict[str, Any]] = None,
     base_snapshot_id: Optional[int] = None,
+    precomputed_files_info=None,
+    precomputed_info_ref=None,
 ):
     """Read ``projection`` for the ``_ROW_ID``s in ``row_ids_ds``, routing each to its
     owning file and reading only the matched rows via ``IndexedSplit`` slicing (blob
@@ -664,19 +764,24 @@ def distributed_read_by_row_id(
         table.copy({CoreOptions.SCAN_SNAPSHOT_ID.key(): str(base_snapshot_id)})
         if base_snapshot_id is not None else table
     )
-    planner = TableUpdateByRowId(
-        scan_table,
-        "_read_by_row_id_planner_" + uuid.uuid4().hex[:8],
-        BATCH_COMMIT_IDENTIFIER,
-    )
-    sorted_first_row_ids = list(planner.first_row_ids)
+    if precomputed_files_info is None:
+        planner = TableUpdateByRowId(
+            scan_table,
+            "_read_by_row_id_planner_" + uuid.uuid4().hex[:8],
+            BATCH_COMMIT_IDENTIFIER,
+        )
+        files_info = planner._snapshot_files_info()
+    else:
+        files_info = precomputed_files_info
+    sorted_first_row_ids = list(files_info.first_row_ids)
     if not sorted_first_row_ids:
         return None
 
-    precomputed_info_ref = ray.put(planner._snapshot_files_info())
+    if precomputed_info_ref is None:
+        precomputed_info_ref = ray.put(files_info)
     frid_col = "_FIRST_ROW_ID"
     sorted_arr = np.asarray(sorted_first_row_ids, dtype=np.int64)
-    valid_ranges = planner.valid_row_id_ranges
+    valid_ranges = files_info.valid_row_id_ranges
     range_starts = np.asarray([r.from_ for r in valid_ranges], dtype=np.int64)
     range_ends = np.asarray([r.to for r in valid_ranges], dtype=np.int64)
 
