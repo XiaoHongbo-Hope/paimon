@@ -560,6 +560,9 @@ counts the rows actually updated or deleted (after condition filtering).
 For an end-to-end feature update workflow on Blob tables, see
 [Distributed Feature Backfill with Ray](../learn-paimon/scenario-guide#distributed-feature-backfill-with-ray).
 
+For an end-to-end feature update workflow on Blob tables, see
+[Distributed Feature Backfill with Ray](../learn-paimon/scenario-guide#distributed-feature-backfill-with-ray).
+
 **Notes:**
 - Partition key columns cannot be updated by matched update clauses, because
   cross-partition row movement is not implemented. Matched delete clauses and
