@@ -250,7 +250,11 @@ class FileStoreCommit:
         table_rollback = table.catalog_environment.catalog_table_rollback()
         self.rollback = CommitRollback(table_rollback) if table_rollback is not None else None
 
-    def commit(self, commit_messages: List[CommitMessage], commit_identifier: int):
+    def commit(
+            self,
+            commit_messages: List[CommitMessage],
+            commit_identifier: int,
+            expected_base_snapshot_id: Optional[int] = None):
         """Commit the given commit messages in normal append mode."""
         if not commit_messages:
             return
@@ -331,7 +335,8 @@ class FileStoreCommit:
                          allow_rollback=allow_rollback,
                          index_deletes=index_deletes,
                          index_adds=index_adds,
-                         hash_index_base_snapshot=hash_index_base_snapshot)
+                         hash_index_base_snapshot=hash_index_base_snapshot,
+                         expected_base_snapshot_id=expected_base_snapshot_id)
 
     def overwrite(self, overwrite_partition, commit_messages: List[CommitMessage], commit_identifier: int):
         """Commit the given commit messages in overwrite mode."""
@@ -484,7 +489,8 @@ class FileStoreCommit:
     def _try_commit(self, commit_kind, commit_identifier, commit_entries_plan,
                     detect_conflicts=False, allow_rollback=False, index_deletes=None,
                     index_adds=None, changelog_entries=None,
-                    hash_index_base_snapshot=None):
+                    hash_index_base_snapshot=None,
+                    expected_base_snapshot_id=None):
 
         retry_count = 0
         retry_result = None
@@ -518,6 +524,7 @@ class FileStoreCommit:
                 index_adds=index_adds,
                 hash_index_base_snapshot=hash_index_base_snapshot,
                 commit_result_may_be_uncertain=commit_result_may_be_uncertain,
+                expected_base_snapshot_id=expected_base_snapshot_id,
             )
 
             if isinstance(result, RewriteResult):
@@ -596,13 +603,20 @@ class FileStoreCommit:
                          index_deletes=None,
                          index_adds=None,
                          hash_index_base_snapshot=None,
-                         commit_result_may_be_uncertain: bool = False) -> CommitResult:
+                         commit_result_may_be_uncertain: bool = False,
+                         expected_base_snapshot_id=None) -> CommitResult:
         start_millis = int(time.time() * 1000)
         if self._is_duplicate_commit(
                 retry_result, latest_snapshot, commit_identifier, commit_kind):
             return SuccessResult()
 
         latest_snapshot_id = latest_snapshot.id if latest_snapshot else 0
+        if (expected_base_snapshot_id is not None
+                and latest_snapshot_id != expected_base_snapshot_id):
+            raise RuntimeError(
+                "Conditional commit conflict: expected base snapshot {}, "
+                "found {}.".format(
+                    expected_base_snapshot_id, latest_snapshot_id))
         if (
             hash_index_base_snapshot is not None
             and latest_snapshot_id != hash_index_base_snapshot

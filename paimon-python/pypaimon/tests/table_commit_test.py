@@ -88,6 +88,19 @@ class TestTableCommitEmptyOverwrite(unittest.TestCase):
             mock_fsc.commit.assert_not_called()
             mock_fsc.overwrite.assert_not_called()
 
+    def test_append_forwards_expected_base_snapshot(self):
+        commit, mock_fsc = self._create_commit(
+            BatchTableCommit, overwrite_partition=None)
+        message = CommitMessage(partition=(), bucket=0, new_files=[Mock()])
+
+        commit.commit([message], expected_base_snapshot_id=0)
+
+        mock_fsc.commit.assert_called_once_with(
+            commit_messages=[message],
+            commit_identifier=BATCH_COMMIT_IDENTIFIER,
+            expected_base_snapshot_id=0,
+        )
+
     # -- StreamTableCommit overwrite should also reach overwrite() with empty messages --
 
     def test_stream_commit_overwrite_empty_messages(self):

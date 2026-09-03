@@ -333,6 +333,16 @@ class LeRobotValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "video feature camera.*not supported"):
             _schema_from_info(info)
 
+    def test_schema_rejects_coercible_non_integer_shapes(self):
+        for shape in ([1.5], [True], ["1"]):
+            with self.subTest(shape=shape):
+                with self.assertRaisesRegex(ValueError, "invalid shape"):
+                    _schema_from_info({
+                        "features": {
+                            "index": {"dtype": "int64", "shape": shape},
+                        },
+                    })
+
     def test_existing_schema_preserves_lerobot_feature_contract(self):
         source = _schema_from_info({
             "features": {
@@ -1482,6 +1492,40 @@ class LeRobotImportTest(unittest.TestCase):
         self.connection.get_table("failed_publish")
         self.assertEqual([], _catalog_rows(
             self.connection, "failed_publish__versions"))
+
+    def test_concurrent_manifest_append_prevents_publication(self):
+        from pypaimon.multimodal.lerobot import metadata
+
+        create_tag = metadata._create_tag
+        injected = [False]
+
+        def create_tag_and_inject(*args, **kwargs):
+            result = create_tag(*args, **kwargs)
+            if not injected[0]:
+                injected[0] = True
+                self.connection.get_table(
+                    "manifest_race__versions").add(pa.table({
+                        "version_id": pa.array([99], type=pa.int64()),
+                        "info_json": ["{}"],
+                        "stats_json": pa.array([None], type=pa.string()),
+                        "has_subtasks": [False],
+                    }))
+            return result
+
+        with patch.object(
+                metadata,
+                "_create_tag",
+                side_effect=create_tag_and_inject):
+            with self.assertRaisesRegex(
+                    RuntimeError, "Conditional commit conflict"):
+                self.connection.load_from_lerobot(
+                    "manifest_race", self.image_source)
+
+        self.assertEqual(
+            [99],
+            [row["version_id"] for row in _catalog_rows(
+                self.connection, "manifest_race__versions")],
+        )
 
     def test_existing_companion_is_rejected(self):
         self.connection.load_from_lerobot(

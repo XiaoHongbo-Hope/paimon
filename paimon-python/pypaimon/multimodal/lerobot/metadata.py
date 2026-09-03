@@ -272,8 +272,12 @@ def _publish_dataset(
         _create_tag(connection.catalog, identifier, tag, snapshot_id)
 
     manifest = _manifest_row(version_id, metadata)
-    _append_arrow(tables["versions"], pa.Table.from_pylist(
-        [manifest], schema=_VERSIONS_SCHEMA))
+    versions_snapshot_id = _append_arrow_tables(
+        tables["versions"],
+        [pa.Table.from_pylist([manifest], schema=_VERSIONS_SCHEMA)],
+        expected_base_snapshot_id=0,
+    )
+    _require_initial_snapshot("versions", versions_snapshot_id)
 
 
 def _require_initial_snapshot(component, snapshot_id):
@@ -302,7 +306,10 @@ def _append_arrow(table, data):
     return _append_arrow_tables(table, [data])
 
 
-def _append_arrow_tables(table, tables):
+def _append_arrow_tables(
+        table,
+        tables,
+        expected_base_snapshot_id=None):
     builder = table.new_batch_write_builder()
     table_write = None
     table_commit = None
@@ -329,7 +336,13 @@ def _append_arrow_tables(table, tables):
             return None
         messages = table_write.prepare_commit()
         commit_started = True
-        table_commit.commit(messages)
+        if expected_base_snapshot_id is None:
+            table_commit.commit(messages)
+        else:
+            table_commit.commit(
+                messages,
+                expected_base_snapshot_id=expected_base_snapshot_id,
+            )
         if recorder.snapshot_id is None:
             raise RuntimeError("LeRobot metadata commit has no snapshot id.")
         return recorder.snapshot_id

@@ -17,6 +17,7 @@
 """LeRobot metadata validation and Arrow schema conversion."""
 
 import json
+from numbers import Integral
 
 import pyarrow as pa
 
@@ -165,16 +166,12 @@ def _feature_shape(feature, name):
     if not isinstance(shape, (list, tuple)):
         raise ValueError(
             "LeRobot feature %s has an invalid shape: %r" % (name, shape))
-    try:
-        result = tuple(int(size) for size in shape)
-    except (TypeError, ValueError) as error:
-        raise ValueError(
-            "LeRobot feature %s has an invalid shape: %r"
-            % (name, shape)) from error
-    if any(size <= 0 for size in result):
+    if any(isinstance(size, bool)
+           or not isinstance(size, Integral)
+           or size <= 0 for size in shape):
         raise ValueError(
             "LeRobot feature %s has an invalid shape: %r" % (name, shape))
-    return result
+    return tuple(int(size) for size in shape)
 
 
 def _tensor_type(scalar_type, shape):

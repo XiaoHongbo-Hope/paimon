@@ -60,13 +60,20 @@ class TableCommit:
         """Register a callback to be invoked after each successful commit."""
         self._commit_callbacks.append(callback)
 
-    def _commit(self, commit_messages: List[CommitMessage], commit_identifier: int = BATCH_COMMIT_IDENTIFIER):
+    def _commit(
+            self,
+            commit_messages: List[CommitMessage],
+            commit_identifier: int = BATCH_COMMIT_IDENTIFIER,
+            expected_base_snapshot_id: Optional[int] = None):
         non_empty_messages = [msg for msg in commit_messages if not msg.is_empty()]
 
         # Never abort files in response to a commit exception. Preserving
         # possible orphan files is safer than deleting files which another
         # attempt may still commit or which a snapshot may already reference.
         if self.overwrite_partition is not None:
+            if expected_base_snapshot_id is not None:
+                raise ValueError(
+                    "expected_base_snapshot_id is only supported for append commits.")
             # Always call overwrite() even with empty messages, so that
             # FileStoreCommit.overwrite can handle the empty case properly
             # (e.g. static overwrite with empty data should delete the partition).
@@ -86,10 +93,15 @@ class TableCommit:
                 "Committing table %s, %d non-empty messages",
                 self.table.identifier, len(non_empty_messages)
             )
-            self.file_store_commit.commit(
-                commit_messages=non_empty_messages,
-                commit_identifier=commit_identifier
-            )
+            if expected_base_snapshot_id is None:
+                self.file_store_commit.commit(
+                    commit_messages=non_empty_messages,
+                    commit_identifier=commit_identifier)
+            else:
+                self.file_store_commit.commit(
+                    commit_messages=non_empty_messages,
+                    commit_identifier=commit_identifier,
+                    expected_base_snapshot_id=expected_base_snapshot_id)
 
     def abort(self, commit_messages: List[CommitMessage]):
         self.file_store_commit.abort(commit_messages)
@@ -105,9 +117,16 @@ class BatchTableCommit(TableCommit):
         super().__init__(table, commit_user, static_partition)
         self.batch_committed = False
 
-    def commit(self, commit_messages: List[CommitMessage]):
+    def commit(
+            self,
+            commit_messages: List[CommitMessage],
+            expected_base_snapshot_id: Optional[int] = None):
         self._check_committed()
-        self._commit(commit_messages, BATCH_COMMIT_IDENTIFIER)
+        self._commit(
+            commit_messages,
+            BATCH_COMMIT_IDENTIFIER,
+            expected_base_snapshot_id,
+        )
 
     def truncate_table(self) -> None:
         """Truncate the entire table, deleting all data."""

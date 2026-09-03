@@ -256,6 +256,22 @@ class TestFileStoreCommitRowTracking(unittest.TestCase):
              for entry in written_entries],
         )
 
+    def test_conditional_commit_rejects_different_base_snapshot(self):
+        file_store_commit = self._create_file_store_commit()
+        latest_snapshot = Mock(id=1)
+
+        with self.assertRaisesRegex(
+                RuntimeError, "expected base snapshot 0, found 1"):
+            file_store_commit._try_commit_once(
+                retry_result=None,
+                commit_kind="APPEND",
+                commit_entries=[],
+                changelog_entries=[],
+                commit_identifier=11,
+                latest_snapshot=latest_snapshot,
+                expected_base_snapshot_id=0,
+            )
+
 
 @patch('pypaimon.write.file_store_commit.ManifestFileManager')
 @patch('pypaimon.write.file_store_commit.ManifestListManager')
