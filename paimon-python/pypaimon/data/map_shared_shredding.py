@@ -179,7 +179,7 @@ def assemble_shared_shredding_map(
         if indices:
             selected = pc.take(source, pa.array(indices, type=pa.int64()))
             selected_values.append(
-                _restore_orc_time_values(selected, map_type.item_type))
+                _restore_orc_temporal_values(selected, map_type.item_type))
         else:
             selected_values.append(pa.array([], type=map_type.item_type))
 
@@ -211,18 +211,21 @@ def assemble_shared_shredding_map(
     )
 
 
-def _restore_orc_time_values(column, logical_type):
-    """Restore TIME values which ORC stores as int32 milliseconds."""
+def _restore_orc_temporal_values(column, logical_type):
+    """Restore logical temporal types from their ORC representations."""
     if column.type == logical_type:
         return column
     if pa.types.is_time(logical_type) and pa.types.is_int32(column.type):
+        return column.cast(logical_type)
+    if (pa.types.is_timestamp(logical_type)
+            and pa.types.is_timestamp(column.type)):
         return column.cast(logical_type)
     if pa.types.is_struct(logical_type) and pa.types.is_struct(column.type):
         if len(column.type) != len(logical_type):
             return column
         fields = list(logical_type)
         children = [
-            _restore_orc_time_values(column.field(i), field.type)
+            _restore_orc_temporal_values(column.field(i), field.type)
             for i, field in enumerate(fields)
         ]
         mask = column.is_null() if column.null_count else None
@@ -232,7 +235,7 @@ def _restore_orc_time_values(column, logical_type):
                 and pa.types.is_large_list(column.type))):
         offsets, start, end = _normalized_offsets(column)
         offsets = _nullable_offsets(column, offsets, logical_type)
-        values = _restore_orc_time_values(
+        values = _restore_orc_temporal_values(
             column.values.slice(start, end - start), logical_type.value_type)
         result = (pa.LargeListArray.from_arrays(offsets, values)
                   if pa.types.is_large_list(logical_type)
@@ -247,9 +250,9 @@ def _restore_orc_time_values(column, logical_type):
     if pa.types.is_map(logical_type) and pa.types.is_map(column.type):
         offsets, start, end = _normalized_offsets(column)
         offsets = _nullable_offsets(column, offsets, logical_type)
-        keys = _restore_orc_time_values(
+        keys = _restore_orc_temporal_values(
             column.keys.slice(start, end - start), logical_type.key_type)
-        items = _restore_orc_time_values(
+        items = _restore_orc_temporal_values(
             column.items.slice(start, end - start), logical_type.item_type)
         result = pa.MapArray.from_arrays(offsets, keys, items)
         entries = pa.StructArray.from_arrays(

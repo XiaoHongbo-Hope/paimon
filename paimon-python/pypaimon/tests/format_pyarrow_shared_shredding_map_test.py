@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import base64
-from datetime import time
+from datetime import datetime, time, timezone
 import json
 import os
 import shutil
@@ -31,6 +31,7 @@ import pyarrow.parquet as pq
 
 from pypaimon.read.reader.format_pyarrow_reader import FormatPyArrowReader
 from pypaimon.schema.data_types import (
+    ArrayType,
     AtomicType,
     DataField,
     MapType,
@@ -207,6 +208,97 @@ class SharedShreddingMapReaderTest(unittest.TestCase):
         path = os.path.join(self.tmp, "time.orc")
         orc.write_table(pa.table({"content_refs": physical}), path)
 
+        result = self._read_orc_shared_map(path, AtomicType("TIME(3)"))
+
+        self.assertEqual(pa.map_(pa.string(), pa.time32("ms")), result.type)
+        self.assertEqual(
+            [[("camera", time(0, 0, 1, 234000)),
+              ("action", time(0, 0, 5, 678000))]],
+            result.to_pylist(),
+        )
+
+    def test_restores_timestamp_precision_from_orc(self):
+        camera_timestamp = datetime(2024, 1, 2, 3, 4, 5, 123000)
+        action_timestamp = datetime(2024, 1, 2, 3, 4, 5, 678000)
+        physical = pa.StructArray.from_arrays(
+            [
+                pa.array([[0, -1]], type=pa.list_(pa.int32())),
+                pa.array([camera_timestamp], type=pa.timestamp("ns")),
+                pa.array([None], type=pa.timestamp("ns")),
+                pa.array(
+                    [[(2, action_timestamp)]],
+                    type=pa.map_(pa.int32(), pa.timestamp("ns")),
+                ),
+            ],
+            names=["__field_mapping", "__col_0", "__col_1", "__overflow"],
+        )
+        path = os.path.join(self.tmp, "timestamp.orc")
+        orc.write_table(pa.table({"content_refs": physical}), path)
+
+        result = self._read_orc_shared_map(
+            path, AtomicType("TIMESTAMP(3)"))
+
+        self.assertEqual(
+            pa.map_(pa.string(), pa.timestamp("ms")), result.type)
+        self.assertEqual(
+            [[("camera", camera_timestamp), ("action", action_timestamp)]],
+            result.to_pylist(),
+        )
+
+    def test_restores_nested_timestamp_values_from_orc(self):
+        camera_timestamp = datetime(2024, 1, 2, 3, 4, 5, 123000)
+        history_timestamp = datetime(
+            2024, 1, 2, 3, 4, 5, 123456, tzinfo=timezone.utc)
+        physical_value_type = pa.struct([
+            pa.field("captured_at", pa.timestamp("ns")),
+            pa.field("history", pa.list_(pa.timestamp("ns", tz="UTC"))),
+        ])
+        physical = pa.StructArray.from_arrays(
+            [
+                pa.array([[0, -1]], type=pa.list_(pa.int32())),
+                pa.array(
+                    [{
+                        "captured_at": camera_timestamp,
+                        "history": [history_timestamp],
+                    }],
+                    type=physical_value_type,
+                ),
+                pa.array([None], type=physical_value_type),
+                pa.array(
+                    [[]], type=pa.map_(pa.int32(), physical_value_type)),
+            ],
+            names=["__field_mapping", "__col_0", "__col_1", "__overflow"],
+        )
+        path = os.path.join(self.tmp, "nested-timestamp.orc")
+        orc.write_table(pa.table({"content_refs": physical}), path)
+        logical_value_type = RowType(True, [
+            DataField(1, "captured_at", AtomicType("TIMESTAMP(3)")),
+            DataField(
+                2,
+                "history",
+                ArrayType(True, AtomicType("TIMESTAMP_LTZ(6)")),
+            ),
+        ])
+
+        result = self._read_orc_shared_map(path, logical_value_type)
+
+        self.assertEqual(
+            pa.struct([
+                pa.field("captured_at", pa.timestamp("ms")),
+                pa.field(
+                    "history", pa.list_(pa.timestamp("us", tz="UTC"))),
+            ]),
+            result.type.item_type,
+        )
+        self.assertEqual(
+            [[("camera", {
+                "captured_at": camera_timestamp,
+                "history": [history_timestamp],
+            })]],
+            result.to_pylist(),
+        )
+
+    def _read_orc_shared_map(self, path, value_type):
         physical_field = orc.ORCFile(path).schema.field("content_refs")
         metadata_field = pa.field(
             "content_refs", physical_field.type, metadata=_metadata("none"))
@@ -227,19 +319,12 @@ class SharedShreddingMapReaderTest(unittest.TestCase):
                     MapType(
                         True,
                         AtomicType("STRING", False),
-                        AtomicType("TIME(3)"),
+                        value_type,
                     ),
                 )],
                 None,
             )
-            result = reader.read_arrow_batch().column(0)
-
-        self.assertEqual(pa.map_(pa.string(), pa.time32("ms")), result.type)
-        self.assertEqual(
-            [[("camera", time(0, 0, 1, 234000)),
-              ("action", time(0, 0, 5, 678000))]],
-            result.to_pylist(),
-        )
+            return reader.read_arrow_batch().column(0)
 
     def test_leaves_normal_map_unchanged(self):
         path = os.path.join(self.tmp, "normal.parquet")
