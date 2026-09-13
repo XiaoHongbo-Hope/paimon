@@ -326,6 +326,57 @@ class SharedShreddingMapReaderTest(unittest.TestCase):
             )
             return reader.read_arrow_batch().column(0)
 
+    def test_restores_map_with_nested_projection_alias(self):
+        physical = pa.StructArray.from_arrays(
+            [
+                pa.array([[0, -1]], type=pa.list_(pa.int32())),
+                pa.array([10], type=pa.int64()),
+                pa.array([None], type=pa.int64()),
+                pa.array([[]], type=pa.map_(pa.int32(), pa.int64())),
+            ],
+            names=["__field_mapping", "__col_0", "__col_1", "__overflow"],
+        )
+        nested = pa.StructArray.from_arrays(
+            [pa.array([7], type=pa.int64())], names=["b"])
+        path = os.path.join(self.tmp, "nested-alias.parquet")
+        pq.write_table(
+            pa.Table.from_arrays(
+                [nested, physical],
+                schema=pa.schema([
+                    pa.field("a", nested.type),
+                    pa.field(
+                        "a_b", physical.type, metadata=_metadata("none")),
+                ]),
+            ),
+            path,
+        )
+
+        reader = FormatPyArrowReader(
+            _LocalFileIO(),
+            "parquet",
+            path,
+            [
+                DataField(1, "a_b", AtomicType("BIGINT")),
+                DataField(
+                    2,
+                    "a_b__0",
+                    MapType(
+                        True,
+                        AtomicType("STRING", False),
+                        AtomicType("BIGINT"),
+                    ),
+                ),
+            ],
+            None,
+            nested_name_paths=[["a", "b"], ["a_b"]],
+        )
+        batch = reader.read_arrow_batch()
+
+        self.assertEqual(["a_b", "a_b__0"], batch.schema.names)
+        self.assertEqual([7], batch.column(0).to_pylist())
+        self.assertEqual(
+            [[("camera", 10)]], batch.column(1).to_pylist())
+
     def test_leaves_normal_map_unchanged(self):
         path = os.path.join(self.tmp, "normal.parquet")
         pq.write_table(

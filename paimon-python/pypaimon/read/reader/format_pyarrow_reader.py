@@ -427,24 +427,50 @@ class FormatPyArrowReader(RecordBatchReader):
             options is None or options.variant_shredding_enabled())
         self._variant_schema_cache: Dict[pa.DataType, VariantSchema] = {}
         self._shared_shredding_maps = {}
-        logical_types = {field.name: field.type for field in read_fields}
+        logical_maps_by_source = {}
+        if nested_name_paths is None:
+            source_names = [field.name for field in read_fields]
+        else:
+            source_names = [
+                path[0] if len(path) == 1 else None
+                for path in nested_name_paths
+            ]
+        for logical_field, source_name in zip(read_fields, source_names):
+            if (source_name is not None
+                    and isinstance(logical_field.type, MapType)):
+                logical_maps_by_source.setdefault(source_name, []).append(
+                    logical_field)
         for field in metadata_schema:
-            logical_type = logical_types.get(field.name)
-            if isinstance(logical_type, MapType) and is_shared_shredding(field):
-                logical_arrow_type = PyarrowFieldParser.from_paimon_type(logical_type)
+            logical_fields = logical_maps_by_source.get(field.name, [])
+            if logical_fields and is_shared_shredding(field):
                 metadata = parse_shared_shredding_metadata(field)
-                self._shared_shredding_maps[field.name] = (
-                    logical_arrow_type, metadata)
+                for logical_field in logical_fields:
+                    logical_arrow_type = PyarrowFieldParser.from_paimon_type(
+                        logical_field.type)
+                    self._shared_shredding_maps[logical_field.name] = (
+                        logical_arrow_type, metadata)
 
         self._bounded_variant_read = (
             self._file_format == 'parquet' and self._has_projected_variant())
+        self._select_nested_after_scan = False
         if has_nested_path and not self._bounded_variant_read:
             existing_set = set(self.existing_fields)
             columns_dict = {}
-            for f, path in zip(read_fields, nested_name_paths):
-                if f.name in existing_set:
-                    columns_dict[f.name] = ds.field(*path)
-            self._scan_columns = columns_dict
+            try:
+                for f, path in zip(read_fields, nested_name_paths):
+                    if f.name in existing_set:
+                        columns_dict[f.name] = ds.field(*path)
+                self._scan_columns = columns_dict
+            except TypeError:
+                # PyArrow 6 only accepts one field name and cannot build a
+                # nested FieldRef. Read the required top-level columns and
+                # extract their children after scanning instead.
+                self._scan_columns = []
+                for f, path in zip(read_fields, nested_name_paths):
+                    if (f.name in existing_set
+                            and path[0] not in self._scan_columns):
+                        self._scan_columns.append(path[0])
+                self._select_nested_after_scan = True
         elif has_nested_path:
             self._scan_columns = None
         else:
@@ -475,7 +501,12 @@ class FormatPyArrowReader(RecordBatchReader):
                 filter=self._scan_filter,
                 batch_size=self._scan_batch_size,
             ).to_reader()
-            self._raw_batches = self._iter_reader_batches(reader)
+            raw_batches = self._iter_reader_batches(reader)
+            if self._select_nested_after_scan:
+                raw_batches = (
+                    self._select_nested_fields(batch)
+                    for batch in raw_batches)
+            self._raw_batches = raw_batches
 
     def _has_projected_variant(self) -> bool:
         return any(
