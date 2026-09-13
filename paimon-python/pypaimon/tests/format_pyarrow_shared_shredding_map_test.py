@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import base64
+from datetime import time
 import json
 import os
 import shutil
@@ -191,6 +192,55 @@ class SharedShreddingMapReaderTest(unittest.TestCase):
             self._assert_complete_map(
                 "orc", "none", expected, path=path)
 
+    def test_restores_time_values_from_orc(self):
+        overflow = pa.array(
+            [[(2, 5678)]], type=pa.map_(pa.int32(), pa.int32()))
+        physical = pa.StructArray.from_arrays(
+            [
+                pa.array([[0, -1]], type=pa.list_(pa.int32())),
+                pa.array([1234], type=pa.int32()),
+                pa.array([None], type=pa.int32()),
+                overflow,
+            ],
+            names=["__field_mapping", "__col_0", "__col_1", "__overflow"],
+        )
+        path = os.path.join(self.tmp, "time.orc")
+        orc.write_table(pa.table({"content_refs": physical}), path)
+
+        physical_field = orc.ORCFile(path).schema.field("content_refs")
+        metadata_field = pa.field(
+            "content_refs", physical_field.type, metadata=_metadata("none"))
+        arrow_schema = base64.b64encode(
+            pa.schema([metadata_field]).serialize().to_pybytes())
+        metadata = mock.Mock()
+        metadata.get.side_effect = lambda key: (
+            arrow_schema if key in (b"ARROW:schema", "ARROW:schema") else None)
+
+        with mock.patch(
+                "pyarrow.orc.ORCFile",
+                return_value=mock.Mock(metadata=metadata)):
+            reader = FormatPyArrowReader(
+                _LocalFileIO(), "orc", path,
+                [DataField(
+                    0,
+                    "content_refs",
+                    MapType(
+                        True,
+                        AtomicType("STRING", False),
+                        AtomicType("TIME(3)"),
+                    ),
+                )],
+                None,
+            )
+            result = reader.read_arrow_batch().column(0)
+
+        self.assertEqual(pa.map_(pa.string(), pa.time32("ms")), result.type)
+        self.assertEqual(
+            [[("camera", time(0, 0, 1, 234000)),
+              ("action", time(0, 0, 5, 678000))]],
+            result.to_pylist(),
+        )
+
     def test_leaves_normal_map_unchanged(self):
         path = os.path.join(self.tmp, "normal.parquet")
         pq.write_table(
@@ -202,7 +252,10 @@ class SharedShreddingMapReaderTest(unittest.TestCase):
             _LocalFileIO(), "parquet", path,
             [DataField(
                 0, "content_refs",
-                MapType(True, AtomicType("STRING", False), AtomicType("BIGINT")))],
+                MapType(
+                    True,
+                    AtomicType("STRING", False),
+                    AtomicType("BIGINT")))],
             None,
         )
         self.assertEqual(

@@ -177,7 +177,9 @@ def assemble_shared_shredding_map(
     for source, indices in zip(sources, selected_indices):
         source_bases.append(sum(len(values) for values in selected_values))
         if indices:
-            selected_values.append(pc.take(source, pa.array(indices, type=pa.int64())))
+            selected = pc.take(source, pa.array(indices, type=pa.int64()))
+            selected_values.append(
+                _restore_orc_time_values(selected, map_type.item_type))
         else:
             selected_values.append(pa.array([], type=map_type.item_type))
 
@@ -207,6 +209,70 @@ def assemble_shared_shredding_map(
         null_count=result.null_count,
         children=[entries],
     )
+
+
+def _restore_orc_time_values(column, logical_type):
+    """Restore TIME values which ORC stores as int32 milliseconds."""
+    if column.type == logical_type:
+        return column
+    if pa.types.is_time(logical_type) and pa.types.is_int32(column.type):
+        return column.cast(logical_type)
+    if pa.types.is_struct(logical_type) and pa.types.is_struct(column.type):
+        if len(column.type) != len(logical_type):
+            return column
+        fields = list(logical_type)
+        children = [
+            _restore_orc_time_values(column.field(i), field.type)
+            for i, field in enumerate(fields)
+        ]
+        mask = column.is_null() if column.null_count else None
+        return pa.StructArray.from_arrays(children, fields=fields, mask=mask)
+    if ((pa.types.is_list(logical_type) and pa.types.is_list(column.type))
+            or (pa.types.is_large_list(logical_type)
+                and pa.types.is_large_list(column.type))):
+        offsets, start, end = _normalized_offsets(column)
+        offsets = _nullable_offsets(column, offsets, logical_type)
+        values = _restore_orc_time_values(
+            column.values.slice(start, end - start), logical_type.value_type)
+        result = (pa.LargeListArray.from_arrays(offsets, values)
+                  if pa.types.is_large_list(logical_type)
+                  else pa.ListArray.from_arrays(offsets, values))
+        return pa.Array.from_buffers(
+            logical_type,
+            len(result),
+            result.buffers()[:2],
+            null_count=result.null_count,
+            children=[values],
+        )
+    if pa.types.is_map(logical_type) and pa.types.is_map(column.type):
+        offsets, start, end = _normalized_offsets(column)
+        offsets = _nullable_offsets(column, offsets, logical_type)
+        keys = _restore_orc_time_values(
+            column.keys.slice(start, end - start), logical_type.key_type)
+        items = _restore_orc_time_values(
+            column.items.slice(start, end - start), logical_type.item_type)
+        result = pa.MapArray.from_arrays(offsets, keys, items)
+        entries = pa.StructArray.from_arrays(
+            [keys, items],
+            fields=[logical_type.key_field, logical_type.item_field],
+        )
+        return pa.Array.from_buffers(
+            logical_type,
+            len(result),
+            result.buffers()[:2],
+            null_count=result.null_count,
+            children=[entries],
+        )
+    return column
+
+
+def _nullable_offsets(column, offsets, logical_type):
+    for index, is_null in enumerate(column.is_null().to_pylist()):
+        if is_null:
+            offsets[index] = None
+    offset_type = (pa.int64() if pa.types.is_large_list(logical_type)
+                   else pa.int32())
+    return pa.array(offsets, type=offset_type)
 
 
 def _append_entry(keys, entry_sources, entry_positions, selected_indices,
