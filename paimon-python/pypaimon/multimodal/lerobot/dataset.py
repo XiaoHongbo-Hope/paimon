@@ -424,6 +424,13 @@ class PaimonDatasetReader(ABC):
                 self.return_uint8,
             )
 
+        video_windows = _decode_video_windows(
+            plans, rows, getattr(self, "_video_collators", ()),
+            self._features, self.return_uint8)
+        for group in row_groups:
+            for row in group.values():
+                for key in video_windows:
+                    row.pop(key, None)
         _decode_video_rows(
             row_groups, getattr(self, "_video_collators", ()))
         converted = {
@@ -439,7 +446,10 @@ class PaimonDatasetReader(ABC):
 
         import torch
         visual_windows = _stack_visual_windows(
-            plans, converted, self._visual_keys) if plans[0]["windows"] else {}
+            plans, converted, [key for key in self._visual_keys
+                               if key not in video_windows]
+        ) if plans[0]["windows"] else {}
+        visual_windows.update(video_windows)
         duplicates = _duplicate_indices(plans)
         result = []
         for offset, plan in enumerate(plans):
@@ -1312,6 +1322,63 @@ def _attach_task_labels(rows, task_names, subtask_names):
         if subtask_names is not None:
             subtask_index = operator.index(row["subtask_index"])
             row["subtask"] = subtask_names[subtask_index]
+
+
+def _decode_video_windows(plans, rows, collators, features, return_uint8):
+    import torch
+
+    tasks = [c for c in collators if c.video_column in plans[0]["windows"]]
+    if not tasks or torch.get_num_threads() > 1:
+        return {}
+    grad_enabled = torch.is_grad_enabled()
+    inference_enabled = torch.is_inference_mode_enabled()
+
+    def decode(collator):
+        collator._ensure_process_local_cache()
+        key = collator.video_column
+        descriptors = {
+            position: collator._prepare_row(row)[1]
+            for position, row in rows.items() if key in row
+        }
+        requests = {}
+        for offset, plan in enumerate(plans):
+            window = [descriptors[p] for p in plan["windows"][key]]
+            if not window or any(d is None for d in window):
+                return key, None
+            payload = window[0].payload_descriptor
+            # Cross-file windows use the regular frame assembly path.
+            if any(d.payload_descriptor != payload for d in window):
+                return key, None
+            requests.setdefault(payload, []).append((
+                offset, [d.frame_index for d in window]))
+
+        output = [None] * len(plans)
+        with torch.inference_mode(inference_enabled), \
+                torch.set_grad_enabled(grad_enabled):
+            for payload, windows in requests.items():
+                decoder = collator._decoder(payload)
+                get_frames = getattr(decoder, "get_frames_at", None)
+                if not callable(get_frames):
+                    return key, None
+                for offset, indices in windows:
+                    frames = get_frames(indices=indices).data
+                    if (not torch.is_tensor(frames) or frames.ndim != 4
+                            or len(frames) != len(indices)):
+                        raise ValueError("Video decoder must return one frame per index.")
+                    _video_tensor(frames[0], features[key], return_uint8=True)
+                    frames = frames.clone(memory_format=torch.contiguous_format)
+                    if frames.dtype == torch.uint8 and not return_uint8:
+                        frames = frames.float().div_(255)
+                    output[offset] = frames
+        return key, output
+
+    if len(tasks) == 1:
+        decoded = [decode(tasks[0])]
+    else:
+        with ThreadPoolExecutor(
+                max_workers=min(len(tasks), _MAX_VISUAL_WORKERS)) as executor:
+            decoded = list(executor.map(decode, tasks))
+    return {key: windows for key, windows in decoded if windows is not None}
 
 
 def _stack_visual_windows(plans, rows, visual_keys):

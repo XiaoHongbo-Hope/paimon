@@ -48,6 +48,7 @@ from pypaimon.multimodal.lerobot.dataset import (
     _PyAVVideoDecoder,
     _arrow_rows,
     _decode_video_rows,
+    _decode_video_windows,
     _image_tensor,
     _index_names,
     _open_video_decoder,
@@ -949,6 +950,57 @@ class LeRobotValidationTest(unittest.TestCase):
         self.assertEqual(torch.uint8, sample["observation.image"].dtype)
         self.assertEqual([3, 4, 5], list(
             sample["observation.image"].shape))
+
+    def test_video_windows_decode_directly_and_fall_back(self):
+        try:
+            import torch
+        except ImportError as error:
+            self.skipTest(str(error))
+        from pypaimon.multimodal.video import VideoFrameCollator
+        from pypaimon.table.row.blob import VideoFrameDescriptor
+
+        key = "camera"
+        feature = {key: {"dtype": "video", "shape": [4, 5, 3]}}
+        rows = {i: {key: VideoFrameDescriptor("a.video", 0, 1, i).serialize()}
+                for i in range(2)}
+        plans = [{"windows": {key: [1, 0, 0]}}] * 2
+        pixels = torch.arange(120).reshape(2, 4, 5, 3).to(torch.uint8)
+        frames = pixels.permute(0, 3, 1, 2)
+        batch = frames[[1, 0, 0]].contiguous()
+        decoder = SimpleNamespace(get_frames_at=Mock(
+            return_value=SimpleNamespace(data=batch)))
+        collator = VideoFrameCollator(
+            SimpleNamespace(file_io=Mock()), video_column=key,
+            decoder_factory=Mock(), decode_fn=Mock())
+        with patch.object(collator, "_decoder", return_value=decoder) as open_decoder, \
+                patch("torch.get_num_threads", return_value=1):
+            for uint8 in (True, False):
+                result = _decode_video_windows(
+                    plans, rows, [collator], feature, uint8)[key]
+                expected = batch if uint8 else batch.float().div(255)
+                self.assertTrue(torch.equal(result[0], expected))
+                self.assertTrue(result[0].is_contiguous())
+                result[0][1].zero_()
+                self.assertTrue(torch.equal(result[0][2], expected[2]))
+                self.assertTrue(torch.equal(result[1], expected))
+                self.assertTrue(torch.equal(batch, frames[[1, 0, 0]]))
+            decoder.get_frames_at.assert_called_with(indices=[1, 0, 0])
+
+            open_decoder.reset_mock()
+            mixed = dict(rows)
+            mixed[1] = {key: VideoFrameDescriptor("b.video", 0, 1, 0).serialize()}
+            self.assertEqual({}, _decode_video_windows(
+                plans, mixed, [collator], feature, True))
+            open_decoder.assert_not_called()
+            self.assertEqual({}, _decode_video_windows(
+                plans, {0: {key: None}, 1: rows[1]}, [collator], feature, True))
+            open_decoder.return_value = SimpleNamespace()
+            self.assertEqual({}, _decode_video_windows(
+                plans, rows, [collator], feature, True))
+            open_decoder.return_value = decoder
+            decoder.get_frames_at.return_value = SimpleNamespace(data=batch[:1])
+            with self.assertRaisesRegex(ValueError, "one frame per index"):
+                _decode_video_windows(plans, rows, [collator], feature, True)
 
     def test_visual_windows_preserve_order_padding_and_isolation(self):
         try:
