@@ -302,6 +302,18 @@ jobs:
             pypaimon/tests/multimodal_lerobot_writer_test.py::PaimonLeRobotWriterTest::test_multiframe_boolean_statistics_preserve_extrema \
             pypaimon/tests/multimodal_lerobot_writer_test.py::PaimonLeRobotWriterTest::test_multiframe_int64_statistics_preserve_extrema
 
+      - name: Test indexed TorchCodec (no skips)
+        working-directory: paimon-python
+        run: |
+          python -c 'import av; from torchcodec.decoders import VideoDecoder'
+          python -m pytest -q pypaimon/tests/indexed_torchcodec_test.py --junitxml=indexed-torchcodec.xml
+          python - <<'PYTEST_REPORT'
+          import xml.etree.ElementTree as ET
+          cases = list(ET.parse("indexed-torchcodec.xml").iter("testcase"))
+          assert cases, "No indexed TorchCodec tests ran"
+          assert not any(case.find("skipped") is not None for case in cases), "Indexed TorchCodec tests must not skip"
+          PYTEST_REPORT
+
   torch:
     name: PyTorch / Python 3.10
     timeout-minutes: 60
