@@ -462,8 +462,8 @@ class VideoKeyframeIndex:
     def open(cls, read_at, length, payload_length=None):
         if length < 9:
             raise ValueError("Invalid video keyframe index length.")
-        # Keep encoded bytes bounded independently of the decoded index size.
-        prefix_size = length if length <= _IndexedKeyframes.EAGER_BYTES else min(length, 64 * 1024)
+        # Read the header before deciding whether the full index fits in memory.
+        prefix_size = min(length, 64 * 1024)
         prefix = read_at(0, prefix_size)
         if len(prefix) != prefix_size:
             raise ValueError("Invalid video keyframe index: truncated read.")
@@ -497,6 +497,8 @@ class VideoKeyframeIndex:
         pages = (count - 1) // _PagedKeyframes.PAGE_ENTRIES + 1
         if offset + pages * (_IndexedKeyframes.DIRECTORY.size + 1) > length:
             raise ValueError("Invalid video keyframe index entries length.")
+        if max(length, count * cls.ENTRY.size) <= _IndexedKeyframes.EAGER_BYTES:
+            prefix += read(len(prefix), length - len(prefix))
         ranges = cls._metadata(cls.METADATA_RANGE.iter_unpack(
             read(cls.HEADER.size, metadata_count * 16)), payload_length)
         result = cls.__new__(cls)

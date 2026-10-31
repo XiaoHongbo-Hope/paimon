@@ -342,17 +342,34 @@ class VideoKeyframeIndexTest(unittest.TestCase):
     def test_small_indexes_load_once(self):
         for count in (4096, 65536):
             with VideoKeyframeIndex([], ((i, i, i) for i in range(count))) as original:
-                data = original.serialize()
-            read = mock.Mock(side_effect=lambda o, n: data[o:o + n])
-            with VideoKeyframeIndex.open(read, len(data)) as index:
-                self.assertEqual(1, read.call_count)
-                self.assertEqual(count * 24, len(index.keyframes.eager))
-                for i in (0, count // 2, count - 1):
-                    self.assertEqual(i, index.preceding(i))
-                    self.assertEqual((i, i, i), index.keyframes[i])
-                self.assertEqual(1, read.call_count)
-                self.assertIsNone(index.keyframes.read_at)
-                self.assertFalse(index.keyframes.cache)
+                for codec in ('none', 'delta-zlib'):
+                    data = original.serialize(codec)
+                    read = mock.Mock(side_effect=lambda o, n: data[o:o + n])
+                    with VideoKeyframeIndex.open(read, len(data)) as index:
+                        calls = read.call_count
+                        self.assertEqual(1 if len(data) <= 64 * 1024 else 2, calls)
+                        self.assertEqual(count * 24, len(index.keyframes.eager))
+                        for i in (0, count // 2, count - 1):
+                            self.assertEqual(i, index.preceding(i))
+                            self.assertEqual((i, i, i), index.keyframes[i])
+                        self.assertEqual(calls, read.call_count)
+                        self.assertIsNone(index.keyframes.read_at)
+                        self.assertFalse(index.keyframes.cache)
+
+    def test_large_compressed_index_keeps_only_bounded_prefix(self):
+        count = 1_000_000
+        with VideoKeyframeIndex([], ((i, i, i) for i in range(count))) as original:
+            data = original.serialize()
+        self.assertGreater(len(data), 64 * 1024)
+        self.assertLess(len(data), _IndexedKeyframes.EAGER_BYTES)
+        read = mock.Mock(side_effect=lambda o, n: data[o:o + n])
+        with VideoKeyframeIndex.open(read, len(data)) as index:
+            read.assert_called_once_with(0, 64 * 1024)
+            self.assertIsNone(index.keyframes.eager)
+            for i in range(0, count, 4096):
+                self.assertEqual((i, i, i), index.keyframes[i])
+            self.assertLessEqual(sum(map(len, index.keyframes.cache.values())), 1024 * 1024)
+            self.assertLessEqual(max(call.args[1] for call in read.call_args_list), 64 * 1024)
 
     def test_large_index_directory_is_read_once(self):
         with VideoKeyframeIndex([], ((i, i, i) for i in range(100_000))) as original:
