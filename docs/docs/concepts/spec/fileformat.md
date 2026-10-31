@@ -459,19 +459,20 @@ Each directory record stores the index-relative page offset (8 bytes), encoded l
 uncompressed CRC32 (4), first and last triples (48), and CRC32 of the preceding 64 bytes (4).
 Pages follow the directory contiguously and fill the remainder of the index.
 
-Codec `0` stores row-major triples. Codec `1` stores three contiguous columns (ordinal, PTS,
-position): each starts with its absolute value followed by differences modulo 2^64, all as
-little-endian 64-bit words. Each page is independently zlib-compressed. Decoding uses cumulative
-addition modulo 2^64 and restores signed int64 row-major triples before CRC32 and ordering checks.
-The decoded size must be exactly `entry_count * 24`; trailing or concatenated zlib streams are
-invalid. Encoded pages are at most `4,096 * 24 + 64` bytes. Other codec values are reserved.
+- Codec `0`: uncompressed row-major triples.
+- Codec `1`: independently zlib-compressed pages of three columns (ordinal, PTS, position).
+  Each column stores its first value and successive deltas as little-endian uint64 words,
+  using arithmetic modulo 2^64. Decode by cumulative addition modulo 2^64, then restore
+  signed int64 row-major triples for CRC32 and ordering checks.
 
-Ordinals, PTS values and packet positions strictly increase; the first ordinal is zero.
-The index covers the first video stream; its time base remains in the video.
-Readers check accessed pages against their directory endpoints and adjacent records;
-writers validate all supported pages. Unknown versions or codecs fall back to scanning
-and are preserved during rewrite; checksum or ordering errors fail. Metadata ranges are
-limited to 65,536.
+Decoded pages must contain exactly `entry_count * 24` bytes; encoded pages cannot exceed
+`4,096 * 24 + 64` bytes. Trailing or concatenated zlib streams are invalid.
+
+Ordinals, PTS and packet positions strictly increase from ordinal zero. The index covers the
+first video stream, using its time base. Metadata ranges are limited to 65,536.
+Readers validate accessed pages against directory endpoints and adjacent records; writers
+validate all supported pages. Unknown versions/codecs use scan fallback and survive rewrite;
+checksum or ordering errors fail.
 
 An Arrow/data-file cell stores a separately versioned, little-endian `VideoFrameDescriptor`:
 

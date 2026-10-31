@@ -159,8 +159,8 @@ frames.add_video(video, episode_43_rows)
 PyAV indexes supported ISO BMFF videos (e.g. MP4); other decodable videos fall back
 to scanning. Index generation uses temporary disk.
 
-`video.index.compression` defaults to `delta-zlib`; use `none` for uncompressed indexes.
-Readers detect the encoding; rewrites preserve it. Video bytes are unchanged.
+`video.index.compression`: `delta-zlib` (default) or `none`. Readers auto-detect the
+encoding; rewrites preserve it. Compression applies only to indexes, not video bytes.
 
 The writer deduplicates exact payload descriptor identity inside each `.video`
 file. Its video grouping policy coordinates normal, BLOB, and vector rolling
