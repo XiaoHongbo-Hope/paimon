@@ -77,10 +77,11 @@ def load_from_lerobot(
     A new target table is created from LeRobot metadata. Episode, task, and
     info/stats metadata are stored in companion Paimon tables. If provided,
     ``tag_name`` pins all components to their imported snapshots.
-    Multiple sources require ``parallelism=1`` and matching training features.
+    Multiple sources require matching training features.
     FileIO URI credentials come only from ``source_options`` and are not
-    inherited from the target Catalog. ``parallelism > 1`` distributes Episode
-    groups on an initialized Ray cluster. All workers need source and target access.
+    inherited from the target Catalog. ``parallelism > 1`` uses an initialized
+    Ray cluster: one task per source for lists, Episode groups for a single source.
+    All workers need source and target access.
     """
     if sys.version_info < (3, 10):
         raise RuntimeError(
@@ -96,14 +97,12 @@ def load_from_lerobot(
     if isinstance(source, (list, tuple)):
         if not source:
             raise ValueError("LeRobot sources must not be empty.")
-        if parallelism != 1:
-            raise ValueError("Multi-source LeRobot import requires parallelism=1.")
         if tag_name is not None:
             _validate_tag_name(tag_name)
         from pypaimon.multimodal.lerobot.aggregate import _import_sources
         return _import_sources(
             connection, table_name, source, batch_size, options,
-            _validated_source_options(source_options), tag_name)
+            _validated_source_options(source_options), tag_name, parallelism)
     if parallelism > 1:
         from pypaimon.multimodal.lerobot.ray_loader import _require_ray, _ray_source_uri
         _require_ray()

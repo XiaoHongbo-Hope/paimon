@@ -126,9 +126,27 @@ def metadata(conn, suffix):
     return {r["key"]: json.loads(r["value"]) for r in rows(conn, "merged__" + suffix).to_pylist()}
 
 
-def test_merge_numbering_stats_and_training(setup):
+@pytest.fixture(scope="module")
+def ray_cluster():
+    ray = pytest.importorskip("ray")
+    ray.init(address="local", num_cpus=2, include_dashboard=False,
+             object_store_memory=100 * 1024 * 1024)
+    yield ray
+    ray.shutdown()
+
+
+@pytest.fixture
+def import_parallelism(request):
+    if request.param > 1:
+        request.getfixturevalue("ray_cluster")
+    return request.param
+
+
+@pytest.mark.parametrize("import_parallelism", [1, 2], indirect=True)
+def test_merge_numbering_stats_and_training(setup, import_parallelism):
     conn, sources = setup
-    conn.load_from_lerobot("merged", sources, batch_size=2, tag_name="train")
+    conn.load_from_lerobot("merged", sources, batch_size=2, tag_name="train",
+                           parallelism=import_parallelism)
     data = rows(conn, "merged").sort_by("index")
     assert data["index"].to_pylist() == list(range(10))
     assert data["episode_index"].to_pylist() == [0, 0, 1, 1, 1, 2, 2, 3, 3, 3]
@@ -202,7 +220,7 @@ def test_missing_stats_and_existing_target(setup):
     assert rows(conn, "merged").num_rows == 10
 
 
-@pytest.mark.parametrize("sources,parallelism", [([], 1), (["unused", "unused"], 2)])
+@pytest.mark.parametrize("sources,parallelism", [([], 1), (["unused", "unused"], 0)])
 def test_invalid_arguments_before_io(tmp_path, sources, parallelism):
     conn = pm.connect(options={"warehouse": str(tmp_path)})
     with patch("pypaimon.multimodal.lerobot.source._resolved_source", side_effect=AssertionError("source accessed")):
@@ -237,13 +255,15 @@ def test_failure_does_not_publish_root_tag(setup, failure):
     assert all(Path(uri[7:]).is_dir() for uri in sources)
 
 
-def test_video_sources_with_identical_paths(tmp_path):
+@pytest.mark.parametrize("import_parallelism", [1, 2], indirect=True)
+def test_video_sources_with_identical_paths(tmp_path, import_parallelism):
     pytest.importorskip("datasets")
     pytest.importorskip("torch")
     conn = pm.connect(options={"warehouse": str(tmp_path / "warehouse")})
     sources = [source(tmp_path / "a", video=True, value=0),
                source(tmp_path / "b", video=True, value=100)]
-    conn.load_from_lerobot("merged", sources, batch_size=2, tag_name="train")
+    conn.load_from_lerobot("merged", sources, batch_size=2, tag_name="train",
+                           parallelism=import_parallelism)
     dataset = pm.PaimonLeRobotDataset(conn.get_table("merged"), tag_name="train", video_backend="pyav")
     assert dataset[0]["camera"].mean().item() < 0.05
     assert dataset[5]["camera"].mean().item() > 0.3
@@ -322,3 +342,41 @@ def test_invalid_episode_ranges_fail_before_creation(setup):
         conn.load_from_lerobot("merged", sources)
     with pytest.raises(TableNotExistException):
         conn.get_table("merged")
+
+
+def test_ray_merge_multifile_sources_matches_serial(setup, ray_cluster):
+    conn, sources = setup
+    for uri in sources:
+        root = Path(uri[7:])
+        path = root / "data/chunk-000/file-000.parquet"
+        data = pq.read_table(path)
+        pq.write_table(data.slice(0, 2), path)
+        pq.write_table(data.slice(2), path.with_name("file-001.parquet"))
+        episodes_path = root / "meta/episodes/chunk-000/file-000.parquet"
+        episodes = pq.read_table(episodes_path)
+        episodes = episodes.set_column(
+            episodes.schema.get_field_index("data/file_index"),
+            "data/file_index", pa.array([0, 1], type=pa.int64()))
+        pq.write_table(episodes, episodes_path)
+    conn.load_from_lerobot("serial", sources, batch_size=1)
+    conn.load_from_lerobot("parallel", sources, batch_size=1, parallelism=2)
+    for suffix, key in (("", "index"), ("__episodes", "episode_index"),
+                        ("__tasks", "task_index"), ("__subtasks", "subtask_index"),
+                        ("__info", "key"), ("__stats", "key")):
+        assert rows(conn, "serial" + suffix).sort_by(key).equals(
+            rows(conn, "parallel" + suffix).sort_by(key))
+
+
+def test_ray_worker_failure_does_not_commit(setup, ray_cluster):
+    conn, sources = setup
+    path = Path(sources[1][7:]) / "data/chunk-000/file-000.parquet"
+    data = pq.read_table(path)
+    data = data.set_column(data.schema.get_field_index("index"), "index",
+                           pa.array([9, 1, 2, 3, 4], type=pa.int64()))
+    pq.write_table(data, path)
+    with pytest.raises(Exception, match="index"):
+        conn.load_from_lerobot("merged", sources, parallelism=2, tag_name="train")
+    table = conn.get_table("merged").raw_table
+    assert table.snapshot_manager().get_latest_snapshot() is None
+    assert not table.tag_manager().tag_exists("train")
+    assert all(Path(uri[7:]).is_dir() for uri in sources)

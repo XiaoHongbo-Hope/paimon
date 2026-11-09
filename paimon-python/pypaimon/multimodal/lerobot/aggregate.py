@@ -249,10 +249,14 @@ def _merged_episodes(plans, schema):
 
 
 def _import_sources(connection, table_name, sources, batch_size, options,
-                    source_options, tag_name):
+                    source_options, tag_name, parallelism=1):
     from functools import partial
     from pypaimon.multimodal.lerobot.api import _create_target_table, _validated_counts
 
+    if parallelism > 1:
+        from pypaimon.multimodal.lerobot.ray_loader import _require_ray, _ray_source_uri
+        _require_ray()
+        sources = [_ray_source_uri(source) for source in sources]
     _validate_source_kerberos(sources, source_options, "LeRobot")
     with ExitStack() as stack:
         plans = []
@@ -283,11 +287,16 @@ def _import_sources(connection, table_name, sources, batch_size, options,
         tables = _prepare_metadata_tables(connection, table.raw_table, metadata)
         messages = []
         try:
+            if parallelism > 1:
+                from pypaimon.multimodal.lerobot.ray_loader import _prepare_sources_ray
+                messages = _prepare_sources_ray(
+                    table.raw_table, plans, source_options, batch_size, parallelism)
             for plan in plans:
-                messages.extend(_prepare_dataset(
-                    table.raw_table, plan["dataset"], plan["info"], plan["source"],
-                    plan["schema"], batch_size, plan["metadata"], plan["videos"],
-                    transform=partial(_transform_frames, plan)))
+                if parallelism == 1:
+                    messages.extend(_prepare_dataset(
+                        table.raw_table, plan["dataset"], plan["info"], plan["source"],
+                        plan["schema"], batch_size, plan["metadata"], plan["videos"],
+                        transform=partial(_transform_frames, plan)))
                 plan["dataset_resources"].close()
                 plan["dataset"] = None
         except BaseException:

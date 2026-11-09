@@ -71,10 +71,13 @@ conn.load_from_lerobot(
 )
 ```
 
-Multi-source import requires `parallelism=1`, matching FPS, robot type and
+Multi-source import requires matching FPS, robot type and
 training features. It renumbers global frames and Episodes, unifies task and
 subtask text, and preserves Episode-local frame numbers and timestamps. Videos
 remain separate payloads. Source access uses the same `source_options`.
+Use `ray.init()` and `parallelism=N` to import sources concurrently, one task
+per source and at most N tasks running. Parallel sources
+must be FileIO URIs or directories accessible to every worker.
 
 The merged split is `train: 0:<total_episodes>`, following LeRobot aggregation.
 Mean and variance are weighted by sample counts; renumbered fields are
