@@ -238,6 +238,33 @@ def test_merge_ignores_producer_metadata(setup, component):
         assert restored.index.tolist() == expected
 
 
+@pytest.mark.parametrize("custom_source", [0, 1])
+def test_merge_normalizes_task_text_columns(setup, custom_source):
+    conn, sources = setup
+    root = Path(sources[custom_source][7:]) / "meta"
+    for kind in ("task", "subtask"):
+        path = root / (kind + "s.parquet")
+        frame = pq.read_table(path).to_pandas()
+        frame.index.name = "instruction"
+        pq.write_table(pa.Table.from_pandas(frame), path)
+    conn.load_from_lerobot("merged", sources)
+    data = rows(conn, "merged").sort_by("index")
+    assert data["task_index"].to_pylist() == [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+    assert data["subtask_index"].to_pylist() == [0, 1, 0, 1, 0, 1, 2, 1, 2, 1]
+    for kind, expected in (("task", ["pick", "place", "stack"]),
+                           ("subtask", ["reach", "grasp", "release"])):
+        target = conn.catalog.get_table(conn._identifier("merged__" + kind + "s"))
+        table = rows(conn, "merged__" + kind + "s").sort_by(kind + "_index")
+        restored = _restore_pandas_metadata(target, table).to_pandas()
+        assert restored.index.tolist() == expected
+        assert restored.index.name == ("instruction" if custom_source == 0 else kind)
+    pytest.importorskip("datasets")
+    pytest.importorskip("torch")
+    dataset = pm.PaimonLeRobotDataset(conn.get_table("merged"))
+    assert dataset[5]["task"] == "place"
+    assert dataset[7]["task"] == "stack"
+
+
 @pytest.mark.parametrize("field", ["fps", "robot_type", "features", "extension", "stats"])
 def test_incompatible_sources_fail_before_creation(setup, field):
     conn, sources = setup

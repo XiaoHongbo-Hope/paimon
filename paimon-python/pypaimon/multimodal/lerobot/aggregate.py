@@ -116,12 +116,16 @@ def _vocabulary(plans, kind):
         raise ValueError("Multi-source %s metadata requires only index and text." % kind)
     rows, by_text = [], {}
     for ordinal, (plan, table) in enumerate(zip(plans, tables)):
-        if (not table.schema.equals(schema, check_metadata=False)
-                or _pandas_index_column(table.schema, singular) != label):
+        source_label = _pandas_index_column(table.schema, singular)
+        if (set(table.column_names) != {index_name, source_label}
+                or not table.schema.field(index_name).equals(
+                    schema.field(index_name), check_metadata=False)
+                or not table.schema.field(source_label).with_name(label).equals(
+                    schema.field(label), check_metadata=False)):
             raise ValueError("LeRobot source %d has incompatible %s schema." % (ordinal, kind))
         mapping = {}
         for row in sorted(table.to_pylist(), key=lambda row: row[index_name]):
-            text = row[label]
+            text = row[source_label]
             if text not in by_text:
                 by_text[text] = len(rows)
                 rows.append({index_name: len(rows), label: text})
