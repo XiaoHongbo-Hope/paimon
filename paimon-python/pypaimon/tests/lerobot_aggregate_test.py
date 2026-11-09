@@ -188,6 +188,32 @@ def test_merge_numbering_stats_and_training(setup, import_parallelism):
     assert selected[0]["episode_index"].item() == 2
 
 
+@pytest.mark.parametrize("component", ["tasks", "subtasks", "episodes"])
+def test_merge_ignores_producer_metadata(setup, component):
+    conn, sources = setup
+    root = Path(sources[1][7:]) / "meta"
+    path = root / ("episodes/chunk-000/file-000.parquet" if component == "episodes"
+                   else component + ".parquet")
+    table = pq.read_table(path)
+    schema_metadata = dict(table.schema.metadata or {})
+    if component == "episodes":
+        schema_metadata[b"producer"] = b"another-exporter"
+    else:
+        pandas_metadata = json.loads(schema_metadata[b"pandas"])
+        pandas_metadata["pandas_version"] = "1.5.0"
+        schema_metadata[b"pandas"] = json.dumps(pandas_metadata).encode()
+    pq.write_table(table.replace_schema_metadata(schema_metadata), path)
+    conn.load_from_lerobot("merged", sources)
+    assert rows(conn, "merged").num_rows == 10
+    assert rows(conn, "merged__episodes").num_rows == 4
+    for kind, expected in (("task", ["pick", "place", "stack"]),
+                           ("subtask", ["reach", "grasp", "release"])):
+        target = conn.catalog.get_table(conn._identifier("merged__" + kind + "s"))
+        data = rows(conn, "merged__" + kind + "s").sort_by(kind + "_index")
+        restored = _restore_pandas_metadata(target, data).to_pandas()
+        assert restored.index.tolist() == expected
+
+
 @pytest.mark.parametrize("field", ["fps", "robot_type", "features", "extension", "stats"])
 def test_incompatible_sources_fail_before_creation(setup, field):
     conn, sources = setup

@@ -116,7 +116,8 @@ def _vocabulary(plans, kind):
         raise ValueError("Multi-source %s metadata requires only index and text." % kind)
     rows, by_text = [], {}
     for ordinal, (plan, table) in enumerate(zip(plans, tables)):
-        if not table.schema.equals(schema, check_metadata=True):
+        if (not table.schema.equals(schema, check_metadata=False)
+                or _pandas_index_column(table.schema, singular) != label):
             raise ValueError("LeRobot source %d has incompatible %s schema." % (ordinal, kind))
         mapping = {}
         for row in sorted(table.to_pylist(), key=lambda row: row[index_name]):
@@ -157,7 +158,7 @@ def _plan_merge(plans):
         if not plan["schema"].equals(first["schema"], check_metadata=False):
             raise ValueError("LeRobot source %d has incompatible frame schema." % ordinal)
         if not plan["metadata"]["episodes_schema"].equals(
-                metadata["episodes_schema"], check_metadata=True):
+                metadata["episodes_schema"], check_metadata=False):
             raise ValueError("LeRobot source %d has incompatible Episode schema." % ordinal)
         # Validate every Episode before creating any target table.
         try:
