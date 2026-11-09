@@ -532,9 +532,11 @@ class PaimonDatasetReader(ABC):
                 if key in visual_windows:
                     item[key] = visual_windows[key][offset]
                 else:
-                    item[key] = torch.stack([
-                        converted[position][key] for position in positions
-                    ])
+                    values = [converted[position][key] for position in positions]
+                    if key == "subtask_index" and _contains_none(values):
+                        item[key] = values
+                    else:
+                        item[key] = torch.stack(values)
             item.update(plan["padding"])
             if self.image_transforms is not None:
                 for key in self._visual_keys:
@@ -1405,11 +1407,16 @@ def _validate_control_row(index, row, validation_context, tolerance_s):
             % (index, episode))
     subtasks = validation_context["subtask_names"]
     if subtasks is not None:
-        subtask = _control_index(row, "subtask_index", index)
-        if subtask not in subtasks:
+        if "subtask_index" not in row:
             raise ValueError(
-                "Paimon subtask_index at LeRobot index %d is absent from "
-                "metadata: %r." % (index, subtask))
+                "Paimon subtask_index at LeRobot index %d is missing."
+                % index)
+        if row["subtask_index"] is not None:
+            subtask = _control_index(row, "subtask_index", index)
+            if subtask not in subtasks:
+                raise ValueError(
+                    "Paimon subtask_index at LeRobot index %d is absent from "
+                    "metadata: %r." % (index, subtask))
 
 
 def _control_index(row, name, index):
@@ -1483,8 +1490,9 @@ def _attach_task_labels(rows, task_names, subtask_names):
         task_index = operator.index(row["task_index"])
         row["task"] = task_names[task_index]
         if subtask_names is not None:
-            subtask_index = operator.index(row["subtask_index"])
-            row["subtask"] = subtask_names[subtask_index]
+            subtask_index = row["subtask_index"]
+            row["subtask"] = (None if subtask_index is None
+                              else subtask_names[operator.index(subtask_index)])
 
 
 def _decode_video_windows(
@@ -1677,15 +1685,28 @@ def _decode_video_windows_with_pool(
 def _collate_lerobot_batch(rows, video_windows):
     from torch.utils.data import default_collate
 
-    if not video_windows:
+    nullable = {
+        key: [row[key] for row in rows]
+        for key in ("subtask_index", "subtask")
+        if key in rows[0] and any(
+            _contains_none(row[key]) for row in rows)
+    }
+    if not video_windows and not nullable:
         return default_collate(rows)
     remaining = [{
         key: value for key, value in row.items()
-        if key not in video_windows
+        if key not in video_windows and key not in nullable
     } for row in rows]
     batch = default_collate(remaining)
+    batch.update(nullable)
     batch.update(video_windows)
     return batch
+
+
+def _contains_none(value):
+    if isinstance(value, (list, tuple)):
+        return any(_contains_none(item) for item in value)
+    return value is None
 
 
 def _stack_visual_windows(plans, rows, visual_keys):
@@ -1724,7 +1745,8 @@ def _torch_row(row, features, return_uint8=False):
         elif feature.get("dtype") == "video":
             result[key] = _video_tensor(
                 value, feature, return_uint8=return_uint8)
-        elif feature.get("dtype") != "string" and not torch.is_tensor(value):
+        elif value is not None and feature.get("dtype") != "string" \
+                and not torch.is_tensor(value):
             dtype = getattr(torch, _TORCH_DTYPE_NAMES[feature.get("dtype")])
             result[key] = torch.tensor(value, dtype=dtype)
     return result
