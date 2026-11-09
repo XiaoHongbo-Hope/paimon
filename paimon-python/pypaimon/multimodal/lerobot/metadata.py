@@ -18,6 +18,7 @@
 
 from array import array
 import json
+import math
 import numbers
 from pathlib import Path
 
@@ -133,7 +134,7 @@ class _EpisodeIndex:
 
 
 def _load_dataset_metadata(dataset, info, source):
-    fps = _positive_integer(info.get("fps"), "fps")
+    fps = _positive_integer_fps(info.get("fps"))
     stats = _source_stats(dataset, source)
     stats_table = None if stats is None else _metadata_table(stats)
     tasks_table = _source_tasks(
@@ -792,6 +793,17 @@ def _positive_integer(value, name):
     if result <= 0:
         raise ValueError("LeRobot metadata %s must be positive." % name)
     return result
+
+
+def _positive_integer_fps(value):
+    item = getattr(value, "item", None)
+    if callable(item):
+        value = item()
+    if isinstance(value, numbers.Real) and not isinstance(value, bool) \
+            and not isinstance(value, numbers.Integral) \
+            and math.isfinite(value) and value == int(value):
+        value = int(value)
+    return _positive_integer(value, "fps")
 
 
 def _integer(value, name):
