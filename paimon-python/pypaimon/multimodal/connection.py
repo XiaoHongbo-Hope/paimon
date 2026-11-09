@@ -142,7 +142,7 @@ class MultimodalConnection:
             source_options=None,
             tag_name=None,
             parallelism=1) -> None:
-        """Import LeRobot Dataset v3 into a new Paimon table group."""
+        """Import one or an ordered list of LeRobot v3 sources into a new table group."""
         from pypaimon.multimodal.lerobot import load_from_lerobot
         load_from_lerobot(
             self,

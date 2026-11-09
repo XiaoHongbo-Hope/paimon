@@ -61,6 +61,33 @@ The call returns `None` on success. Omitting `tag_name` imports the tables
 without creating tags. The one-time importer requires a new target table and
 a non-empty source dataset; subsequent table edits use the normal Paimon APIs.
 
+Pass an ordered list to merge datasets directly into one new table group:
+
+```python
+conn.load_from_lerobot(
+    "robot_all",
+    ["oss://bucket/dataset_a", "oss://bucket/dataset_b"],
+    tag_name="training-v1",
+)
+```
+
+Multi-source import requires `parallelism=1`, matching FPS, robot type and
+training features. It renumbers global frames and Episodes, unifies task and
+subtask text, and preserves Episode-local frame numbers and timestamps. Videos
+remain separate payloads. Source access uses the same `source_options`.
+
+The merged split is `train: 0:<total_episodes>`, following LeRobot aggregation.
+Mean and variance are weighted by sample counts; renumbered fields are
+recomputed. Global quantiles and renumbered-field Episode quantiles are omitted;
+quantile-based normalization requires recomputing them. Stats must exist in every source or
+none; conflicting custom info fields are rejected. Source file paths and counts
+are not used as the merged dataset's storage layout.
+
+All components must finish before the root training Tag is published. A failed
+import may leave tables and component Tags; inspect and remove those results or
+use a new target name before retrying. Import does not append to existing groups
+or resume failed runs.
+
 For FileIO URIs, pass credentials through `source_options`:
 
 ```python
