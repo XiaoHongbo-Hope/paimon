@@ -28,7 +28,6 @@ from pypaimon.multimodal.lerobot.metadata import (
     _load_dataset_metadata,
     _managed_table_options,
     _prepare_metadata_tables,
-    _positive_integer,
     _positive_integer_fps,
     _commit_metadata,
     _validate_tag_name,
