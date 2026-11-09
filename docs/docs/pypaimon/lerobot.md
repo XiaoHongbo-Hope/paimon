@@ -35,6 +35,10 @@ and optional `<table>__stats` and `<table>__subtasks` companion tables. Task tex
 remains in the task table; frames retain `task_index`. All imported tables use
 Data Evolution with row tracking.
 
+Frames with a null `subtask_index` are imported. `PaimonLeRobotDataset[index]`
+returns `None` for `subtask_index` and `subtask`; `to_dataloader()` preserves
+null positions in those fields as lists when batching unlabelled frames.
+
 Info and stats use `key STRING, value STRING`: each top-level info property or
 stats feature becomes one row. Each value is JSON-encoded, preserving nested
 objects, arrays, nulls, and scalar types. Decode it with `json.loads`; for example,

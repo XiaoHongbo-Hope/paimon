@@ -2349,6 +2349,13 @@ class LeRobotValidationTest(unittest.TestCase):
             _validate_frame_controls(
                 batch, 30, 0, 0, 0, [0], range(2))
 
+        nullable = batch.set_column(
+            batch.schema.get_field_index("subtask_index"),
+            "subtask_index", pa.array([None], type=pa.int64()))
+        self.assertEqual(
+            {0}, _validate_frame_controls(
+                nullable, 30, 0, 0, 0, [0], range(2)))
+
     def test_metadata_writer_closes_after_commit_creation_failure(self):
         table = Mock()
         builder = table.new_batch_write_builder.return_value
@@ -4327,6 +4334,8 @@ class LeRobotImportTest(unittest.TestCase):
                 for index in range(data.num_rows)
             ]
             next_subtask += data.num_rows
+            if next_subtask == 5:
+                values[-1] = None
             pq.write_table(data.append_column(
                 "subtask_index",
                 pa.array(values, type=pa.int64()),
@@ -4344,7 +4353,7 @@ class LeRobotImportTest(unittest.TestCase):
         self.assertNotIn("subtask", [
             field.name for field in frames.raw_table.fields
         ])
-        self.assertEqual([0, 1, 0, 1, 0], frames.scan().select([
+        self.assertEqual([0, 1, 0, 1, None], frames.scan().select([
             "index", "subtask_index"
         ]).to_arrow().sort_by("index").column("subtask_index").to_pylist())
         subtasks_table = self.connection.catalog.get_table(
@@ -4367,6 +4376,27 @@ class LeRobotImportTest(unittest.TestCase):
         self.assertEqual(["reach", "grasp"], list(
             dataset.meta.subtasks.index))
         self.assertEqual("reach", dataset[0]["subtask"])
+        self.assertIsNone(dataset[4]["subtask_index"])
+        self.assertIsNone(dataset[4]["subtask"])
+        self.assertEqual(["grasp", None], [
+            row["subtask"] for row in dataset.__getitems__([3, 4])
+        ])
+        batch = next(iter(dataset.to_dataloader(
+            batch_size=5, shuffle=False, num_workers=0)))
+        self.assertEqual([0, 1, 2, 3, 4], batch["index"].tolist())
+        self.assertEqual([0, 1, 0, 1, None], [
+            None if value is None else int(value)
+            for value in batch["subtask_index"]
+        ])
+        self.assertEqual(["reach", "grasp", "reach", "grasp", None],
+                         batch["subtask"])
+        windowed = pmm.PaimonLeRobotDataset(
+            frames, tag_name="training",
+            delta_timestamps={"subtask_index": [-0.1, 0.0]})
+        self.assertEqual([1, None], [
+            None if value is None else int(value)
+            for value in windowed[4]["subtask_index"]
+        ])
         self.assertEqual(
             1,
             self.connection.catalog.get_tag(
