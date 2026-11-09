@@ -29,7 +29,7 @@ from pypaimon.multimodal.lerobot.loader import (
 )
 from pypaimon.multimodal.lerobot.metadata import (
     _append_arrow_tables, _commit_metadata, _load_dataset_metadata,
-    _metadata_table, _positive_integer_fps, _prepare_metadata_tables,
+    _metadata_table, _positive_integer, _prepare_metadata_tables,
     _source_episode_tables, _validated_episode_tables,
 )
 from pypaimon.multimodal.lerobot.schema import (
@@ -116,7 +116,7 @@ def _vocabulary(plans, kind):
         raise ValueError("Multi-source %s metadata requires only index and text." % kind)
     rows, by_text = [], {}
     for ordinal, (plan, table) in enumerate(zip(plans, tables)):
-        if not table.schema.equals(schema, check_metadata=False):
+        if not table.schema.equals(schema, check_metadata=True):
             raise ValueError("LeRobot source %d has incompatible %s schema." % (ordinal, kind))
         mapping = {}
         for row in sorted(table.to_pylist(), key=lambda row: row[index_name]):
@@ -266,7 +266,7 @@ def _import_sources(connection, table_name, sources, batch_size, options,
                 info = _load_hub_info(resolved)
             _require_v3(info, "source %d" % ordinal)
             _validate_info_paths(info)
-            _positive_integer_fps(info.get("fps"))
+            _positive_integer(info.get("fps"), "fps")
             _validated_counts(info, "source %d" % ordinal)
             _validate_v3_required_features(info)
             schema = _schema_from_info(info)

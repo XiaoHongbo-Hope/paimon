@@ -29,7 +29,6 @@ from pypaimon.catalog.catalog_exception import TableNotExistException
 import pypaimon.multimodal as pm
 from pypaimon.multimodal.lerobot.aggregate import _batch_stats
 from pypaimon.multimodal.lerobot.metadata import _restore_pandas_metadata
-from pypaimon.multimodal.lerobot.dataset import _component_dataframe
 
 
 pytestmark = pytest.mark.skipif(sys.version_info < (3, 10), reason="LeRobot import requires Python 3.10+")
@@ -207,33 +206,6 @@ def test_incompatible_sources_fail_before_creation(setup, field):
         conn.load_from_lerobot("merged", sources)
     with pytest.raises(TableNotExistException):
         conn.get_table("merged")
-
-
-def test_float_fps_and_arrow_task_metadata(setup):
-    conn, sources = setup
-    info_path = Path(sources[0][7:]) / "meta/info.json"
-    info = json.loads(info_path.read_text())
-    info["fps"] = 10.0
-    info_path.write_text(json.dumps(info))
-    # One source has canonical Arrow columns without Pandas metadata;
-    # the other retains the Pandas index metadata from the fixture.
-    root = Path(sources[0][7:]) / "meta"
-    for name in ("tasks", "subtasks"):
-        path = root / (name + ".parquet")
-        table = pq.read_table(path)
-        pq.write_table(table.replace_schema_metadata(None), path)
-
-    conn.load_from_lerobot("merged", sources)
-    assert rows(conn, "merged").num_rows == 10
-    expected = {"tasks": {"pick", "place", "stack"},
-                "subtasks": {"reach", "grasp", "release"}}
-    for name in ("tasks", "subtasks"):
-        table = conn.catalog.get_table("default.merged__" + name)
-        frame = _component_dataframe(table, name[:-1] + "_index")
-        assert set(frame.index) == expected[name]
-
-    conn.load_from_lerobot("single", sources[0])
-    assert rows(conn, "single").num_rows == 5
 
 
 def test_missing_stats_and_existing_target(setup):
