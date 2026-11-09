@@ -35,13 +35,9 @@ and optional `<table>__stats` and `<table>__subtasks` companion tables. Task tex
 remains in the task table; frames retain `task_index`. All imported tables use
 Data Evolution with row tracking.
 
-An imported frame may have a null `subtask_index`. The frame and its other
-features remain readable; `PaimonLeRobotDataset[index]` returns `None` for both
-`subtask_index` and `subtask` on that frame. When a
-`dataset.to_dataloader(...)` batch contains an unlabelled frame, those two
-fields are lists retaining the null positions; other fields are collated
-normally. Training that needs subtask labels must filter or label these frames
-explicitly.
+Frames with a null `subtask_index` are imported. `PaimonLeRobotDataset[index]`
+returns `None` for `subtask_index` and `subtask`; `to_dataloader()` preserves
+null positions in those fields as lists when batching unlabelled frames.
 
 Info and stats use `key STRING, value STRING`: each top-level info property or
 stats feature becomes one row. Each value is JSON-encoded, preserving nested
