@@ -71,25 +71,10 @@ conn.load_from_lerobot(
 )
 ```
 
-Multi-source import requires matching FPS, robot type and
-training features. It renumbers global frames and Episodes, unifies task and
-subtask text, and preserves Episode-local frame numbers and timestamps. Videos
-remain separate payloads. Source access uses the same `source_options`.
-Use `ray.init()` and `parallelism=N` to import sources concurrently, one task
-per source and at most N tasks running. Parallel sources
-must be FileIO URIs or directories accessible to every worker.
-
-The merged split is `train: 0:<total_episodes>`, following LeRobot aggregation.
-Mean and variance are weighted by sample counts; renumbered fields are
-recomputed. Global quantiles and renumbered-field Episode quantiles are omitted;
-quantile-based normalization requires recomputing them. Stats must exist in every source or
-none; conflicting custom info fields are rejected. Source file paths and counts
-are not used as the merged dataset's storage layout.
-
-All components must finish before the root training Tag is published. A failed
-import may leave tables and component Tags; inspect and remove those results or
-use a new target name before retrying. Import does not append to existing groups
-or resume failed runs.
+Sources must have matching FPS, robot type and training features. Global IDs and
+task vocabularies are merged; Episode-local frame numbers and timestamps stay unchanged.
+The result has one training split. Stats must exist in all sources or none;
+global and renumbered-field Episode quantiles are omitted and must be recomputed if needed.
 
 For FileIO URIs, pass credentials through `source_options`:
 
@@ -115,7 +100,8 @@ conn.load_from_lerobot("robot_data", "oss://source-bucket/lerobot_dataset",
                        parallelism=8)
 ```
 
-The default `parallelism=1` uses one process. Workers need source and target
+The default `parallelism=1` uses one process. For multiple sources, Ray runs one
+task per source, with at most `parallelism` tasks active. Workers need source and target
 storage access; pass OSS `source_options` as above. Ray accepts FileIO URIs or
 shared directories, not Hub IDs. Keep the source unchanged during import.
 Failed imports may leave partial tables; retry with a new name.
