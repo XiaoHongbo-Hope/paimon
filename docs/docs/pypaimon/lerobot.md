@@ -65,6 +65,21 @@ The call returns `None` on success. Omitting `tag_name` imports the tables
 without creating tags. The one-time importer requires a new target table and
 a non-empty source dataset; subsequent table edits use the normal Paimon APIs.
 
+Pass an ordered list to merge datasets directly into one new table group:
+
+```python
+conn.load_from_lerobot(
+    "robot_all",
+    ["oss://bucket/dataset_a", "oss://bucket/dataset_b"],
+    tag_name="training-v1",
+)
+```
+
+Sources must have matching FPS, robot type and training features. Global IDs and
+task vocabularies are merged; Episode-local frame numbers and timestamps stay unchanged.
+The result has one training split. Stats must exist in all sources or none;
+global and renumbered-field Episode quantiles are omitted and must be recomputed if needed.
+
 For FileIO URIs, pass credentials through `source_options`:
 
 ```python
@@ -89,7 +104,8 @@ conn.load_from_lerobot("robot_data", "oss://source-bucket/lerobot_dataset",
                        parallelism=8)
 ```
 
-The default `parallelism=1` uses one process. Workers need source and target
+The default `parallelism=1` uses one process. For multiple sources, Ray runs one
+task per source, with at most `parallelism` tasks active. Workers need source and target
 storage access; pass OSS `source_options` as above. Ray accepts FileIO URIs or
 shared directories, not Hub IDs. Keep the source unchanged during import.
 Failed imports may leave partial tables; retry with a new name.

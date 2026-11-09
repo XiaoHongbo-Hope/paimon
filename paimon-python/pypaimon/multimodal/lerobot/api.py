@@ -72,14 +72,16 @@ def load_from_lerobot(
         tag_name: Optional[str] = None,
         parallelism: int = 1,
 ) -> None:
-    """Import LeRobot Dataset v3 into a new Paimon table group.
+    """Import one or an ordered list of LeRobot v3 sources into a new table group.
 
     A new target table is created from LeRobot metadata. Episode, task, and
     info/stats metadata are stored in companion Paimon tables. If provided,
     ``tag_name`` pins all components to their imported snapshots.
+    Multiple sources require matching training features.
     FileIO URI credentials come only from ``source_options`` and are not
-    inherited from the target Catalog. ``parallelism > 1`` distributes Episode
-    groups on an initialized Ray cluster. All workers need source and target access.
+    inherited from the target Catalog. ``parallelism > 1`` uses an initialized
+    Ray cluster: one task per source for lists, Episode groups for a single source.
+    All workers need source and target access.
     """
     if sys.version_info < (3, 10):
         raise RuntimeError(
@@ -92,6 +94,15 @@ def load_from_lerobot(
     if isinstance(parallelism, bool) or not isinstance(parallelism, int) \
             or parallelism <= 0:
         raise ValueError("parallelism must be a positive integer.")
+    if isinstance(source, (list, tuple)):
+        if not source:
+            raise ValueError("LeRobot sources must not be empty.")
+        if tag_name is not None:
+            _validate_tag_name(tag_name)
+        from pypaimon.multimodal.lerobot.aggregate import _import_sources
+        return _import_sources(
+            connection, table_name, source, batch_size, options,
+            _validated_source_options(source_options), tag_name, parallelism)
     if parallelism > 1:
         from pypaimon.multimodal.lerobot.ray_loader import _require_ray, _ray_source_uri
         _require_ray()
@@ -115,7 +126,8 @@ def load_from_lerobot(
         _validate_v3_required_features(local_info)
         video_fields = _video_feature_names(local_info)
         LeRobotDataset = (_import_lerobot_dataset()
-                          if parallelism == 1 else None)
+                          if parallelism == 1 and resolved_source.file_io is None
+                          else None)
         dataset = _open_resolved_dataset(
             LeRobotDataset,
             resolved_source,
