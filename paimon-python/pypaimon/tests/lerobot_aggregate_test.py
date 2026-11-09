@@ -27,7 +27,7 @@ import pytest
 
 from pypaimon.catalog.catalog_exception import TableNotExistException
 import pypaimon.multimodal as pm
-from pypaimon.multimodal.lerobot.aggregate import _batch_stats
+from pypaimon.multimodal.lerobot.aggregate import _batch_stats, _transform_frames
 from pypaimon.multimodal.lerobot.metadata import _restore_pandas_metadata
 
 
@@ -124,6 +124,30 @@ def rows(conn, name):
 
 def metadata(conn, suffix):
     return {r["key"]: json.loads(r["value"]) for r in rows(conn, "merged__" + suffix).to_pylist()}
+
+
+def test_transform_frames_preserves_unlabelled_subtasks():
+    plan = {
+        "frame_offset": 5,
+        "episode_offset": 2,
+        "task_index": {0: 1},
+        "subtask_index": {0: 3},
+        "control_stats": {},
+    }
+    batch = pa.table({
+        "index": pa.array([0, 1], type=pa.int64()),
+        "episode_index": pa.array([0, 0], type=pa.int64()),
+        "task_index": pa.array([0, 0], type=pa.int64()),
+        "subtask_index": pa.array([0, None], type=pa.int64()),
+    })
+
+    converted = _transform_frames(plan, batch, 0)
+
+    assert converted["index"].to_pylist() == [5, 6]
+    assert converted["episode_index"].to_pylist() == [2, 2]
+    assert converted["task_index"].to_pylist() == [1, 1]
+    assert converted["subtask_index"].to_pylist() == [3, None]
+    assert plan["control_stats"][0]["subtask_index"]["count"] == [1]
 
 
 @pytest.fixture(scope="module")

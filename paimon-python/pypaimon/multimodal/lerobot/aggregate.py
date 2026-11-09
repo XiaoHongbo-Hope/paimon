@@ -29,7 +29,7 @@ from pypaimon.multimodal.lerobot.loader import (
 )
 from pypaimon.multimodal.lerobot.metadata import (
     _append_arrow_tables, _commit_metadata, _load_dataset_metadata,
-    _metadata_table, _positive_integer, _prepare_metadata_tables,
+    _metadata_table, _prepare_metadata_tables,
     _source_episode_tables, _validated_episode_tables,
 )
 from pypaimon.multimodal.lerobot.schema import (
@@ -221,9 +221,18 @@ def _transform_frames(plan, batch, episode):
             values = pc.add_checked(column, pa.scalar(offset, type=column.type))
         else:
             mapping = plan[name]
-            values = pa.array([mapping[value] for value in column.to_pylist()], type=column.type)
+            values = pa.array([
+                None if name == "subtask_index" and value is None
+                else mapping[value]
+                for value in column.to_pylist()
+            ], type=column.type)
         batch = batch.set_column(batch.schema.get_field_index(name), batch.schema.field(name), values)
-        stats = _batch_stats(values.to_numpy())
+        stat_values = ([value for value in values.to_pylist()
+                        if value is not None]
+                       if values.null_count else values.to_numpy())
+        if len(stat_values) == 0:
+            continue
+        stats = _batch_stats(stat_values)
         episode_stats = plan["control_stats"].setdefault(episode, {})
         episode_stats[name] = (_merge_stats([episode_stats[name], stats])
                                if name in episode_stats else stats)
@@ -267,7 +276,6 @@ def _import_sources(connection, table_name, sources, batch_size, options,
                 info = _load_hub_info(resolved)
             _require_v3(info, "source %d" % ordinal)
             _validate_info_paths(info)
-            _positive_integer(info.get("fps"), "fps")
             _validated_counts(info, "source %d" % ordinal)
             _validate_v3_required_features(info)
             schema = _schema_from_info(info)
