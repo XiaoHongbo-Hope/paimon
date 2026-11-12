@@ -2286,13 +2286,19 @@ class DedicatedFormatWriterTest(unittest.TestCase):
 
         initial = pa.Table.from_pydict({
             'id': [1, 2, 3, 4, 5],
-            'blob_data': [b'blob-1', b'blob-2', b'blob-3', b'blob-4', b'blob-5'],
+            'blob_data': [bytes([id_]) * 2048 for id_ in range(1, 6)],
         }, schema=pa_schema)
 
         write_builder = table.new_batch_write_builder()
         writer = write_builder.new_write()
         writer.write_arrow(initial)
-        write_builder.new_commit().commit(writer.prepare_commit())
+        initial_messages = writer.prepare_commit()
+        initial_blob_files = [
+            file for msg in initial_messages for file in msg.new_files
+            if file.file_name.endswith('.blob')
+        ]
+        self.assertGreater(len(initial_blob_files), 1)
+        write_builder.new_commit().commit(initial_messages)
         writer.close()
 
         row_id_builder = table.new_read_builder().with_projection(['id', '_ROW_ID'])
@@ -2323,6 +2329,11 @@ class DedicatedFormatWriterTest(unittest.TestCase):
             if file.file_name.endswith('.blob')
         ]
         self.assertGreater(len(update_blob_files), 1)
+        self.assertTrue(all(
+            file.max_sequence_number > max(
+                original.max_sequence_number for original in initial_blob_files)
+            for file in update_blob_files
+        ))
 
         update_builder.new_commit().commit(update_messages)
 
@@ -2336,6 +2347,29 @@ class DedicatedFormatWriterTest(unittest.TestCase):
             1: payload + b'0',
             2: payload + b'1',
             3: payload + b'2',
+            4: payload + b'3',
+            5: payload + b'4',
+        })
+
+        second_builder = table.new_batch_write_builder()
+        second_update = second_builder.new_update().with_update_type(['blob_data'])
+        second_messages = second_update.update_by_arrow_with_row_id(
+            pa.Table.from_pydict({
+                '_ROW_ID': pa.array([row_ids_by_id[3]], type=pa.int64()),
+                'blob_data': pa.array([b'second-update'], type=pa.large_binary()),
+            })
+        )
+        second_builder.new_commit().commit(second_messages)
+
+        result = read_builder.new_read().to_arrow(read_builder.new_scan().plan().splits())
+        by_id = {
+            row['id']: row['blob_data']
+            for row in result.select(['id', 'blob_data']).to_pylist()
+        }
+        self.assertEqual(by_id, {
+            1: payload + b'0',
+            2: payload + b'1',
+            3: b'second-update',
             4: payload + b'3',
             5: payload + b'4',
         })
@@ -2363,13 +2397,19 @@ class DedicatedFormatWriterTest(unittest.TestCase):
 
         initial = pa.Table.from_pydict({
             'id': [1, 2, 3, 4, 5],
-            'blob_data': [b'blob-1', b'blob-2', b'blob-3', b'blob-4', b'blob-5'],
+            'blob_data': [bytes([id_]) * 2048 for id_ in range(1, 6)],
         }, schema=pa_schema)
 
         write_builder = table.new_batch_write_builder()
         writer = write_builder.new_write()
         writer.write_arrow(initial)
-        write_builder.new_commit().commit(writer.prepare_commit())
+        initial_messages = writer.prepare_commit()
+        initial_blob_files = [
+            file for msg in initial_messages for file in msg.new_files
+            if file.file_name.endswith('.blob')
+        ]
+        self.assertGreater(len(initial_blob_files), 1)
+        write_builder.new_commit().commit(initial_messages)
         writer.close()
 
         row_id_builder = table.new_read_builder().with_projection(['id', '_ROW_ID'])
@@ -2428,11 +2468,11 @@ class DedicatedFormatWriterTest(unittest.TestCase):
             for row in result.select(['id', 'blob_data']).to_pylist()
         }
         self.assertEqual(by_id, {
-            1: b'blob-1',
+            1: bytes([1]) * 2048,
             2: payload + b'2',
-            3: b'blob-3',
+            3: bytes([3]) * 2048,
             4: payload + b'4',
-            5: b'blob-5',
+            5: bytes([5]) * 2048,
         })
 
     @pytest.mark.python_plan

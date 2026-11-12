@@ -1699,7 +1699,8 @@ class _TableUpdateTestBase(DataEvolutionTestBase):
         prepared_files = []
 
         def fail_after_prepare_commit(
-                new_files, first_row_id, column_names, blob_columns):
+                new_files, first_row_id, column_names, blob_columns,
+                blob_sequence_number):
             prepared_files.extend(new_files)
             raise RuntimeError("forced failure after prepare_commit")
 

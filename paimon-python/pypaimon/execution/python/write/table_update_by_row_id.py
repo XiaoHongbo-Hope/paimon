@@ -450,7 +450,7 @@ class PythonTableUpdateByRowId(RowIdUpdateInputMixin):
         batches = (self._normalize_write_data(batch) for batch in merged_batches)
         try:
             files = writer.write_batches(batches)
-            self._assign_update_file_metadata(files, first_row_id, column_names, {})
+            self._assign_update_file_metadata(files, first_row_id, column_names, {}, 0)
             if files:
                 self.commit_messages.append(CommitMessage(
                     partition=tuple(partition.values), bucket=0, new_files=files,
@@ -888,7 +888,8 @@ class PythonTableUpdateByRowId(RowIdUpdateInputMixin):
 
             if new_files:
                 self._assign_update_file_metadata(
-                    new_files, first_row_id, column_names, blob_columns)
+                    new_files, first_row_id, column_names, blob_columns,
+                    max(file.max_sequence_number for file in target_files) + 1)
                 self.commit_messages.append(
                     CommitMessage(
                         partition=partition_tuple,
@@ -915,7 +916,8 @@ class PythonTableUpdateByRowId(RowIdUpdateInputMixin):
     @staticmethod
     def _assign_update_file_metadata(new_files: List[DataFileMeta], first_row_id: int,
                                      column_names: List[str],
-                                     blob_columns: Dict[str, List[object]]):
+                                     blob_columns: Dict[str, List[object]],
+                                     blob_sequence_number: int):
         blob_ends = {
             column_name: first_row_id + len(values)
             for column_name, values in blob_columns.items()
@@ -940,10 +942,8 @@ class PythonTableUpdateByRowId(RowIdUpdateInputMixin):
                         f"[{blob_start}, {next_blob_start - 1}] exceeds target range "
                         f"[{first_row_id}, {blob_end - 1}]")
                 file.first_row_id = blob_start
-                # Only update-by-row-id blob delta files use the 0/0 sentinel;
-                # regular blob writes keep their per-row sequence range.
-                file.min_sequence_number = 0
-                file.max_sequence_number = 0
+                file.min_sequence_number = blob_sequence_number
+                file.max_sequence_number = blob_sequence_number
                 blob_starts[blob_column] = next_blob_start
             else:
                 file.first_row_id = first_row_id
